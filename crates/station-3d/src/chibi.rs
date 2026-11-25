@@ -75,6 +75,22 @@ pub struct ChibiWorker {
     pub patrol_target: Option<Vec3>,
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub struct StatusHalo;
+
+pub fn halo_material_for_anim(
+    palette: &mut WorldPalette,
+    materials: &mut Assets<StandardMaterial>,
+    anim: WorkerAnim,
+) -> Handle<StandardMaterial> {
+    match anim {
+        WorkerAnim::Work => palette.emissive(materials, "#3DDC84", 1.4),
+        WorkerAnim::Wait => palette.emissive(materials, "#FFB23F", 1.6),
+        WorkerAnim::Sleep => palette.emissive(materials, "#A08BD8", 1.0),
+        _ => palette.emissive(materials, "#6AAEFF", 0.8),
+    }
+}
+
 /// Spawns a hierarchical multi-part Chibi character using shared `WorldPalette` meshes.
 pub fn spawn_chibi(
     commands: &mut Commands,
@@ -95,12 +111,7 @@ pub fn spawn_chibi(
     let eye_m = palette.mat(materials, "#1B1918", 0.25, 0.0);
     let cheek_m = palette.mat(materials, "#F598A8", 0.8, 0.0);
     let acc_m = palette.mat(materials, "#2B2F36", 0.35, 0.4);
-    let badge_m = match anim {
-        WorkerAnim::Work => palette.emissive(materials, "#3DDC84", 1.4),
-        WorkerAnim::Wait => palette.emissive(materials, "#FFB23F", 1.6),
-        WorkerAnim::Sleep => palette.emissive(materials, "#A08BD8", 1.0),
-        _ => palette.emissive(materials, "#6AAEFF", 0.8),
-    };
+    let badge_m = halo_material_for_anim(palette, materials, anim);
 
     let (head_r, torso_h, hip_y) = match cfg.look {
         ChibiLook::Toy => (0.48_f32, 0.44_f32, if sitting { 0.45 } else { 0.4 }),
@@ -196,7 +207,17 @@ pub fn spawn_chibi(
     }
 
     // Subtle glowing status halo dot above head (work=green, wait=amber, sleep=lavender)
-    add_part(palette.unit_sphere.clone(), badge_m, Vec3::new(0.0, head_y + head_r * 0.72, 0.0), Vec3::splat(0.11));
+    let halo = commands
+        .spawn((
+            WorldEntity,
+            StatusHalo,
+            Mesh3d(palette.unit_sphere.clone()),
+            MeshMaterial3d(badge_m),
+            Transform::from_translation(Vec3::new(0.0, head_y + head_r * 0.72, 0.0))
+                .with_scale(Vec3::splat(0.11)),
+        ))
+        .id();
+    commands.entity(root).add_child(halo);
 
     root
 }

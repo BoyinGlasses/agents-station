@@ -13,9 +13,63 @@ pub struct DeskSlot {
     pub index: usize,
 }
 
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DeskScreen {
+    pub desk_index: usize,
+}
+
 #[derive(Resource, Default)]
 pub struct ScreenMaterials {
     pub by_kind: HashMap<ScreenKind, Handle<StandardMaterial>>,
+}
+
+/// Maps a live session's canonical status (`"work"`/`"wait"`/`"rest"`) and active tool
+/// to the corresponding desk monitor `ScreenKind`.
+pub fn screen_kind_for_session(
+    status: &str,
+    tool_kind: Option<&str>,
+    tool_label: Option<&str>,
+) -> ScreenKind {
+    match status {
+        "wait" | "waiting" => return ScreenKind::Wait,
+        "rest" | "idle" | "sleep" => return ScreenKind::Sleep,
+        _ => {}
+    }
+    let kind_l = tool_kind.unwrap_or("").to_ascii_lowercase();
+    let label_l = tool_label.unwrap_or("").to_ascii_lowercase();
+    match kind_l.as_str() {
+        "bash" | "term" | "terminal" | "shell" | "cmd" | "exec" => ScreenKind::Term,
+        "read" | "grep" | "glob" | "search" => ScreenKind::Read,
+        "web" | "fetch" | "webfetch" | "websearch" => ScreenKind::Web,
+        "chat" | "plan" | "ask" | "agent" | "task" => ScreenKind::Chat,
+        "err" | "error" | "fail" => ScreenKind::Wait,
+        "edit" | "write" | "multiedit" | "code" => ScreenKind::Code,
+        _ => {
+            if label_l.contains("bash")
+                || label_l.contains("cargo")
+                || label_l.contains("npm")
+                || label_l.contains("term")
+            {
+                ScreenKind::Term
+            } else if label_l.contains("read")
+                || label_l.contains("grep")
+                || label_l.contains("search")
+                || label_l.contains("inspect")
+            {
+                ScreenKind::Read
+            } else if label_l.contains("web") || label_l.contains("http") || label_l.contains("fetch")
+            {
+                ScreenKind::Web
+            } else if label_l.contains("plan") || label_l.contains("ask") || label_l.contains("chat")
+            {
+                ScreenKind::Chat
+            } else if label_l.contains("err") || label_l.contains("fail") {
+                ScreenKind::Wait
+            } else {
+                ScreenKind::Code
+            }
+        }
+    }
 }
 
 /// Spawns all 9 (Cozy) / 12 (Pro) / 44 (HQ) desks, dual monitors, chairs, and shared canvas2d screen textures.
@@ -94,7 +148,7 @@ pub fn spawn_desks(
             ScreenKind::Off
         };
         let scr_mat = screen_mats.by_kind[&scr_kind].clone();
-        spawn_quad(
+        let laptop_scr = spawn_quad(
             commands,
             palette,
             scr_mat.clone(),
@@ -102,6 +156,9 @@ pub fn spawn_desks(
             Vec2::new(0.5, 0.32),
             rot * Quat::from_rotation_y(PI),
         );
+        commands
+            .entity(laptop_scr)
+            .insert(DeskScreen { desk_index: i });
 
         // Mug
         spawn_cyl(commands, palette, mug_m.clone(), at(0.52, 0.83, 0.16), 0.11, 0.11);
@@ -111,7 +168,7 @@ pub fn spawn_desks(
             let mon_rot = rot * Quat::from_rotation_y(0.42);
             spawn_box_rot(commands, palette, metal.clone(), at(-0.5, 0.9, 0.2), Vec3::new(0.04, 0.24, 0.03), mon_rot);
             spawn_box_rot(commands, palette, monitor_m.clone(), at(-0.5, 1.1, 0.2), Vec3::new(0.5, 0.31, 0.03), mon_rot);
-            spawn_quad(
+            let mon_scr = spawn_quad(
                 commands,
                 palette,
                 scr_mat,
@@ -119,6 +176,9 @@ pub fn spawn_desks(
                 Vec2::new(0.46, 0.27),
                 mon_rot * Quat::from_rotation_y(PI),
             );
+            commands
+                .entity(mon_scr)
+                .insert(DeskScreen { desk_index: i });
             spawn_box_rot(commands, palette, ped_m.clone(), at(0.45, 0.29, 0.04), Vec3::new(0.4, 0.58, 0.55), rot);
         }
 
