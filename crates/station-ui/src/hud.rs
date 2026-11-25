@@ -2,8 +2,8 @@ use crate::i18n::I18nStore;
 use crate::launcher_dock::draw_launcher_dock;
 use crate::state::{ActiveDrawer, UiAction, UiState, ViewMode};
 use crate::theme::{
-    ACCENT_TERRACOTTA, BG_CARD, STATUS_ERR, STATUS_INFO, STATUS_WAIT, STATUS_WORK,
-    TEXT_MUTED, TEXT_PRIMARY, card_frame, glass_frame,
+    ACCENT_TERRACOTTA, BG_CARD, STATUS_ERR, STATUS_INFO, STATUS_WAIT, STATUS_WORK, TEXT_MUTED,
+    TEXT_PRIMARY, card_frame, glass_frame, status_dot,
 };
 use bevy_egui::egui::{self, Color32, RichText, Stroke};
 use station_3d::{BackdropKind, OfficeLayout};
@@ -32,8 +32,9 @@ pub fn draw_topbar(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
         .show(ctx, |ui| {
             glass_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    status_dot(ui, ACCENT_TERRACOTTA, 4.2);
                     ui.label(
-                        RichText::new("● AGENTS STATION")
+                        RichText::new("AGENTS STATION")
                             .size(13.0)
                             .strong()
                             .color(ACCENT_TERRACOTTA),
@@ -188,7 +189,7 @@ fn draw_session_rail(ctx: &egui::Context, state: &mut UiState) {
                     let resp = frame.show(ui, |ui| {
                         ui.set_width(226.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("●").color(col).size(11.0));
+                            status_dot(ui, col, 3.8);
                             ui.label(
                                 RichText::new(s.agent.to_uppercase())
                                     .strong()
@@ -205,13 +206,13 @@ fn draw_session_rail(ctx: &egui::Context, state: &mut UiState) {
                             });
                         });
                         let prompt = if state.streamer_mode {
-                            "••• streamer redaction •••".to_owned()
+                            "... streamer redaction ...".to_owned()
                         } else {
                             s.last_prompt.clone()
                         };
                         ui.label(RichText::new(prompt).size(11.0).color(TEXT_PRIMARY));
                         if let Some(tool) = &s.tool {
-                            ui.label(RichText::new(format!("↳ {tool}")).size(10.0).color(TEXT_MUTED));
+                            ui.label(RichText::new(format!("> {tool}")).size(10.0).color(TEXT_MUTED));
                         }
                     });
                     if resp.response.interact(egui::Sense::click()).clicked() {

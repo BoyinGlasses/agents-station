@@ -58,3 +58,10 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(10, 8))
         .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
 }
+
+/// Crisp vector status indicator circle (avoids missing Unicode glyph tofu in subset fonts).
+pub fn status_dot(ui: &mut egui::Ui, color: Color32, radius: f32) {
+    let size = egui::vec2(radius * 2.0 + 2.0, radius * 2.0 + 2.0);
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), radius, color);
+}

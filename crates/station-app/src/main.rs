@@ -38,6 +38,7 @@ fn resolve_assets_dir() -> PathBuf {
 fn spawn_lite_2d_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
+        bevy::core_pipeline::tonemapping::Tonemapping::None,
         Msaa::Off,
         Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
@@ -46,30 +47,34 @@ fn spawn_lite_2d_camera(mut commands: Commands) {
 fn build_gui_app(cli: &cli::Cli) -> App {
     let mut app = App::new();
     let capture_mode = cli.capture_scene.is_some();
-    app.add_plugins(
-        DefaultPlugins
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "Agents Station".to_owned(),
-                    resolution: (1280.0_f32, 720.0_f32).into(),
-                    ..default()
-                }),
-                ..default()
-            })
-            .set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(WgpuSettings {
-                    backends: Some(Backends::from_env().unwrap_or(Backends::VULKAN)),
-                    power_preference: gpu::wgpu_power_preference(cli.gpu),
-                    memory_hints: MemoryHints::MemoryUsage,
-                    instance_flags: InstanceFlags::empty(),
-                    ..default()
-                }),
+    let is_lite_2d = cli.capture_scene.as_deref() == Some("lite-2d");
+    let plugins = DefaultPlugins
+        .set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "Agents Station".to_owned(),
+                resolution: (1280.0_f32, 720.0_f32).into(),
                 ..default()
             }),
-    )
-    .insert_resource(DirectionalLightShadowMap { size: 1024 })
-    .insert_resource(PointLightShadowMap { size: 256 })
-    .add_plugins(EguiPlugin {
+            ..default()
+        })
+        .set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(WgpuSettings {
+                backends: Some(Backends::from_env().unwrap_or(Backends::VULKAN)),
+                power_preference: gpu::wgpu_power_preference(cli.gpu),
+                memory_hints: MemoryHints::MemoryUsage,
+                instance_flags: InstanceFlags::empty(),
+                ..default()
+            }),
+            ..default()
+        });
+    if is_lite_2d {
+        app.add_plugins(plugins.disable::<bevy::pbr::PbrPlugin>());
+    } else {
+        app.add_plugins(plugins)
+            .insert_resource(DirectionalLightShadowMap { size: 1024 })
+            .insert_resource(PointLightShadowMap { size: 256 });
+    }
+    app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
     })
     .add_plugins(fps::AdaptiveFpsPlugin { capture_mode })

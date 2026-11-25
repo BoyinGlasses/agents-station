@@ -2,7 +2,7 @@ use crate::i18n::I18nStore;
 use crate::state::{ActiveDrawer, GpuPrefUi, UiAction, UiState};
 use crate::theme::{
     ACCENT_TERRACOTTA, BG_DEEP, STATUS_ERR, STATUS_INFO, STATUS_WAIT, STATUS_WORK, TEXT_MUTED,
-    TEXT_PRIMARY, card_frame,
+    TEXT_PRIMARY, card_frame, status_dot,
 };
 use bevy_egui::egui::{self, Color32, RichText, Stroke};
 use station_3d::{BackdropKind, ChibiLook, OfficeLayout};
@@ -351,7 +351,7 @@ fn draw_timeline_drawer(ui: &mut egui::Ui, state: &UiState) {
         };
         card_frame().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("●").color(col));
+                status_dot(ui, col, 3.6);
                 ui.label(RichText::new(&ev.agent).strong().color(TEXT_PRIMARY));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(&ev.ts_label).size(10.0).color(TEXT_MUTED));
