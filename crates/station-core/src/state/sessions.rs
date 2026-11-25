@@ -422,15 +422,7 @@ impl OfficeState {
             let _ = h.tx.send(response.clone());
         }
         self.broadcast(json!({ "k": "permDone", "id": id }));
-        if !sess_id.is_empty() && !self.pending_perms.values().any(|p| p.sess == sess_id) {
-            if let Some(s) = self.sessions.get_mut(&sess_id)
-                && s.status == "wait"
-            {
-                s.status = "work".to_owned();
-                let s_clone = s.clone();
-                self.broadcast(json!({ "k": "sess", "s": s_clone }));
-            }
-        }
+        self.restore_session_work_if_idle(&sess_id);
         Some(response)
     }
 
@@ -440,6 +432,11 @@ impl OfficeState {
         if hold.is_none() && perm.is_none() {
             return false;
         }
+        let sess_id = hold
+            .as_ref()
+            .map(|h| h.sess.clone())
+            .or_else(|| perm.as_ref().map(|p| p.sess.clone()))
+            .unwrap_or_default();
         let is_denied = hold.as_ref().is_some_and(|h| h.kind == "denied")
             || perm.as_ref().is_some_and(|p| p.kind == "denied");
         if is_denied {
@@ -447,7 +444,20 @@ impl OfficeState {
             let _ = self.save_chat();
         }
         self.broadcast(json!({ "k": "permDone", "id": id }));
+        self.restore_session_work_if_idle(&sess_id);
         true
+    }
+
+    fn restore_session_work_if_idle(&mut self, sess_id: &str) {
+        if !sess_id.is_empty() && !self.pending_perms.values().any(|p| p.sess == sess_id) {
+            if let Some(s) = self.sessions.get_mut(sess_id)
+                && s.status == "wait"
+            {
+                s.status = "work".to_owned();
+                let s_clone = s.clone();
+                self.broadcast(json!({ "k": "sess", "s": s_clone }));
+            }
+        }
     }
 
     fn next_desk(&self) -> usize {
@@ -989,5 +999,52 @@ mod tests {
                 pair[1]
             );
         }
+    }
+
+    #[test]
+    fn cancel_hold_restores_session_status_from_wait_to_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = OfficeState::new(dir.path().to_path_buf());
+        st.ingest_raw_event(json!({
+            "session_id": "s-cancel",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "D:/repo/app",
+            "prompt": "do work"
+        }))
+        .unwrap();
+        assert_eq!(st.sessions["s-cancel"].status, "work");
+
+        let mut rx_sse = st.subscribe();
+        let (tx, _rx) = oneshot::channel();
+        st.register_hold(
+            PendingPerm {
+                id: "p-cancel-1".into(),
+                sess: "s-cancel".into(),
+                name: "app".into(),
+                kind: "perm".into(),
+                tool_type: "bash".into(),
+                label: "echo".into(),
+                detail: "echo hi".into(),
+                danger: None,
+                created_at: 1,
+            },
+            tx,
+        );
+        assert_eq!(st.sessions["s-cancel"].status, "wait");
+
+        while rx_sse.try_recv().is_ok() {}
+
+        assert!(st.cancel_hold("p-cancel-1"));
+        assert_eq!(
+            st.sessions["s-cancel"].status, "work",
+            "cancel_hold must restore session status from wait to work when no holds remain"
+        );
+        let mut saw_work_sess = false;
+        while let Ok(msg) = rx_sse.try_recv() {
+            if msg["k"] == "sess" && msg["s"]["id"] == "s-cancel" && msg["s"]["status"] == "work" {
+                saw_work_sess = true;
+            }
+        }
+        assert!(saw_work_sess, "cancel_hold must broadcast updated sess status=work");
     }
 }
