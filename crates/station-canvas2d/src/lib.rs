@@ -1,8 +1,12 @@
+pub mod boards_and_social;
 pub mod brands;
 pub mod canvas;
 pub mod office_surfaces;
 pub mod text;
 
+pub use boards_and_social::{
+    DutyBoardInput, DutyRowInput, PhotostripInput, StripPerson, WhiteboardInput, WhiteboardTask,
+};
 pub use brands::BrandRegistry;
 pub use canvas::{Canvas2d, RgbaSurface, hex, hex_rgba};
 pub use office_surfaces::{ALL_SCREEN_KINDS, ScreenKind, TvStatsInput};
