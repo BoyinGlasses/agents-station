@@ -3,9 +3,10 @@ pub mod cli;
 pub mod gpu;
 pub mod instance;
 
+use bevy::pbr::{DirectionalLightShadowMap, PointLightShadowMap};
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
-use bevy::render::settings::{RenderCreation, WgpuSettings};
+use bevy::render::settings::{Backends, InstanceFlags, MemoryHints, RenderCreation, WgpuSettings};
 use bevy_egui::EguiPlugin;
 use clap::Parser;
 use std::path::PathBuf;
@@ -43,12 +44,17 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             })
             .set(RenderPlugin {
                 render_creation: RenderCreation::Automatic(WgpuSettings {
+                    backends: Some(Backends::from_env().unwrap_or(Backends::VULKAN)),
                     power_preference: gpu::wgpu_power_preference(cli.gpu),
+                    memory_hints: MemoryHints::MemoryUsage,
+                    instance_flags: InstanceFlags::empty(),
                     ..default()
                 }),
                 ..default()
             }),
     )
+    .insert_resource(DirectionalLightShadowMap { size: 1024 })
+    .insert_resource(PointLightShadowMap { size: 256 })
     .add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
     })

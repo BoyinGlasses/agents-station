@@ -51,6 +51,7 @@ fn setup_smoke_scene(
 
     commands.spawn((
         Camera3d::default(),
+        Msaa::Off,
         Transform::from_xyz(4.0, 3.0, 6.0).looking_at(Vec3::new(0.0, 0.6, 0.0), Vec3::Y),
     ));
 }
