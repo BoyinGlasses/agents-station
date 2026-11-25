@@ -9,12 +9,18 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
 clap.workspace = true
+image.workspace = true
 station-core = { path = "../station-core" }
 station-launcher = { path = "../station-launcher" }
 station-canvas2d = { path = "../station-canvas2d" }
 station-3d = { path = "../station-3d" }
 station-ui = { path = "../station-ui" }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
