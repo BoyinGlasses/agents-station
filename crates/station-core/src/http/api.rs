@@ -423,6 +423,28 @@ pub async fn post_pins(
     Ok(Json(json!({ "ok": ok, "pins": office.pins })))
 }
 
+async fn ensure_vault_scanned(state: &AppState, force: bool) -> Result<(), StatusCode> {
+    let needs_scan = force
+        || state
+            .vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scanned_at()
+            == 0;
+    if !needs_scan {
+        return Ok(());
+    }
+    let vault = Arc::clone(&state.vault);
+    let claude_dir = state.claude_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut g = vault.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = g.scan_claude_projects(&claude_dir);
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(())
+}
+
 pub async fn get_vault(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -430,10 +452,83 @@ pub async fn get_vault(
     ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let query = q.get("q").map(String::as_str).unwrap_or("");
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if let Some(sid) = q.get("sid").filter(|s| !s.is_empty()) {
+        if !crate::store::vault::is_valid_sid(sid) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        let vault = Arc::clone(&state.vault);
+        let sid_owned = sid.clone();
+        let rec = tokio::task::spawn_blocking(move || {
+            vault
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_transcript(&sid_owned)
+        })
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        return match rec {
+            Some(r) => Ok(Json(json!({ "ok": true, "rec": r }))),
+            None => Ok(Json(json!({ "ok": false }))),
+        };
+    }
+
+    let force = local && q.contains_key("fresh");
+    ensure_vault_scanned(&state, force).await?;
+
+    let query: String = q
+        .get("q")
+        .map(String::as_str)
+        .unwrap_or("")
+        .chars()
+        .take(200)
+        .collect();
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(60)
+        .clamp(1, 200);
     let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(Json(json!({ "ok": true, "items": vault.search(query, 50) })))
+    let stats = vault.stats();
+    let items: Vec<Value> = vault
+        .search(&query, limit)
+        .into_iter()
+        .map(|e| json!(e))
+        .collect();
+    Ok(Json(json!({ "ok": true, "stats": stats, "items": items })))
+}
+
+pub async fn get_vault_transcript(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let sid = q
+        .get("sid")
+        .or_else(|| q.get("id"))
+        .map(String::as_str)
+        .unwrap_or("");
+    if !crate::store::vault::is_valid_sid(sid) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    ensure_vault_scanned(&state, false).await?;
+    let vault = Arc::clone(&state.vault);
+    let sid_owned = sid.to_owned();
+    let rec = tokio::task::spawn_blocking(move || {
+        vault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_transcript(&sid_owned)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match rec {
+        Some(r) => Ok(Json(json!({ "ok": true, "rec": r }))),
+        None => Ok(Json(json!({ "ok": false }))),
+    }
 }
 
 pub async fn get_vault_report(
@@ -444,8 +539,13 @@ pub async fn get_vault_report(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    ensure_vault_scanned(&state, false).await?;
     let since = now_ms().saturating_sub(7 * 86_400_000);
-    let prompts = state.vault.lock().unwrap_or_else(|e| e.into_inner()).recent_prompts(since);
+    let prompts = state
+        .vault
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .recent_prompts(since);
     Ok(Json(json!(build_prompt_report(&prompts, 3))))
 }
 
@@ -4390,5 +4490,83 @@ mod tests {
             app.oneshot(tun_get).await.unwrap().status(),
             StatusCode::FORBIDDEN
         );
+    }
+
+    #[tokio::test]
+    async fn vault_http_routes_scan_projects_search_vietnamese_and_read_transcript() {
+        use axum::body::to_bytes;
+        use serde_json::Value;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let claude_dir = dir.path().join("claude");
+        let proj = claude_dir.join("projects").join("demo");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess-http-1.jsonl"),
+            concat!(
+                r#"{"type":"custom-title","customTitle":"Tối ưu RAM"}"#,
+                "\n",
+                r#"{"type":"user","cwd":"/repo/demo","timestamp":"2026-11-25T10:00:00Z","message":{"content":"<system-reminder>skip</system-reminder>Kiểm tra bộ nhớ định kỳ"}}"#,
+                "\n",
+                r#"{"type":"assistant","timestamp":"2026-11-25T10:00:05Z","message":{"content":[{"type":"text","text":"Xong rồi"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let state = Arc::new(AppState::new_with_claude_dir(data_dir, claude_dir, None).unwrap());
+        let app = build_router(state);
+
+        // GET /api/vault?fresh=1&q=toi+uu+ram scans off-thread and matches Vietnamese accents
+        let req = Request::builder()
+            .uri("/api/vault?fresh=1&q=toi%20uu%20ram")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 128 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(body["items"][0]["sid"], "sess-http-1");
+        assert!(body["stats"]["n"].as_u64().unwrap() >= 1);
+
+        // GET /api/vault?sid=sess-http-1 returns full cleaned transcript
+        let rec_req = Request::builder()
+            .uri("/api/vault?sid=sess-http-1")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(rec_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let rec_body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 128 * 1024).await.unwrap()).unwrap();
+        assert_eq!(rec_body["ok"], true);
+        assert_eq!(rec_body["rec"]["msgs"].as_array().unwrap().len(), 2);
+        assert!(!rec_body["rec"]["msgs"][0]["t"].as_str().unwrap().contains("skip"));
+
+        // GET /api/vault/transcript?sid=sess-http-1 returns archived transcript
+        let tr_req = Request::builder()
+            .uri("/api/vault/transcript?sid=sess-http-1")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(tr_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tr_body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 128 * 1024).await.unwrap()).unwrap();
+        assert_eq!(tr_body["ok"], true);
+        assert_eq!(tr_body["rec"]["sid"], "sess-http-1");
+
+        // Invalid sid rejected cleanly
+        let bad_req = Request::builder()
+            .uri("/api/vault/transcript?sid=../../secret")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(bad_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

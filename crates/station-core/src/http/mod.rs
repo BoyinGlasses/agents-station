@@ -64,7 +64,7 @@ pub struct AppState {
     pub sys: SystemMonitor,
     pub otel: Mutex<OtelStore>,
     pub trophies: Mutex<TrophyStore>,
-    pub vault: Mutex<VaultStore>,
+    pub vault: Arc<Mutex<VaultStore>>,
     pub tenure: Mutex<TenureStore>,
     pub tasks: Arc<Mutex<TaskManager>>,
     pub steer_queue: Mutex<SteerQueue>,
@@ -103,7 +103,7 @@ impl AppState {
         let sys = SystemMonitor::new(default_platform(), claude_dir.clone());
         let otel = OtelStore::load(data_dir.join("otel"), 30, now);
         let trophies = TrophyStore::load(&data_dir, now);
-        let vault = VaultStore::load(&data_dir);
+        let vault = Arc::new(Mutex::new(VaultStore::load(&data_dir)));
         let tenure = TenureStore::load(&data_dir, now);
         let tasks = Arc::new(Mutex::new(TaskManager::new()));
         let steer_queue = Mutex::new(SteerQueue::default());
@@ -134,7 +134,7 @@ impl AppState {
             sys,
             otel: Mutex::new(otel),
             trophies: Mutex::new(trophies),
-            vault: Mutex::new(vault),
+            vault,
             tenure: Mutex::new(tenure),
             tasks,
             steer_queue,
@@ -244,6 +244,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/pins", get(api::get_pins).post(api::post_pins))
         .route("/api/vault", get(api::get_vault))
         .route("/api/vault/report", get(api::get_vault_report))
+        .route("/api/vault/transcript", get(api::get_vault_transcript))
         .route("/api/undo", get(api::get_undo).post(api::post_undo))
         .route("/api/burn", get(api::get_burn))
         .route("/api/sys", get(api::get_sys))
