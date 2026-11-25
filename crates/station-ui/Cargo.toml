@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
 station-core = { path = "../station-core" }
 ttf-parser.workspace = true
 woff2-patched = "0.4"
