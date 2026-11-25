@@ -227,6 +227,10 @@ impl TaskManager {
         self.command_override = Some(f);
     }
 
+    pub fn has_command_override(&self) -> bool {
+        self.command_override.is_some()
+    }
+
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }

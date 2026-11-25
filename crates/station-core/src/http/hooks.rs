@@ -105,6 +105,44 @@ pub async fn post_event(
                     tenure.touch(name, ts, true);
                     let _ = tenure.save();
                 }
+                // Drain any queued steer note for this session when its turn finishes.
+                if ev.hook_event_name == "Stop" {
+                    let queued = {
+                        let mut sq = state.steer_queue.lock().unwrap_or_else(|e| e.into_inner());
+                        sq.take(&ev.session_id).or_else(|| {
+                            ev.cwd
+                                .as_deref()
+                                .and_then(|c| sq.take(&format!("dir:{c}")))
+                        })
+                    };
+                    if let Some(q) = queued {
+                        state
+                            .office
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .broadcast(json!({
+                                "k": "steerDrain",
+                                "sid": ev.session_id,
+                                "name": q.name,
+                            }));
+                        let target_dir = q
+                            .dir
+                            .or_else(|| ev.cwd.clone())
+                            .unwrap_or_default();
+                        if !target_dir.is_empty() && Path::new(&target_dir).is_dir() {
+                            let _ = crate::http::api::spawn_task_with_card(
+                                &state,
+                                crate::state::tasks::TaskStartRequest {
+                                    dir: target_dir,
+                                    text: q.text,
+                                    agent: q.agent,
+                                    model: String::new(),
+                                    fork: false,
+                                },
+                            );
+                        }
+                    }
+                }
                 if ev.hook_event_name == "StopFailure" {
                     let enabled = state
                         .prefs
@@ -113,12 +151,62 @@ pub async fn post_event(
                         .get("autoResume")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let has_bin = crate::store::cli_command::find_in_path(&["claude.exe", "claude"]).is_some();
-                    let _decision = state
-                        .auto_resume
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .check_and_record(enabled, &ev.session_id, has_bin, ts);
+                    if enabled {
+                        let has_override = state
+                            .tasks
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .has_command_override();
+                        let has_bin = if has_override {
+                            true
+                        } else {
+                            tokio::task::spawn_blocking(|| {
+                                crate::state::tasks::resolve_agent_cli("claude").is_some()
+                            })
+                            .await
+                            .unwrap_or(false)
+                        };
+                        let decision = state
+                            .auto_resume
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .check_and_record(enabled, &ev.session_id, has_bin, ts);
+                        if decision.ok {
+                            {
+                                let mut office =
+                                    state.office.lock().unwrap_or_else(|e| e.into_inner());
+                                let note = office.chat.system(
+                                    &format!(
+                                        "Auto-resuming session {} (attempt {})",
+                                        ev.session_id,
+                                        decision.attempts.unwrap_or(1)
+                                    ),
+                                    ts,
+                                );
+                                let _ = office.save_chat();
+                                office.broadcast(json!({
+                                    "k": "autoResume",
+                                    "sid": ev.session_id,
+                                    "attempts": decision.attempts,
+                                    "msg": note,
+                                }));
+                            }
+                            if let Some(cwd) = ev.cwd.as_deref()
+                                && Path::new(cwd).is_dir()
+                            {
+                                let _ = crate::http::api::spawn_task_with_card(
+                                    &state,
+                                    crate::state::tasks::TaskStartRequest {
+                                        dir: cwd.to_owned(),
+                                        text: format!("Continue session {}", ev.session_id),
+                                        agent: "claude".to_owned(),
+                                        model: String::new(),
+                                        fork: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                 }
             }
             _ => {}

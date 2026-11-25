@@ -3901,4 +3901,131 @@ mod tests {
         }
         assert!(saw_done, "task completion must broadcast SSE work card update with state=done");
     }
+
+    #[tokio::test]
+    async fn stop_drains_queued_steer_and_stop_failure_triggers_auto_resume() {
+        use serde_json::{Value, json};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let sid = "12345678-1234-1234-1234-1234567890ab";
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        #[cfg(windows)]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("cmd.exe"),
+            args: vec!["/C".into(), "echo".into(), "resumed".into()],
+            stdin_payload: None,
+        };
+        #[cfg(not(windows))]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("sh"),
+            args: vec!["-c".into(), "echo resumed".into()],
+            stdin_payload: None,
+        };
+        state
+            .tasks
+            .lock()
+            .unwrap()
+            .set_command_override(Arc::new(move |_req, _id| Some(fast_cmd())));
+        state
+            .prefs
+            .lock()
+            .unwrap()
+            .set("autoResume", Some(Value::Bool(true)))
+            .unwrap();
+
+        let app = build_router(state.clone());
+
+        // 1. Start working session and queue a steer note
+        let start = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": sid,
+                    "hook_event_name": "UserPromptSubmit",
+                    "cwd": ws.to_string_lossy(),
+                    "prompt": "do work"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(start).await.unwrap().status(), StatusCode::OK);
+
+        let steer = Request::builder()
+            .method("POST")
+            .uri("/api/steer")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "sid": sid, "text": "also lint" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(steer).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(state.steer_queue.lock().unwrap().len(), 1);
+
+        // 2. Stop drains SteerQueue and broadcasts steerDrain
+        let mut rx = state.office.lock().unwrap().subscribe();
+        let stop = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": sid,
+                    "hook_event_name": "Stop",
+                    "cwd": ws.to_string_lossy()
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(stop).await.unwrap().status(), StatusCode::OK);
+        assert!(
+            state.steer_queue.lock().unwrap().is_empty(),
+            "Stop event must drain queued steer for the session"
+        );
+        let mut saw_steer_drain = false;
+        while let Ok(ev) = rx.try_recv() {
+            if ev["k"] == "steerDrain" && ev["sid"] == sid {
+                saw_steer_drain = true;
+            }
+        }
+        assert!(saw_steer_drain, "Stop event must broadcast steerDrain SSE event");
+
+        // Wait for queued task to finish before testing StopFailure
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !state.tasks.lock().unwrap().list().is_empty()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // 3. StopFailure triggers AutoResumeGuard and broadcasts autoResume event
+        let fail = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": sid,
+                    "hook_event_name": "StopFailure",
+                    "cwd": ws.to_string_lossy()
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.oneshot(fail).await.unwrap().status(), StatusCode::OK);
+        let mut saw_auto_resume = false;
+        while let Ok(ev) = rx.try_recv() {
+            if ev["k"] == "autoResume" && ev["sid"] == sid && ev["attempts"] == 1 {
+                saw_auto_resume = true;
+            }
+        }
+        assert!(saw_auto_resume, "StopFailure with autoResume=true must trigger autoResume");
+    }
 }
