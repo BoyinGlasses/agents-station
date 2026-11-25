@@ -35,6 +35,16 @@ pub fn resolve_claude_dir(env_override: Option<&str>) -> PathBuf {
     home_dir().join(".claude")
 }
 
+/// Resolves default runtime `data/` dir using `OFFICE_DATA_DIR` or anchoring to the executable's install root.
+pub fn default_data_dir() -> PathBuf {
+    let env_dir = std::env::var("OFFICE_DATA_DIR").ok();
+    let root = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."));
+    resolve_data_dir(&root, env_dir.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

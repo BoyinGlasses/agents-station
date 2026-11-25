@@ -127,14 +127,31 @@ fn is_our_status_line(val: &Value, port: u16) -> bool {
         .is_some_and(|c| c.contains("status-line") && c.contains(&format!("--port {port}")))
 }
 
-fn statusline_prev_path(settings_path: &Path, data_dir: Option<&Path>) -> PathBuf {
-    match data_dir {
-        Some(dir) => dir.join("statusline-prev.json"),
-        None => settings_path
+fn is_any_our_status_line(val: &Value) -> bool {
+    val.get("command").and_then(Value::as_str).is_some_and(|c| {
+        let lower = c.to_ascii_lowercase();
+        lower.contains("status-line")
+            && (lower.contains("agents-station")
+                || lower.contains("--port ")
+                || lower.contains("status-line.mjs"))
+    })
+}
+
+fn statusline_prev_path(
+    settings_path: &Path,
+    settings_override: Option<&Path>,
+    data_dir: Option<&Path>,
+) -> PathBuf {
+    if let Some(dir) = data_dir {
+        return dir.join("statusline-prev.json");
+    }
+    if settings_override.is_some() {
+        return settings_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
-            .join("statusline-prev.json"),
+            .join("statusline-prev.json");
     }
+    crate::config::default_data_dir().join("statusline-prev.json")
 }
 
 fn entry_has_our_route(entry: &Value, port: u16, route: &str) -> bool {
@@ -260,7 +277,7 @@ pub fn install_agent_hooks_with_data_dir(
     };
 
     match agent {
-        "claude" => install_claude(&settings_path, data_dir, bin_path, port),
+        "claude" => install_claude(&settings_path, settings_override, data_dir, bin_path, port),
         "codex" => install_codex(&settings_path, bin_path, port),
         "opencode" => install_opencode(&settings_path, port),
         "zcode" => install_zcode(&settings_path, bin_path, port),
@@ -271,6 +288,7 @@ pub fn install_agent_hooks_with_data_dir(
 
 fn install_claude(
     settings_path: &Path,
+    settings_override: Option<&Path>,
     data_dir: Option<&Path>,
     bin_path: &Path,
     port: u16,
@@ -393,12 +411,13 @@ fn install_claude(
             .and_then(|s| s.get("padding"))
             .cloned();
         if let Some(prev) = cfg.get("statusLine")
+            && !is_any_our_status_line(prev)
             && prev
                 .get("command")
                 .and_then(Value::as_str)
                 .is_some_and(|c| !c.trim().is_empty())
         {
-            let prev_path = statusline_prev_path(settings_path, data_dir);
+            let prev_path = statusline_prev_path(settings_path, settings_override, data_dir);
             write_json_atomic(&prev_path, prev)?;
         }
         let mut status_obj = serde_json::Map::new();
@@ -775,9 +794,9 @@ pub fn uninstall_agent_hooks_with_data_dir(
             }
             if cfg
                 .get("statusLine")
-                .is_some_and(|s| is_our_status_line(s, port))
+                .is_some_and(|s| is_our_status_line(s, port) || is_any_our_status_line(s))
             {
-                let prev_path = statusline_prev_path(&path, data_dir);
+                let prev_path = statusline_prev_path(&path, settings_override, data_dir);
                 let prev = std::fs::read_to_string(&prev_path)
                     .ok()
                     .and_then(|s| serde_json::from_str::<Value>(&s).ok())
@@ -1073,5 +1092,59 @@ mod tests {
         let cleaned: Value =
             serde_json::from_str(&std::fs::read_to_string(&settings2).unwrap()).unwrap();
         assert!(cleaned.get("statusLine").is_none());
+    }
+
+    #[test]
+    fn reinstall_on_different_port_never_saves_self_into_statusline_prev() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let settings = dir.path().join("settings.json");
+        let bin = Path::new("D:/mystation/agents-station/agents-station.exe");
+
+        // Case 1: Foreign statusLine existed -> port 4310 -> reinstall on port 4311 must keep foreign prev
+        std::fs::write(
+            &settings,
+            r#"{"statusLine": {"type": "command", "command": "echo original-foreign"}}"#,
+        )
+        .unwrap();
+        install_agent_hooks_with_data_dir("claude", Some(&settings), Some(&data_dir), bin, 4310)
+            .unwrap();
+        install_agent_hooks_with_data_dir("claude", Some(&settings), Some(&data_dir), bin, 4311)
+            .unwrap();
+
+        let prev: Value = serde_json::from_str(
+            &std::fs::read_to_string(data_dir.join("statusline-prev.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(prev["command"], "echo original-foreign");
+        let cfg: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert!(
+            cfg["statusLine"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("--port 4311")
+        );
+
+        // Case 2: No prior statusLine -> port 4310 -> port 4311 must NOT create statusline-prev.json
+        let data_dir2 = dir.path().join("data2");
+        let settings2 = dir.path().join("settings2.json");
+        std::fs::write(&settings2, "{}").unwrap();
+        install_agent_hooks_with_data_dir("claude", Some(&settings2), Some(&data_dir2), bin, 4310)
+            .unwrap();
+        install_agent_hooks_with_data_dir("claude", Some(&settings2), Some(&data_dir2), bin, 4311)
+            .unwrap();
+        assert!(
+            !data_dir2.join("statusline-prev.json").exists(),
+            "reinstalling on a new port must never save our own status-line into statusline-prev.json"
+        );
+
+        // Case 3: Default statusline_prev_path with no data_dir and no settings_override uses default data dir, not settings parent
+        let default_prev = statusline_prev_path(Path::new("C:/fake-home/.claude/settings.json"), None, None);
+        assert_ne!(
+            default_prev,
+            Path::new("C:/fake-home/.claude/statusline-prev.json"),
+            "default install without data_dir must anchor statusline-prev.json to data_dir, not .claude/"
+        );
     }
 }
