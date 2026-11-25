@@ -5,8 +5,8 @@ pub mod focus_launch;
 use anyhow::{Result, bail};
 use catalog::{HarnessCatalog, HarnessEntry, LaunchTarget};
 use detect_win32::detect_builtin_harnesses;
-use focus_launch::{Win32WindowLauncher, WindowLauncher};
-use serde::Serialize;
+use focus_launch::{Win32WindowLauncher, WindowLauncher, lookup_running_window};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use station_core::hooks_cli::{install_agent_hooks, is_agent_hooked};
 use station_core::http::HarnessApi;
@@ -23,7 +23,7 @@ pub enum HarnessStatus {
     NotInstalled,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum LaunchOutcome {
     FocusedExisting { pid: u32 },
@@ -88,6 +88,7 @@ impl<L: WindowLauncher> HarnessService<L> {
     }
 
     pub fn list(&self) -> Vec<HarnessView> {
+        let running_snapshot = self.launcher.snapshot_running_windows();
         self.entries()
             .into_iter()
             .map(|e| {
@@ -100,10 +101,7 @@ impl<L: WindowLauncher> HarnessService<L> {
                     None => true,
                 };
                 let running = installed
-                    && self
-                        .launcher
-                        .find_running_window(&e.process_names)
-                        .is_some();
+                    && lookup_running_window(&running_snapshot, &e.process_names).is_some();
                 let status = if !installed {
                     HarnessStatus::NotInstalled
                 } else if !hooked {
@@ -328,14 +326,14 @@ mod tests {
 
     #[derive(Default)]
     struct MockLauncher {
-        running: Mutex<Option<(u32, isize)>>,
+        running: Mutex<HashMap<String, (u32, isize)>>,
         focused: Mutex<Vec<isize>>,
         launched: Mutex<Vec<LaunchTarget>>,
     }
 
     impl WindowLauncher for MockLauncher {
-        fn find_running_window(&self, _process_names: &[String]) -> Option<(u32, isize)> {
-            *self.running.lock().unwrap()
+        fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+            self.running.lock().unwrap().clone()
         }
 
         fn focus_window(&self, hwnd: isize) -> Result<()> {
@@ -378,8 +376,8 @@ mod tests {
         let mock = Arc::new(MockLauncher::default());
         struct ArcLauncher(Arc<MockLauncher>);
         impl WindowLauncher for ArcLauncher {
-            fn find_running_window(&self, p: &[String]) -> Option<(u32, isize)> {
-                self.0.find_running_window(p)
+            fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+                self.0.snapshot_running_windows()
             }
             fn focus_window(&self, hwnd: isize) -> Result<()> {
                 self.0.focus_window(hwnd)
@@ -406,7 +404,10 @@ mod tests {
         assert_eq!(mock.focused.lock().unwrap().len(), 0);
 
         // 2. Already running -> focuses existing window, does NOT launch new
-        *mock.running.lock().unwrap() = Some((4242, 999));
+        mock.running
+            .lock()
+            .unwrap()
+            .insert("antigravity.exe".to_owned(), (4242, 999));
         assert_eq!(svc.list()[0].status, HarnessStatus::RunningHooked);
         assert_eq!(
             svc.open("antigravity").unwrap(),
@@ -563,8 +564,8 @@ mod tests {
         let mock = Arc::new(MockLauncher::default());
         struct ArcL(Arc<MockLauncher>);
         impl WindowLauncher for ArcL {
-            fn find_running_window(&self, p: &[String]) -> Option<(u32, isize)> {
-                self.0.find_running_window(p)
+            fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+                self.0.snapshot_running_windows()
             }
             fn focus_window(&self, hwnd: isize) -> Result<()> {
                 self.0.focus_window(hwnd)
@@ -586,5 +587,135 @@ mod tests {
         assert!(svc.open("tampered_unc").is_err());
         assert!(svc.open("tampered_ads").is_err());
         assert!(mock.launched.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_invokes_snapshot_running_windows_once_regardless_of_catalog_length() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingLauncher {
+            snapshot_calls: AtomicUsize,
+            find_calls: AtomicUsize,
+            snapshot: HashMap<String, (u32, isize)>,
+        }
+
+        impl WindowLauncher for CountingLauncher {
+            fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+                self.snapshot_calls.fetch_add(1, Ordering::SeqCst);
+                self.snapshot.clone()
+            }
+
+            fn find_running_window(&self, process_names: &[String]) -> Option<(u32, isize)> {
+                self.find_calls.fetch_add(1, Ordering::SeqCst);
+                let snap = self.snapshot_running_windows();
+                process_names
+                    .iter()
+                    .find_map(|p| snap.get(&p.to_ascii_lowercase()).copied())
+            }
+
+            fn focus_window(&self, _hwnd: isize) -> Result<()> {
+                Ok(())
+            }
+
+            fn launch_target(&self, _target: &LaunchTarget) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let builtins = vec![
+            HarnessEntry {
+                id: "claude".to_owned(),
+                label: "Claude".to_owned(),
+                hook_agent: None,
+                target: Some(LaunchTarget::Exe(PathBuf::from("C:/Apps/Claude.exe"))),
+                custom: false,
+                process_names: vec!["Claude.exe".to_owned()],
+            },
+            HarnessEntry {
+                id: "codex".to_owned(),
+                label: "Codex".to_owned(),
+                hook_agent: None,
+                target: Some(LaunchTarget::Exe(PathBuf::from("C:/Apps/Codex.exe"))),
+                custom: false,
+                process_names: vec!["Codex.exe".to_owned()],
+            },
+            HarnessEntry {
+                id: "opencode".to_owned(),
+                label: "OpenCode".to_owned(),
+                hook_agent: None,
+                target: Some(LaunchTarget::Exe(PathBuf::from("C:/Apps/OpenCode.exe"))),
+                custom: false,
+                process_names: vec!["OpenCode.exe".to_owned()],
+            },
+            HarnessEntry {
+                id: "zcode".to_owned(),
+                label: "ZCode".to_owned(),
+                hook_agent: None,
+                target: Some(LaunchTarget::Exe(PathBuf::from("C:/Apps/ZCode.exe"))),
+                custom: false,
+                process_names: vec!["ZCode.exe".to_owned()],
+            },
+            HarnessEntry {
+                id: "antigravity".to_owned(),
+                label: "Antigravity".to_owned(),
+                hook_agent: None,
+                target: None,
+                custom: false,
+                process_names: vec!["Antigravity.exe".to_owned()],
+            },
+        ];
+
+        let mut running = HashMap::new();
+        running.insert("claude.exe".to_owned(), (1001, 0xAA));
+        running.insert("zcode.exe".to_owned(), (2002, 0xBB));
+
+        let launcher = Arc::new(CountingLauncher {
+            snapshot_calls: AtomicUsize::new(0),
+            find_calls: AtomicUsize::new(0),
+            snapshot: running,
+        });
+        struct ArcCounting(Arc<CountingLauncher>);
+        impl WindowLauncher for ArcCounting {
+            fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+                self.0.snapshot_running_windows()
+            }
+            fn find_running_window(&self, p: &[String]) -> Option<(u32, isize)> {
+                self.0.find_running_window(p)
+            }
+            fn focus_window(&self, hwnd: isize) -> Result<()> {
+                self.0.focus_window(hwnd)
+            }
+            fn launch_target(&self, t: &LaunchTarget) -> Result<()> {
+                self.0.launch_target(t)
+            }
+        }
+
+        let svc = HarnessService::with_components(
+            HarnessCatalog::load_or_default(dir.path()),
+            builtins,
+            ArcCounting(launcher.clone()),
+            PathBuf::from("D:/app/agents-station.exe"),
+            4310,
+            HashMap::new(),
+        );
+
+        let views = svc.list();
+        assert_eq!(views.len(), 5);
+        assert_eq!(
+            launcher.snapshot_calls.load(Ordering::SeqCst),
+            1,
+            "list() must invoke snapshot_running_windows exactly ONCE regardless of catalog size"
+        );
+        assert_eq!(
+            launcher.find_calls.load(Ordering::SeqCst),
+            0,
+            "list() must NOT call per-harness find_running_window"
+        );
+        assert_eq!(views[0].status, HarnessStatus::RunningHooked);
+        assert_eq!(views[1].status, HarnessStatus::InstalledHooked);
+        assert_eq!(views[2].status, HarnessStatus::InstalledHooked);
+        assert_eq!(views[3].status, HarnessStatus::RunningHooked);
+        assert_eq!(views[4].status, HarnessStatus::NotInstalled);
     }
 }
