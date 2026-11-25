@@ -186,11 +186,13 @@ fn collect_tcp_v4(
     if rc2 != NO_ERROR {
         return;
     }
+    let table_ptr = buf.as_ptr().cast::<MIB_TCPTABLE_OWNER_PID>();
+    let table_offset = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
     // SAFETY: buf is 4-byte aligned Vec<u32> of >= 1024 bytes, populated by GetExtendedTcpTable.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-    let count = table.dwNumEntries as usize;
-    let base_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCPROW_OWNER_PID;
-    let max_rows = (buf_bytes.saturating_sub(size_of::<u32>())) / size_of::<MIB_TCPROW_OWNER_PID>();
+    let count = unsafe { (*table_ptr).dwNumEntries } as usize;
+    // SAFETY: raw pointer projection avoids narrowing provenance via a 1-row shared reference.
+    let base_ptr = unsafe { std::ptr::addr_of!((*table_ptr).table).cast::<MIB_TCPROW_OWNER_PID>() };
+    let max_rows = buf_bytes.saturating_sub(table_offset) / size_of::<MIB_TCPROW_OWNER_PID>();
     for i in 0..count.min(max_rows) {
         // SAFETY: bounded by count.min(max_rows) within buf.
         let row = unsafe { &*base_ptr.add(i) };
@@ -248,11 +250,13 @@ fn collect_tcp_v6(
     if rc2 != NO_ERROR {
         return;
     }
+    let table_ptr = buf.as_ptr().cast::<MIB_TCP6TABLE_OWNER_PID>();
+    let table_offset = std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
     // SAFETY: buf is 4-byte aligned Vec<u32> of >= 1024 bytes, populated by GetExtendedTcpTable.
-    let table = unsafe { &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
-    let count = table.dwNumEntries as usize;
-    let base_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCP6ROW_OWNER_PID;
-    let max_rows = (buf_bytes.saturating_sub(size_of::<u32>())) / size_of::<MIB_TCP6ROW_OWNER_PID>();
+    let count = unsafe { (*table_ptr).dwNumEntries } as usize;
+    // SAFETY: raw pointer projection avoids narrowing provenance via a 1-row shared reference.
+    let base_ptr = unsafe { std::ptr::addr_of!((*table_ptr).table).cast::<MIB_TCP6ROW_OWNER_PID>() };
+    let max_rows = buf_bytes.saturating_sub(table_offset) / size_of::<MIB_TCP6ROW_OWNER_PID>();
     for i in 0..count.min(max_rows) {
         // SAFETY: bounded by count.min(max_rows) within buf.
         let row = unsafe { &*base_ptr.add(i) };
