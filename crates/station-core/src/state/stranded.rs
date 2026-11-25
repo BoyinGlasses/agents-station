@@ -575,7 +575,9 @@ impl StrandedScanner {
         }
 
         // Never pass --force: git itself refuses dirty/locked worktrees as a second safety barrier.
-        match run_git_cmd(&["worktree", "remove", &fresh_norm.path], &was.repo_root) {
+        let wt_arg = strip_verbatim_prefix(Path::new(&fresh_norm.path));
+        let wt_arg_str = wt_arg.to_string_lossy();
+        match run_git_cmd(&["worktree", "remove", "--", &wt_arg_str], &was.repo_root) {
             Ok(_) => {
                 self.by_id.remove(id);
                 self.last.items.retain(|it| it.id != id);
@@ -599,15 +601,27 @@ impl StrandedScanner {
     }
 }
 
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 pub fn open_folder(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("folder not found".to_owned());
     }
+    let clean = strip_verbatim_prefix(path);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         Command::new("explorer.exe")
-            .arg(path)
+            .arg(&clean)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| e.to_string())?;
@@ -616,7 +630,8 @@ pub fn open_folder(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
-            .arg(path)
+            .arg("--")
+            .arg(&clean)
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -624,7 +639,7 @@ pub fn open_folder(path: &Path) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         Command::new("xdg-open")
-            .arg(path)
+            .arg(&clean)
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -654,5 +669,21 @@ mod tests {
         assert!(can_remove(&clean_wt));
         let main_wt = StrandedItem { ok: true, main: true, ..Default::default() };
         assert!(!can_remove(&main_wt));
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_handles_drive_and_unc_paths() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\D:\mystation\repo")),
+            PathBuf::from(r"D:\mystation\repo")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\proj")),
+            PathBuf::from(r"\\server\share\proj")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"D:\plain\path")),
+            PathBuf::from(r"D:\plain\path")
+        );
     }
 }
