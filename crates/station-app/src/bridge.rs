@@ -1,5 +1,5 @@
 use crate::fps::AdaptiveFpsState;
-use crate::tray::{TrayState, show_native_tray_toast};
+use crate::tray::{TrayState, notify_parent_in_tray};
 use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -7,8 +7,8 @@ use serde_json::{Value, json};
 use station_3d::{BackdropAssets, BackdropEntity, WorldEntity, WorldPalette};
 use station_canvas2d::{BrandRegistry, FontEngine};
 use station_core::http::{AppState, HarnessApi, start_http_server};
-use station_launcher::{HarnessService, HarnessStatus};
 use station_launcher::focus_launch::Win32WindowLauncher;
+use station_launcher::{HarnessService, HarnessStatus};
 use station_ui::state::{FeedEntry, HarnessDockItem, PendingPermCard, SessionCard, UiAction};
 use station_ui::{I18nStore, UiState, ViewMode};
 use std::io::{Read, Write};
@@ -16,7 +16,10 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
+
+const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
+const REMOTE_ACTION_QUEUE_CAP: usize = 64;
 
 /// Marks a Bevy GUI app running as the ephemeral `--gui-worker` child of `TrayDaemon`.
 #[derive(Resource, Debug, Clone, Copy, Default)]
@@ -29,12 +32,77 @@ pub enum BridgeMode {
     BindError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshKind {
+    None,
+    Live,
+    Harnesses,
+}
+
+struct RemoteActionCmd {
+    path: &'static str,
+    body: Value,
+    refresh: RefreshKind,
+}
+
 #[derive(Default, Clone)]
 struct RemoteSnapshot {
+    has_snapshot: bool,
     sessions: Vec<SessionCard>,
     pending_perms: Vec<PendingPermCard>,
     feed: Vec<FeedEntry>,
     harnesses: Vec<HarnessDockItem>,
+}
+
+/// Byte-buffered SSE line decoder that preserves multi-byte UTF-8 sequences split across
+/// TCP chunks and bounds the maximum unterminated line length to prevent unbounded growth.
+struct SseByteDecoder {
+    buf: Vec<u8>,
+    max_line_bytes: usize,
+}
+
+impl SseByteDecoder {
+    fn new(max_line_bytes: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            max_line_bytes,
+        }
+    }
+
+    fn push_chunk(&mut self, chunk: &[u8]) -> Result<Vec<String>, ()> {
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+
+        while let Some(rel_nl) = chunk[start..].iter().position(|&b| b == b'\n') {
+            let nl_idx = start + rel_nl;
+            let seg = &chunk[start..nl_idx];
+            if self.buf.len().saturating_add(seg.len()) > self.max_line_bytes {
+                self.buf.clear();
+                return Err(());
+            }
+            let line_bytes: &[u8] = if self.buf.is_empty() {
+                seg
+            } else {
+                self.buf.extend_from_slice(seg);
+                &self.buf
+            };
+            let trimmed = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
+            lines.push(String::from_utf8_lossy(trimmed).into_owned());
+            self.buf.clear();
+            start = nl_idx + 1;
+        }
+
+        let tail = &chunk[start..];
+        if !tail.is_empty() {
+            if self.buf.len().saturating_add(tail.len()) > self.max_line_bytes {
+                self.buf.clear();
+                return Err(());
+            }
+            self.buf.extend_from_slice(tail);
+        }
+
+        Ok(lines)
+    }
 }
 
 enum BridgeBackend {
@@ -44,9 +112,8 @@ enum BridgeBackend {
         _shutdown: Option<watch::Sender<bool>>,
     },
     AttachedHttp {
-        base_url: String,
-        host_header: String,
         snapshot: Arc<Mutex<RemoteSnapshot>>,
+        action_tx: mpsc::Sender<RemoteActionCmd>,
         _shutdown: watch::Sender<bool>,
     },
     BindError {
@@ -168,8 +235,10 @@ fn parse_perms_from_json(val: &Value) -> Vec<PendingPermCard> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
+                // `PendingPerm::tool_type` serializes as `"type"` via `#[serde(rename = "type")]`.
                 tool: p
-                    .get("tool_type")
+                    .get("type")
+                    .or_else(|| p.get("tool_type"))
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
@@ -196,7 +265,12 @@ fn parse_feed_from_json(val: &Value) -> Vec<FeedEntry> {
         .take(12)
         .filter_map(|f| {
             let ts = f.get("ts").and_then(Value::as_u64).unwrap_or(0);
-            let kind = f.get("kind").and_then(Value::as_str).unwrap_or("info");
+            // `FeedItem::kind` serializes as `"type"` via `#[serde(rename = "type")]`.
+            let kind = f
+                .get("type")
+                .or_else(|| f.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("info");
             Some(FeedEntry {
                 ts_label: format!("{}", (ts / 1000) % 86400),
                 agent: f.get("name").and_then(Value::as_str)?.to_owned(),
@@ -246,9 +320,23 @@ fn apply_snapshot_to_remote(snap_lock: &Arc<Mutex<RemoteSnapshot>>, val: &Value)
     let pending_perms = parse_perms_from_json(val);
     let feed = parse_feed_from_json(val);
     let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
+    snap.has_snapshot = true;
     snap.sessions = sessions;
     snap.pending_perms = pending_perms;
     snap.feed = feed;
+}
+
+fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
+    if !snap.harnesses.is_empty() {
+        ui.harnesses = snap.harnesses.clone();
+    }
+    if snap.has_snapshot {
+        ui.sessions = snap.sessions.clone();
+        ui.pending_perms = snap.pending_perms.clone();
+        if !snap.feed.is_empty() {
+            ui.feed = snap.feed.clone();
+        }
+    }
 }
 
 async fn fetch_remote_live(
@@ -295,7 +383,8 @@ fn spawn_attached_sse_client(
     base_url: String,
     host_header: String,
     snap_lock: Arc<Mutex<RemoteSnapshot>>,
-) -> watch::Sender<bool> {
+) -> (mpsc::Sender<RemoteActionCmd>, watch::Sender<bool>) {
+    let (action_tx, mut action_rx) = mpsc::channel::<RemoteActionCmd>(REMOTE_ACTION_QUEUE_CAP);
     let (tx, mut rx) = watch::channel(false);
     let _ = std::thread::Builder::new()
         .name("station-sse-client".to_owned())
@@ -308,13 +397,52 @@ fn spawn_attached_sse_client(
                 return;
             };
             rt.block_on(async move {
-                let Ok(client) = reqwest::Client::builder()
-                    .no_proxy()
-                    .build()
-                else {
+                let Ok(client) = reqwest::Client::builder().no_proxy().build() else {
                     return;
                 };
                 fetch_remote_harnesses(&client, &base_url, &host_header, &snap_lock).await;
+
+                // Single pooled outbound POST worker reusing the existing client & runtime.
+                let client_a = client.clone();
+                let base_a = base_url.clone();
+                let host_a = host_header.clone();
+                let snap_a = snap_lock.clone();
+                let mut rx_a = rx.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            maybe_cmd = action_rx.recv() => {
+                                let Some(cmd) = maybe_cmd else {
+                                    break;
+                                };
+                                let ok = client_a
+                                    .post(format!("{base_a}{}", cmd.path))
+                                    .header("host", &host_a)
+                                    .timeout(Duration::from_secs(3))
+                                    .json(&cmd.body)
+                                    .send()
+                                    .await
+                                    .is_ok_and(|r| r.status().is_success());
+                                if ok {
+                                    match cmd.refresh {
+                                        RefreshKind::Live => {
+                                            fetch_remote_live(&client_a, &base_a, &host_a, &snap_a).await;
+                                        }
+                                        RefreshKind::Harnesses => {
+                                            fetch_remote_harnesses(&client_a, &base_a, &host_a, &snap_a).await;
+                                        }
+                                        RefreshKind::None => {}
+                                    }
+                                }
+                            }
+                            changed = rx_a.changed() => {
+                                if changed.is_err() || *rx_a.borrow() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
 
                 // Periodic harness refresh alongside live SSE stream.
                 let client_h = client.clone();
@@ -359,7 +487,7 @@ fn spawn_attached_sse_client(
                     if let Ok(mut resp) = resp
                         && resp.status().is_success()
                     {
-                        let mut buf = String::new();
+                        let mut decoder = SseByteDecoder::new(MAX_SSE_LINE_BYTES);
                         loop {
                             let chunk = tokio::select! {
                                 c = resp.chunk() => c,
@@ -372,17 +500,26 @@ fn spawn_attached_sse_client(
                             };
                             match chunk {
                                 Ok(Some(bytes)) => {
-                                    buf.push_str(&String::from_utf8_lossy(&bytes));
-                                    while let Some(pos) = buf.find('\n') {
-                                        let line = buf[..pos].trim_end_matches('\r').to_owned();
-                                        buf.drain(..=pos);
+                                    let Ok(lines) = decoder.push_chunk(&bytes) else {
+                                        // Line exceeded MAX_SSE_LINE_BYTES: drop and reconnect cleanly.
+                                        break;
+                                    };
+                                    for line in lines {
                                         if let Some(data) = line.strip_prefix("data:") {
                                             let trimmed = data.trim();
                                             if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-                                                if val.get("k").and_then(Value::as_str) == Some("snap") {
+                                                if val.get("k").and_then(Value::as_str)
+                                                    == Some("snap")
+                                                {
                                                     apply_snapshot_to_remote(&snap_lock, &val);
                                                 } else {
-                                                    fetch_remote_live(&client, &base_url, &host_header, &snap_lock).await;
+                                                    fetch_remote_live(
+                                                        &client,
+                                                        &base_url,
+                                                        &host_header,
+                                                        &snap_lock,
+                                                    )
+                                                    .await;
                                                 }
                                             }
                                         }
@@ -404,33 +541,7 @@ fn spawn_attached_sse_client(
                 }
             });
         });
-    tx
-}
-
-fn post_remote_json(base_url: String, host_header: String, path: &'static str, body: Value) {
-    std::thread::spawn(move || {
-        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            return;
-        };
-        rt.block_on(async move {
-            let Ok(client) = reqwest::Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(3))
-                .build()
-            else {
-                return;
-            };
-            let _ = client
-                .post(format!("{base_url}{path}"))
-                .header("host", &host_header)
-                .json(&body)
-                .send()
-                .await;
-        });
-    });
+    (action_tx, tx)
 }
 
 #[derive(Resource)]
@@ -454,13 +565,12 @@ impl LiveServerBridge {
             let base_url = format!("http://127.0.0.1:{port}");
             let host_header = format!("127.0.0.1:{port}");
             let snapshot = Arc::new(Mutex::new(RemoteSnapshot::default()));
-            let shutdown =
-                spawn_attached_sse_client(base_url.clone(), host_header.clone(), snapshot.clone());
+            let (action_tx, shutdown) =
+                spawn_attached_sse_client(base_url, host_header, snapshot.clone());
             return Self {
                 backend: BridgeBackend::AttachedHttp {
-                    base_url,
-                    host_header,
                     snapshot,
+                    action_tx,
                     _shutdown: shutdown,
                 },
                 assets_dir,
@@ -569,16 +679,12 @@ impl LiveServerBridge {
                     let base_url = format!("http://127.0.0.1:{port}");
                     let host_header = format!("127.0.0.1:{port}");
                     let snapshot = Arc::new(Mutex::new(RemoteSnapshot::default()));
-                    let shutdown = spawn_attached_sse_client(
-                        base_url.clone(),
-                        host_header.clone(),
-                        snapshot.clone(),
-                    );
+                    let (action_tx, shutdown) =
+                        spawn_attached_sse_client(base_url, host_header, snapshot.clone());
                     Self {
                         backend: BridgeBackend::AttachedHttp {
-                            base_url,
-                            host_header,
                             snapshot,
+                            action_tx,
                             _shutdown: shutdown,
                         },
                         assets_dir,
@@ -628,6 +734,34 @@ impl LiveServerBridge {
             _ => Vec::new(),
         }
     }
+
+    #[cfg(test)]
+    pub fn remote_perms(&self) -> Vec<PendingPermCard> {
+        match &self.backend {
+            BridgeBackend::AttachedHttp { snapshot, .. } => snapshot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending_perms
+                .clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn enqueue_remote_action(&self, path: &'static str, body: Value, refresh: RefreshKind) -> bool {
+        match &self.backend {
+            BridgeBackend::AttachedHttp { action_tx, .. } => {
+                action_tx
+                    .try_send(RemoteActionCmd {
+                        path,
+                        body,
+                        refresh,
+                    })
+                    .is_ok()
+            }
+            _ => false,
+        }
+    }
 }
 
 pub struct LiveServerBridgePlugin {
@@ -673,18 +807,7 @@ fn sync_live_state_to_ui(
     match &bridge.backend {
         BridgeBackend::AttachedHttp { snapshot, .. } => {
             let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if !snap.harnesses.is_empty() {
-                ui.harnesses = snap.harnesses;
-            }
-            if !snap.sessions.is_empty() {
-                ui.sessions = snap.sessions;
-            }
-            if !snap.pending_perms.is_empty() {
-                ui.pending_perms = snap.pending_perms;
-            }
-            if !snap.feed.is_empty() {
-                ui.feed = snap.feed;
-            }
+            apply_remote_snapshot_to_ui(&snap, &mut ui);
         }
         BridgeBackend::InProcess {
             app_state,
@@ -804,17 +927,12 @@ fn process_ui_actions(
     for action in actions {
         match action {
             UiAction::LaunchHarness(id) => match &bridge.backend {
-                BridgeBackend::AttachedHttp {
-                    base_url,
-                    host_header,
-                    ..
-                } => {
-                    post_remote_json(
-                        base_url.clone(),
-                        host_header.clone(),
-                        "/api/harnesses/launch",
-                        json!({ "id": id }),
-                    );
+                BridgeBackend::AttachedHttp { action_tx, .. } => {
+                    let _ = action_tx.try_send(RemoteActionCmd {
+                        path: "/api/harnesses/launch",
+                        body: json!({ "id": id }),
+                        refresh: RefreshKind::Harnesses,
+                    });
                 }
                 BridgeBackend::InProcess { harnesses, .. }
                 | BridgeBackend::BindError { harnesses, .. } => {
@@ -838,17 +956,12 @@ fn process_ui_actions(
                     "hook_agent": hook_agent,
                 });
                 match &bridge.backend {
-                    BridgeBackend::AttachedHttp {
-                        base_url,
-                        host_header,
-                        ..
-                    } => {
-                        post_remote_json(
-                            base_url.clone(),
-                            host_header.clone(),
-                            "/api/harnesses/custom",
-                            payload,
-                        );
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/harnesses/custom",
+                            body: payload,
+                            refresh: RefreshKind::Harnesses,
+                        });
                     }
                     BridgeBackend::InProcess { harnesses, .. }
                     | BridgeBackend::BindError { harnesses, .. } => {
@@ -862,17 +975,12 @@ fn process_ui_actions(
                     "id": id,
                 });
                 match &bridge.backend {
-                    BridgeBackend::AttachedHttp {
-                        base_url,
-                        host_header,
-                        ..
-                    } => {
-                        post_remote_json(
-                            base_url.clone(),
-                            host_header.clone(),
-                            "/api/harnesses/custom",
-                            payload,
-                        );
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/harnesses/custom",
+                            body: payload,
+                            refresh: RefreshKind::Harnesses,
+                        });
                     }
                     BridgeBackend::InProcess { harnesses, .. }
                     | BridgeBackend::BindError { harnesses, .. } => {
@@ -933,33 +1041,22 @@ fn process_ui_actions(
             }
             UiAction::SetLang(code) => {
                 i18n.set_lang(&code);
-                if let BridgeBackend::AttachedHttp {
-                    base_url,
-                    host_header,
-                    ..
-                } = &bridge.backend
-                {
-                    post_remote_json(
-                        base_url.clone(),
-                        host_header.clone(),
-                        "/api/prefs",
-                        json!({ "lang": code }),
-                    );
+                if let BridgeBackend::AttachedHttp { action_tx, .. } = &bridge.backend {
+                    let _ = action_tx.try_send(RemoteActionCmd {
+                        path: "/api/prefs",
+                        body: json!({ "lang": code }),
+                        refresh: RefreshKind::None,
+                    });
                 }
             }
             UiAction::DecidePermission { id, decision } => {
                 match &bridge.backend {
-                    BridgeBackend::AttachedHttp {
-                        base_url,
-                        host_header,
-                        ..
-                    } => {
-                        post_remote_json(
-                            base_url.clone(),
-                            host_header.clone(),
-                            "/api/perm",
-                            json!({ "id": id, "decision": decision }),
-                        );
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/perm",
+                            body: json!({ "id": id, "decision": decision }),
+                            refresh: RefreshKind::Live,
+                        });
                     }
                     BridgeBackend::InProcess { app_state, .. } => {
                         if let Ok(mut office) = app_state.office.lock() {
@@ -972,10 +1069,7 @@ fn process_ui_actions(
             }
             UiAction::MinimizeToTray => {
                 let is_worker = tray_params.worker_mode.as_ref().is_some_and(|m| m.0);
-                let _ = show_native_tray_toast(
-                    "Agents Station running in Tray",
-                    "3D world unloaded · HTTP server active on 127.0.0.1:4310",
-                );
+                let _ = notify_parent_in_tray(false);
                 if is_worker {
                     // Exit only the heavy Bevy `--gui-worker` so resident RAM drops to the
                     // lightweight parent TrayDaemon + :4310 process (<= 45 MB).
@@ -1023,6 +1117,7 @@ fn process_ui_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use station_core::state::sessions::{FeedItem, OfficeState, PendingPerm};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
@@ -1065,6 +1160,114 @@ mod tests {
     }
 
     #[test]
+    fn parsers_round_trip_real_office_state_snapshot_with_perm_and_error_feed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut office = OfficeState::new(tmp.path().to_path_buf());
+        office.pending_perms.insert(
+            "perm-99".to_owned(),
+            PendingPerm {
+                id: "perm-99".to_owned(),
+                sess: "sess-1".to_owned(),
+                name: "agents-station".to_owned(),
+                kind: "permission".to_owned(),
+                tool_type: "Bash".to_owned(),
+                label: "cargo test".to_owned(),
+                detail: "cargo test -p station-app".to_owned(),
+                danger: None,
+                created_at: 1_700_000_000_000,
+            },
+        );
+        office.feed.push_front(FeedItem {
+            id: 1,
+            ts: 1_700_000_000_000,
+            sess: "sess-1".to_owned(),
+            name: "codex".to_owned(),
+            kind: "error".to_owned(),
+            label: "command failed".to_owned(),
+            desc: None,
+        });
+
+        let snap = office.snapshot_json(true, "en");
+        let perms = parse_perms_from_json(&snap);
+        assert_eq!(perms.len(), 1);
+        assert_eq!(perms[0].id, "perm-99");
+        assert_eq!(perms[0].tool, "Bash");
+        assert_eq!(perms[0].summary, "cargo test -p station-app");
+
+        let feed = parse_feed_from_json(&snap);
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].agent, "codex");
+        assert_eq!(feed[0].level, "err");
+        assert_eq!(feed[0].message, "command failed");
+    }
+
+    #[test]
+    fn attached_snapshot_clears_resolved_perms_and_ended_sessions_when_empty() {
+        let mut ui = UiState::default();
+        assert!(!ui.sessions.is_empty());
+        assert!(!ui.pending_perms.is_empty());
+
+        let populated = RemoteSnapshot {
+            has_snapshot: true,
+            sessions: vec![SessionCard {
+                id: "s-1".to_owned(),
+                agent: "claude".to_owned(),
+                project: "proj".to_owned(),
+                status: "working".to_owned(),
+                model: "opus".to_owned(),
+                last_prompt: "hi".to_owned(),
+                tool: None,
+                cost_usd: 0.0,
+                tokens: 0,
+                pinned: false,
+            }],
+            pending_perms: vec![PendingPermCard {
+                id: "p-1".to_owned(),
+                session_id: "s-1".to_owned(),
+                agent: "claude".to_owned(),
+                tool: "Bash".to_owned(),
+                summary: "echo hi".to_owned(),
+                kind: "permission".to_owned(),
+            }],
+            feed: Vec::new(),
+            harnesses: Vec::new(),
+        };
+        apply_remote_snapshot_to_ui(&populated, &mut ui);
+        assert_eq!(ui.sessions.len(), 1);
+        assert_eq!(ui.pending_perms.len(), 1);
+
+        let cleared = RemoteSnapshot {
+            has_snapshot: true,
+            sessions: Vec::new(),
+            pending_perms: Vec::new(),
+            feed: Vec::new(),
+            harnesses: Vec::new(),
+        };
+        apply_remote_snapshot_to_ui(&cleared, &mut ui);
+        assert!(ui.sessions.is_empty(), "ended sessions must clear from UI");
+        assert!(ui.pending_perms.is_empty(), "resolved perms must clear from UI");
+    }
+
+    #[test]
+    fn sse_byte_decoder_handles_split_multibyte_utf8_and_caps_buffer() {
+        let full = "data: {\"msg\":\"Tiếng Việt · ภาษาไทย\"}\r\n";
+        let raw = full.as_bytes();
+        // Split right inside the 3-byte UTF-8 sequence for 'ế' (E1 BA BF).
+        let split_at = full.find('ế').unwrap() + 1;
+        let mut dec = SseByteDecoder::new(1024);
+
+        let first = dec.push_chunk(&raw[..split_at]).unwrap();
+        assert!(first.is_empty());
+        let second = dec.push_chunk(&raw[split_at..]).unwrap();
+        assert_eq!(second, vec!["data: {\"msg\":\"Tiếng Việt · ภาษาไทย\"}"]);
+
+        // Overflow guard caps oversized unterminated lines and clears buffer.
+        let mut tiny = SseByteDecoder::new(16);
+        assert!(tiny.push_chunk(b"0123456789abcdefX").is_err());
+        assert_eq!(tiny.push_chunk(b"ok\n").unwrap(), vec!["ok"]);
+    }
+
+    #[test]
     fn bridge_attaches_via_sse_when_healthy_and_surfaces_bind_error_on_conflict() {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -1080,6 +1283,20 @@ mod tests {
                 "hook_event_name": "SessionStart",
                 "cwd": "D:/mystation/agents-station"
             }));
+            office.pending_perms.insert(
+                "perm-live".to_owned(),
+                PendingPerm {
+                    id: "perm-live".to_owned(),
+                    sess: "s-attach".to_owned(),
+                    name: "agents-station".to_owned(),
+                    kind: "permission".to_owned(),
+                    tool_type: "Bash".to_owned(),
+                    label: "test".to_owned(),
+                    detail: "cargo test".to_owned(),
+                    danger: None,
+                    created_at: 1_700_000_000_000,
+                },
+            );
         }
         let handle = rt
             .block_on(start_http_server(srv_state, "127.0.0.1", 0))
@@ -1099,22 +1316,44 @@ mod tests {
         assert!(attached.bind_error_message().is_none());
 
         let deadline = Instant::now() + Duration::from_secs(3);
-        let mut saw_session = false;
+        let mut saw_session_and_perm = false;
         while Instant::now() < deadline {
-            if attached
-                .remote_sessions()
-                .iter()
-                .any(|s| s.id == "s-attach")
+            if attached.remote_sessions().iter().any(|s| s.id == "s-attach")
+                && attached
+                    .remote_perms()
+                    .iter()
+                    .any(|p| p.id == "perm-live" && p.tool == "Bash")
             {
-                saw_session = true;
+                saw_session_and_perm = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(
-            saw_session,
-            "attached SSE bridge must ingest live session snapshot from running daemon"
+            saw_session_and_perm,
+            "attached SSE bridge must ingest live session & permission snapshot from running daemon"
         );
+
+        // Resolving permission over pooled action channel triggers /api/live refresh & clears perm.
+        assert!(attached.enqueue_remote_action(
+            "/api/perm",
+            json!({ "id": "perm-live", "decision": "allow" }),
+            RefreshKind::Live,
+        ));
+        let clear_deadline = Instant::now() + Duration::from_secs(3);
+        let mut perm_cleared = false;
+        while Instant::now() < clear_deadline {
+            if attached.remote_perms().is_empty() {
+                perm_cleared = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            perm_cleared,
+            "post-POST /api/live refresh must clear resolved permission from attached snapshot"
+        );
+
         drop(attached);
         let _ = handle.shutdown.send(true);
         drop(rt);
