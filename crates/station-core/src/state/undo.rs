@@ -50,47 +50,32 @@ fn canonicalize_maybe_new(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn resolve_target(file: &Path, cwd: Option<&Path>) -> Option<(PathBuf, Option<PathBuf>)> {
-    if let Some(cwd_path) = cwd.filter(|p| !p.as_os_str().is_empty()) {
-        let canon_cwd = std::fs::canonicalize(cwd_path).ok()?;
-        let candidate = if file.is_absolute() {
-            file.to_path_buf()
-        } else {
-            cwd_path.join(file)
-        };
-        if is_symlink(&candidate) {
-            return None;
-        }
-        let resolved = canonicalize_maybe_new(&candidate)?;
-        if !resolved.starts_with(&canon_cwd) || resolved == canon_cwd || is_symlink(&resolved) {
-            return None;
-        }
-        Some((resolved, Some(canon_cwd)))
+fn resolve_target(file: &Path, cwd: Option<&Path>) -> Option<(PathBuf, PathBuf)> {
+    let cwd_path = cwd.filter(|p| !p.as_os_str().is_empty())?;
+    let canon_cwd = std::fs::canonicalize(cwd_path).ok()?;
+    let candidate = if file.is_absolute() {
+        file.to_path_buf()
     } else {
-        if file
-            .components()
-            .any(|c| matches!(c, Component::ParentDir))
-            || is_symlink(file)
-        {
-            return None;
-        }
-        Some((file.to_path_buf(), None))
+        cwd_path.join(file)
+    };
+    if is_symlink(&candidate) {
+        return None;
     }
+    let resolved = canonicalize_maybe_new(&candidate)?;
+    if !resolved.starts_with(&canon_cwd) || resolved == canon_cwd || is_symlink(&resolved) {
+        return None;
+    }
+    Some((resolved, canon_cwd))
 }
 
-fn within_cwd(path: &Path, canon_cwd: Option<&Path>) -> bool {
-    match canon_cwd {
-        Some(cwd) => {
-            canonicalize_maybe_new(path).is_some_and(|r| r.starts_with(cwd) && r != cwd)
-        }
-        None => true,
-    }
+fn within_cwd(path: &Path, canon_cwd: &Path) -> bool {
+    canonicalize_maybe_new(path).is_some_and(|r| r.starts_with(canon_cwd) && r != canon_cwd)
 }
 
 #[derive(Debug, Clone)]
 struct UndoFileRec {
     file: PathBuf,
-    cwd: Option<PathBuf>,
+    cwd: PathBuf,
     existed: bool,
     kept: Option<PathBuf>,
     big: bool,
@@ -140,6 +125,7 @@ pub struct UndoManager {
     max_bytes: u64,
     keep: usize,
     max_sessions: usize,
+    next_turn_seq: u64,
     turns: HashMap<String, Vec<UndoTurn>>,
     session_order: VecDeque<String>,
 }
@@ -151,6 +137,7 @@ impl UndoManager {
             max_bytes: 5_000_000,
             keep: 3,
             max_sessions: MAX_SESSIONS,
+            next_turn_seq: 0,
             turns: HashMap::new(),
             session_order: VecDeque::new(),
         }
@@ -172,8 +159,10 @@ impl UndoManager {
         self.session_order.push_back(sid.to_owned());
 
         let disk_dir = self.session_dir(sid);
+        let seq = self.next_turn_seq;
+        self.next_turn_seq = self.next_turn_seq.wrapping_add(1);
         let list = self.turns.entry(sid.to_owned()).or_default();
-        let id = format!("{now_ms:x}_{}", list.len());
+        let id = format!("{now_ms:x}_{seq}");
         list.push(UndoTurn {
             id,
             prompt: text.chars().take(200).collect(),
@@ -191,8 +180,17 @@ impl UndoManager {
             let Some(oldest) = self.session_order.pop_front() else {
                 break;
             };
-            self.turns.remove(&oldest);
-            let _ = std::fs::remove_dir_all(self.session_dir(&oldest));
+            let evicted_turns = self.turns.remove(&oldest);
+            let evicted_key = sid_disk_key(&oldest);
+            let key_still_used = self.turns.keys().any(|k| sid_disk_key(k) == evicted_key);
+            if !key_still_used {
+                let _ = std::fs::remove_dir_all(self.session_dir(&oldest));
+            } else if let Some(turns) = evicted_turns {
+                let old_dir = self.session_dir(&oldest);
+                for t in turns {
+                    let _ = std::fs::remove_dir_all(old_dir.join(&t.id));
+                }
+            }
         }
     }
 
@@ -263,7 +261,7 @@ impl UndoManager {
         }
         let mut files = Vec::with_capacity(t.files.len());
         for x in &t.files {
-            if !within_cwd(&x.file, x.cwd.as_deref()) {
+            if !within_cwd(&x.file, &x.cwd) {
                 continue;
             }
             let st = match std::fs::symlink_metadata(&x.file) {
@@ -341,7 +339,7 @@ impl UndoManager {
             let _ = std::fs::create_dir_all(&after);
         }
         let mut done = Vec::new();
-        let rec_lookup: HashMap<String, (Option<PathBuf>, Option<PathBuf>)> = self
+        let rec_lookup: HashMap<String, (Option<PathBuf>, PathBuf)> = self
             .turns
             .get(sid)
             .and_then(|l| l.last())
@@ -364,7 +362,7 @@ impl UndoManager {
             let Some((kept_src, canon_cwd)) = rec_lookup.get(&s.file) else {
                 continue;
             };
-            if is_symlink(target) || !within_cwd(target, canon_cwd.as_deref()) {
+            if is_symlink(target) || !within_cwd(target, canon_cwd) {
                 continue;
             }
             let fname = target
@@ -567,5 +565,60 @@ mod tests {
             .filter_map(Result::ok)
             .count();
         assert!(dirs <= 50, "expected <= 50 stored session folders, found {dirs}");
+    }
+
+    #[test]
+    fn undo_rejects_missing_or_empty_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("unscoped.txt");
+        std::fs::write(&target, "before").unwrap();
+
+        let mut u = UndoManager::new(dir.path().join("undo"));
+        u.prompt("codex:no-cwd", "edit without cwd", 1000);
+        u.before("codex:no-cwd", &target, None);
+        u.before("codex:no-cwd", &target, Some(Path::new("")));
+        std::fs::write(&target, "after").unwrap();
+
+        assert!(u.plan("codex:no-cwd").is_none(), "missing/empty cwd must be rejected");
+        let res = u.apply("codex:no-cwd", 2000);
+        assert!(res.done.is_empty());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "after");
+    }
+
+    #[test]
+    fn undo_eviction_preserves_disk_backups_for_colliding_sid_disk_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let undo_root = dir.path().join("undo");
+        let file_a = dir.path().join("a.txt");
+        let file_b = dir.path().join("b.txt");
+        std::fs::write(&file_a, "orig-a").unwrap();
+        std::fs::write(&file_b, "orig-b").unwrap();
+
+        let mut u = UndoManager::new(undo_root.clone());
+        // Oldest session uses colon; second session collides on sid_disk_key ("codex_a").
+        u.prompt("codex:a", "edit a", 1000);
+        u.before("codex:a", &file_a, Some(dir.path()));
+
+        u.prompt("codex_a", "edit b", 1000);
+        u.before("codex_a", &file_b, Some(dir.path()));
+        std::fs::write(&file_b, "changed-b").unwrap();
+
+        // Add 49 more distinct sessions so total reaches 51 and "codex:a" is evicted.
+        for i in 0..49usize {
+            let sid = format!("other:{i:02}");
+            u.prompt(&sid, "edit", 2000 + i as u64);
+            u.before(&sid, &file_a, Some(dir.path()));
+        }
+
+        assert!(u.plan("codex:a").is_none(), "oldest session must be evicted");
+        assert!(undo_root.join("codex_a").exists(), "shared disk dir must survive for active codex_a");
+
+        let plan = u.plan("codex_a").expect("active colliding session must keep valid plan");
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].action, "restore");
+
+        let res = u.apply("codex_a", 9000);
+        assert_eq!(res.done.len(), 1);
+        assert_eq!(std::fs::read_to_string(&file_b).unwrap(), "orig-b");
     }
 }
