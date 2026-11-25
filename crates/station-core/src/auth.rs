@@ -1,10 +1,13 @@
 use crate::atomic::write_bytes_atomic;
 use anyhow::Result;
+use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +16,52 @@ type HmacSha256 = Hmac<Sha256>;
 pub const COOKIE_NAME: &str = "office_pin";
 pub const KEEP_DAYS: u64 = 365;
 pub const VISIT_MS: u64 = 12 * 3600 * 1000;
+pub const PIN_LOCK_WINDOW_MS: u64 = 15 * 60 * 1000;
+pub const PIN_MAX_IP_FAILURES: usize = 5;
+pub const PIN_MAX_GLOBAL_FAILURES: usize = 20;
+
+#[derive(Debug, Default)]
+pub struct PinRateLimiter {
+    per_ip: HashMap<IpAddr, Vec<u64>>,
+    global: Vec<u64>,
+}
+
+impl PinRateLimiter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn prune(&mut self, now_ms: u64) {
+        self.global
+            .retain(|&t| now_ms.saturating_sub(t) < PIN_LOCK_WINDOW_MS);
+        self.per_ip.retain(|_, list| {
+            list.retain(|&t| now_ms.saturating_sub(t) < PIN_LOCK_WINDOW_MS);
+            !list.is_empty()
+        });
+    }
+
+    /// Enforce 5 failures / 15 min per IP and 20 failures / 15 min global lockout.
+    /// Returns `Err(StatusCode::TOO_MANY_REQUESTS)` once either budget is exhausted.
+    pub fn check_and_record(
+        &mut self,
+        ip: IpAddr,
+        now_ms: u64,
+        success: bool,
+    ) -> Result<(), StatusCode> {
+        self.prune(now_ms);
+        let ip_fails = self.per_ip.get(&ip).map_or(0, Vec::len);
+        if ip_fails >= PIN_MAX_IP_FAILURES || self.global.len() >= PIN_MAX_GLOBAL_FAILURES {
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        if success {
+            self.per_ip.remove(&ip);
+        } else {
+            self.per_ip.entry(ip).or_default().push(now_ms);
+            self.global.push(now_ms);
+        }
+        Ok(())
+    }
+}
 
 pub fn is_valid_pin_format(pin: &str) -> bool {
     (6..=10).contains(&pin.len()) && pin.bytes().all(|b| b.is_ascii_digit())
@@ -220,5 +269,52 @@ mod tests {
         let fresh = format!("{COOKIE_NAME}={}", store.sign_cookie(false));
         let parsed = store.parse_cookie_header(&fresh).unwrap();
         assert!(!parsed.keep);
+    }
+
+    #[test]
+    fn pin_rate_limiter_enforces_per_ip_global_and_window_expiry() {
+        use std::net::Ipv4Addr;
+        let mut lim = PinRateLimiter::new();
+        let ip1 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11));
+        let t0 = 1_000_000u64;
+
+        for i in 0..5 {
+            assert_eq!(lim.check_and_record(ip1, t0 + i * 1000, false), Ok(()));
+        }
+        assert_eq!(
+            lim.check_and_record(ip1, t0 + 6000, false),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        // Even a valid PIN is rejected while locked out
+        assert_eq!(
+            lim.check_and_record(ip1, t0 + 7000, true),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        // Other IP still allowed until global cap
+        assert_eq!(lim.check_and_record(ip2, t0 + 8000, true), Ok(()));
+
+        // After 15 min window passes, ip1 is unlocked
+        assert_eq!(
+            lim.check_and_record(ip1, t0 + PIN_LOCK_WINDOW_MS + 10_000, true),
+            Ok(())
+        );
+
+        // Global lockout: 20 failures across 5 IPs -> 21st from 6th IP rejected
+        let mut g_lim = PinRateLimiter::new();
+        for host in 1u8..=5 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, host));
+            for attempt in 0..4 {
+                assert_eq!(
+                    g_lim.check_and_record(ip, t0 + u64::from(host) * 100 + attempt, false),
+                    Ok(())
+                );
+            }
+        }
+        let ip6 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 6));
+        assert_eq!(
+            g_lim.check_and_record(ip6, t0 + 1000, false),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
     }
 }
