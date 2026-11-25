@@ -1,11 +1,103 @@
 use crate::redact::redact;
+use crate::state::git::CREATE_NO_WINDOW;
+use crate::state::tasks::resolve_agent_cli;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::VecDeque;
-use std::sync::OnceLock;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const MAX_IN: usize = 2000;
 const MAX_OUT: usize = 4000;
+
+pub type RewriteTransport =
+    Arc<dyn Fn(&str, &str, usize) -> anyhow::Result<String> + Send + Sync>;
+
+pub fn wrap_prompt(redacted: &str, photos: usize) -> String {
+    let photo_note = if photos > 0 {
+        let plural = if photos > 1 { "s" } else { "" };
+        let pron = if photos > 1 { "them" } else { "it" };
+        format!("\n({photos} screenshot{plural} will be attached to it; you cannot see {pron}.)")
+    } else {
+        String::new()
+    };
+    format!("Rewrite this message:\n<message>\n{redacted}\n</message>{photo_note}")
+}
+
+pub fn parse_claude_json_output(stdout: &str) -> Option<String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parsed: Option<Value> = serde_json::from_str(trimmed).ok();
+    if parsed.is_none() {
+        for line in trimmed.lines().rev() {
+            if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {
+                parsed = Some(v);
+                break;
+            }
+        }
+    }
+    let v = parsed?;
+    if v.get("is_error").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    if v.get("subtype").and_then(Value::as_str) != Some("success") {
+        return None;
+    }
+    let raw = v.get("result").and_then(Value::as_str)?;
+    let cleaned = clean_rewrite(raw);
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+pub fn run_claude_cli_transport(
+    bin: &Path,
+    dir: &Path,
+    redacted: &str,
+    sys_prompt: &str,
+    photos: usize,
+) -> anyhow::Result<String> {
+    let _ = std::fs::create_dir_all(dir);
+    let mut cmd = Command::new(bin);
+    cmd.args([
+        "-p",
+        &wrap_prompt(redacted, photos),
+        "--model",
+        "haiku",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--max-turns",
+        "1",
+        "--output-format",
+        "json",
+        "--no-session-persistence",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
+        "--system-prompt",
+        sys_prompt,
+    ])
+    .env("CLAUDE_CODE_SAFE_MODE", "1")
+    .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
+    .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
+    if dir.is_dir() {
+        cmd.current_dir(dir);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if let Some(cleaned) = parse_claude_json_output(&stdout) {
+        Ok(cleaned)
+    } else {
+        anyhow::bail!("claude rewrite failed (exit {:?})", out.status.code())
+    }
+}
 
 pub fn rewrite_system(lang: &str) -> String {
     let (goal, ctx, done) = if lang == "vi" {
@@ -58,6 +150,8 @@ pub struct RewriteResult {
 pub struct Rewriter {
     per_hour: usize,
     recent: VecDeque<u64>,
+    busy: bool,
+    transport: Option<RewriteTransport>,
 }
 
 impl Default for Rewriter {
@@ -71,7 +165,13 @@ impl Rewriter {
         Self {
             per_hour,
             recent: VecDeque::new(),
+            busy: false,
+            transport: None,
         }
+    }
+
+    pub fn set_transport(&mut self, transport: RewriteTransport) {
+        self.transport = Some(transport);
     }
 
     /// Always runs `redact()` BEFORE invoking the external rewrite transport.
@@ -90,6 +190,9 @@ impl Rewriter {
         if trimmed.is_empty() {
             return RewriteResult { ok: false, text: None, code: Some("empty") };
         }
+        if self.busy {
+            return RewriteResult { ok: false, text: None, code: Some("busy") };
+        }
         while let Some(&oldest) = self.recent.front() {
             if now_ms.saturating_sub(oldest) > 3_600_000 {
                 self.recent.pop_front();
@@ -105,6 +208,72 @@ impl Rewriter {
         let sys_prompt = rewrite_system(lang);
         self.recent.push_back(now_ms);
         match transport(&redacted, &sys_prompt, photos.min(4)) {
+            Ok(out) => {
+                let cleaned = clean_rewrite(&out);
+                if cleaned.is_empty() {
+                    RewriteResult { ok: false, text: None, code: Some("failed") }
+                } else {
+                    RewriteResult { ok: true, text: Some(cleaned), code: None }
+                }
+            }
+            Err(_) => RewriteResult { ok: false, text: None, code: Some("failed") },
+        }
+    }
+
+    /// Runs the configured transport (or real `claude -p --model haiku` CLI) without
+    /// holding the `Mutex` while the subprocess runs.
+    pub fn execute_blocking(
+        rewriter: Arc<Mutex<Self>>,
+        work_dir: PathBuf,
+        text: String,
+        lang: String,
+        photos: usize,
+        now_ms: u64,
+    ) -> RewriteResult {
+        let (redacted, sys_prompt, clamped_photos, custom_transport) = {
+            let mut g = rewriter.lock().unwrap_or_else(|e| e.into_inner());
+            let trimmed: String = text.trim().chars().take(MAX_IN).collect();
+            if trimmed.is_empty() {
+                return RewriteResult { ok: false, text: None, code: Some("empty") };
+            }
+            if g.busy {
+                return RewriteResult { ok: false, text: None, code: Some("busy") };
+            }
+            while let Some(&oldest) = g.recent.front() {
+                if now_ms.saturating_sub(oldest) > 3_600_000 {
+                    g.recent.pop_front();
+                } else {
+                    break;
+                }
+            }
+            if g.recent.len() >= g.per_hour {
+                return RewriteResult { ok: false, text: None, code: Some("tooMany") };
+            }
+            let redacted = redact(&trimmed);
+            let sys_prompt = rewrite_system(&lang);
+            let custom = g.transport.clone();
+            if custom.is_none() && resolve_agent_cli("claude").is_none() {
+                return RewriteResult { ok: false, text: None, code: Some("noClaude") };
+            }
+            g.busy = true;
+            g.recent.push_back(now_ms);
+            (redacted, sys_prompt, photos.min(4), custom)
+        };
+
+        let result = if let Some(t) = custom_transport {
+            t(&redacted, &sys_prompt, clamped_photos)
+        } else if let Some(cli) = resolve_agent_cli("claude") {
+            run_claude_cli_transport(&cli.file, &work_dir, &redacted, &sys_prompt, clamped_photos)
+        } else {
+            Err(anyhow::anyhow!("noClaude"))
+        };
+
+        {
+            let mut g = rewriter.lock().unwrap_or_else(|e| e.into_inner());
+            g.busy = false;
+        }
+
+        match result {
             Ok(out) => {
                 let cleaned = clean_rewrite(&out);
                 if cleaned.is_empty() {
