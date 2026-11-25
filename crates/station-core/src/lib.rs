@@ -2,6 +2,8 @@ pub mod agent_events;
 pub mod atomic;
 pub mod auth;
 pub mod config;
+pub mod hook_client;
+pub mod hooks_cli;
 pub mod http;
 pub mod platform;
 pub mod prefs;

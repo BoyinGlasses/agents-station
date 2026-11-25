@@ -1,5 +1,6 @@
 pub mod capture;
 pub mod cli;
+pub mod commands;
 pub mod gpu;
 pub mod instance;
 
@@ -98,9 +99,5 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!(
-        "agents-station cli ({}:{}, gpu={:?})",
-        cli.host, cli.port, cli.gpu
-    );
-    Ok(())
+    commands::run_cli_command(&cli, None)
 }

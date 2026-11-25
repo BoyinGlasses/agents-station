@@ -66,12 +66,12 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 - [x] src/shared/quick-choices.js -> `crates/station-core/src/shared/quick_choices.rs` (unit tested)
 - [x] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (unit tested)
 - [x] src/shared/workdays.js -> `crates/station-core/src/shared/workdays.rs` (unit tested)
-- [ ] bin/cli.mjs -> (pending)
-- [ ] bin/service.mjs -> (pending)
-- [ ] hooks/hooks.json -> (pending)
-- [ ] hooks/opencode.mjs -> (pending)
-- [ ] hooks/send.mjs -> (pending)
-- [ ] hooks/status-line.mjs -> (pending)
+- [x] bin/cli.mjs -> `crates/station-core/src/hooks_cli.rs`, `crates/station-app/src/{cli,commands}.rs` (unit tested)
+- [x] bin/service.mjs -> `crates/station-core/src/hooks_cli.rs::install_windows_service_in` (unit tested)
+- [x] hooks/hooks.json -> `crates/station-core/src/hooks_cli.rs::install_claude` (unit tested)
+- [x] hooks/opencode.mjs -> `crates/station-core/src/hooks_cli.rs::install_opencode` (unit tested)
+- [x] hooks/send.mjs -> `crates/station-core/src/hook_client.rs::run_hook_client` (unit tested)
+- [x] hooks/status-line.mjs -> `crates/station-core/src/http/hooks.rs::post_hook_status` + `hook_client.rs` (unit tested)
 
 ## P2 — Public Assets & 2D Procedural Textures (17 files)
 
