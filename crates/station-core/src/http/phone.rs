@@ -376,6 +376,7 @@ mod tests {
                     tool_calls: 0,
                     edits: 0,
                     fails: 0,
+                    ..Default::default()
                 },
             );
             office.pending_perms.insert(

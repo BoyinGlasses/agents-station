@@ -97,7 +97,7 @@ pub async fn post_event(
                     let _ = vault.flush();
                 }
             }
-            "Stop" => {
+            "Stop" | "StopFailure" => {
                 if let Some(cwd) = &ev.cwd
                     && let Some(name) = Path::new(cwd).file_name().and_then(|n| n.to_str())
                 {
@@ -105,9 +105,74 @@ pub async fn post_event(
                     tenure.touch(name, ts, true);
                     let _ = tenure.save();
                 }
+                if ev.hook_event_name == "StopFailure" {
+                    let enabled = state
+                        .prefs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get("autoResume")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let has_bin = crate::store::cli_command::find_in_path(&["claude.exe", "claude"]).is_some();
+                    let _decision = state
+                        .auto_resume
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .check_and_record(enabled, &ev.session_id, has_bin, ts);
+                }
             }
             _ => {}
         }
+
+        // Refresh git + usage off the async runtime thread via spawn_blocking.
+        let (sess_cwd, sess_tp) = {
+            let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+            office
+                .sessions
+                .get(&ev.session_id)
+                .map(|s| (s.cwd.clone(), s.transcript_path.clone()))
+                .unwrap_or_default()
+        };
+        if !sess_cwd.is_empty() && Path::new(&sess_cwd).is_dir() {
+            let git = Arc::clone(&state.git);
+            let cwd_clone = sess_cwd.clone();
+            if let Ok(Some(info)) = tokio::task::spawn_blocking(move || {
+                git.lock().unwrap_or_else(|e| e.into_inner()).poll_cwd(&cwd_clone)
+            })
+            .await
+            {
+                state
+                    .office
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .apply_git(&ev.session_id, info);
+            }
+        }
+        if sess_tp.is_some()
+            || matches!(
+                ev.hook_event_name.as_str(),
+                "UserPromptSubmit" | "PostToolUse" | "Stop"
+            )
+        {
+            let usage = Arc::clone(&state.usage);
+            let sid_clone = ev.session_id.clone();
+            let claude_dir = state.claude_dir.clone();
+            if let Ok(Some(u)) = tokio::task::spawn_blocking(move || {
+                usage
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .scan_session(&sid_clone, sess_tp.as_deref(), &claude_dir)
+            })
+            .await
+            {
+                state
+                    .office
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .apply_usage(&ev.session_id, &u);
+            }
+        }
+
         Ok(Json(json!({ "ok": true, "session_id": ev.session_id })))
     } else {
         Ok(Json(json!({ "ok": true, "ignored": true })))

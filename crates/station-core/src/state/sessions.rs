@@ -3,9 +3,14 @@ use crate::atomic::write_json_atomic;
 use crate::redact::redact;
 use crate::shared::cache_clock::CacheState;
 use crate::shared::chat_engine::ChatEngine;
+use crate::shared::model_name::model_long;
+use crate::shared::quick_choices::{QuickChoice, quick_choices};
+use crate::state::git::RepoInfo;
 use crate::state::loops::LoopGuard;
 use crate::state::overlap::{OverlapTracker, file_of, is_edit_tool};
+use crate::state::testrun::{test_counts, test_runner};
 use crate::state::undo::UndoManager;
+use crate::store::usage::{SessionUsage, ctx_max};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -132,7 +137,7 @@ pub struct ToolSummary {
     pub file: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionRecord {
     pub id: String,
     pub agent: String,
@@ -145,7 +150,29 @@ pub struct SessionRecord {
     pub last_prompt: Option<String>,
     pub last: Option<ToolSummary>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
     pub cache: Option<CacheState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<RepoInfo>,
+    #[serde(default)]
+    pub cost_usd: f64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub ctx_tokens: u64,
+    #[serde(default)]
+    pub ctx_max: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_test: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<QuickChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox: Option<String>,
+    #[serde(skip)]
+    pub transcript_path: Option<PathBuf>,
     pub tool_calls: u64,
     pub edits: u64,
     pub fails: u64,
@@ -292,6 +319,7 @@ pub struct OfficeState {
     pub pending_perms: HashMap<String, PendingPerm>,
     holds: HashMap<String, HoldEntry>,
     pub pins: HashMap<String, Vec<String>>,
+    pub known_dirs: Vec<String>,
     pub todos: Vec<Value>,
     pub stats: SessionStats,
     pub loops: LoopGuard,
@@ -317,6 +345,11 @@ impl OfficeState {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
         let chat = ChatEngine::from_persisted(chat_persisted, now_ms());
+        let dirs_file = data_dir.join("projects.json");
+        let known_dirs: Vec<String> = std::fs::read_to_string(&dirs_file)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         Self {
             undo: UndoManager::new(data_dir.join("undo")),
             data_dir,
@@ -325,6 +358,7 @@ impl OfficeState {
             pending_perms: HashMap::new(),
             holds: HashMap::new(),
             pins,
+            known_dirs,
             todos: Vec::new(),
             stats: SessionStats::default(),
             loops: LoopGuard::default(),
@@ -507,7 +541,18 @@ impl OfficeState {
                 last_prompt: None,
                 last: None,
                 model: None,
+                model_label: None,
                 cache: None,
+                git: None,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                ctx_tokens: 0,
+                ctx_max: 0,
+                last_test: None,
+                choices: Vec::new(),
+                inbox: None,
+                transcript_path: None,
                 tool_calls: 0,
                 edits: 0,
                 fails: 0,
@@ -517,6 +562,23 @@ impl OfficeState {
             && !c.is_empty()
         {
             sess.cwd = c.clone();
+        }
+        if let Some(tp) = ev
+            .raw
+            .get("transcript_path")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            sess.transcript_path = Some(PathBuf::from(tp));
+        }
+        if let Some(ib) = ev
+            .raw
+            .get("messagingSocketPath")
+            .or_else(|| ev.raw.get("inbox"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            sess.inbox = Some(ib.to_owned());
         }
 
         let sname = sess.name.clone();
@@ -574,6 +636,36 @@ impl OfficeState {
                     }
                 } else if tname == "Bash" {
                     self.stats.commands += 1;
+                    if let Some(cmd) = ev.tool_input.get("command").and_then(Value::as_str)
+                        && let Some(runner) = test_runner(cmd)
+                    {
+                        let out_text = ev
+                            .raw
+                            .get("tool_response")
+                            .map(|tr| {
+                                if let Some(s) = tr.as_str() {
+                                    s.to_owned()
+                                } else {
+                                    let stdout = tr.get("stdout").and_then(Value::as_str).unwrap_or("");
+                                    let stderr = tr.get("stderr").and_then(Value::as_str).unwrap_or("");
+                                    format!("{stdout}\n{stderr}")
+                                }
+                            })
+                            .unwrap_or_default();
+                        if let Some(counts) = test_counts(&out_text) {
+                            sess.last_test = Some(json!({
+                                "runner": runner,
+                                "pass": counts.pass,
+                                "fail": counts.fail,
+                                "at": ts,
+                            }));
+                        } else {
+                            sess.last_test = Some(json!({
+                                "runner": runner,
+                                "at": ts,
+                            }));
+                        }
+                    }
                 } else if matches!(tname, "Read" | "Grep" | "Glob") {
                     self.stats.reads += 1;
                 }
@@ -588,6 +680,14 @@ impl OfficeState {
             }
             "Stop" | "StopFailure" => {
                 sess.status = "rest".to_owned();
+                if let Some(msg_txt) = ev
+                    .raw
+                    .get("last_assistant_message")
+                    .or_else(|| ev.raw.get("message"))
+                    .and_then(Value::as_str)
+                {
+                    sess.choices = quick_choices(msg_txt);
+                }
                 self.undo.stop(&ev.session_id, ts);
                 ("stop".to_owned(), sname.clone())
             }
@@ -603,6 +703,9 @@ impl OfficeState {
         };
 
         let _ = self.loops.on_event(&ev.raw, ts);
+        if !scwd.is_empty() {
+            self.note_dir(&scwd);
+        }
 
         let id = self.seq.fetch_add(1, Ordering::Relaxed);
         let item = FeedItem {
@@ -625,6 +728,42 @@ impl OfficeState {
         let _ = append_replay_event(&self.data_dir, ts, &msg);
         self.broadcast(msg);
         Some(ev)
+    }
+
+    pub fn note_dir(&mut self, dir: &str) {
+        if dir.is_empty() || !Path::new(dir).is_absolute() {
+            return;
+        }
+        if self.known_dirs.first().map(String::as_str) == Some(dir) {
+            return;
+        }
+        self.known_dirs.retain(|d| d != dir);
+        self.known_dirs.insert(0, dir.to_owned());
+        self.known_dirs.truncate(30);
+        let _ = write_json_atomic(&self.data_dir.join("projects.json"), &self.known_dirs);
+    }
+
+    pub fn apply_git(&mut self, sid: &str, info: RepoInfo) {
+        if let Some(s) = self.sessions.get_mut(sid) {
+            s.git = Some(info);
+        }
+    }
+
+    pub fn apply_usage(&mut self, sid: &str, u: &SessionUsage) {
+        if let Some(s) = self.sessions.get_mut(sid) {
+            s.cost_usd = u.cost;
+            s.input_tokens = u.input;
+            s.output_tokens = u.out;
+            s.ctx_tokens = u.ctx;
+            s.ctx_max = ctx_max(u);
+            if !u.model.is_empty() {
+                s.model = Some(u.model.clone());
+                let lbl = model_long(&u.model);
+                if !lbl.is_empty() {
+                    s.model_label = Some(lbl);
+                }
+            }
+        }
     }
 
     pub fn add_pin(&mut self, sid: &str, text: &str) -> Result<bool> {

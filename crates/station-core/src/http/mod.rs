@@ -9,7 +9,9 @@ use crate::auth::{AuthStore, PinRateLimiter};
 use crate::config::{home_dir, resolve_claude_dir};
 use crate::platform::default_platform;
 use crate::prefs::PrefsStore;
+use crate::state::auto_resume::AutoResumeGuard;
 use crate::state::claude_version::ClaudeVersionWatcher;
+use crate::state::git::GitTracker;
 use crate::state::lift_service::LiftService;
 use crate::state::sessions::{OfficeState, ReapReport, now_ms};
 use crate::state::tasks::TaskManager;
@@ -21,6 +23,7 @@ use crate::store::otel::OtelStore;
 use crate::store::push::PushStore;
 use crate::store::rewrite::Rewriter;
 use crate::store::trophies::TrophyStore;
+use crate::store::usage::UsageScanner;
 use crate::store::vault::VaultStore;
 use crate::system::SystemMonitor;
 use anyhow::Result;
@@ -48,6 +51,7 @@ pub trait HarnessApi: Send + Sync {
 
 pub struct AppState {
     pub data_dir: PathBuf,
+    pub claude_dir: PathBuf,
     pub auth: AuthStore,
     pub pin_limiter: Mutex<PinRateLimiter>,
     pub prefs: Mutex<PrefsStore>,
@@ -64,6 +68,9 @@ pub struct AppState {
     pub ag_accounts: Mutex<AntigravityAccounts>,
     pub claude_version: Mutex<ClaudeVersionWatcher>,
     pub images: Mutex<ImageStore>,
+    pub git: Arc<Mutex<GitTracker>>,
+    pub usage: Arc<Mutex<UsageScanner>>,
+    pub auto_resume: Mutex<AutoResumeGuard>,
     pub lift: LiftService,
     pub harnesses: Option<Arc<dyn HarnessApi>>,
 }
@@ -75,7 +82,7 @@ impl AppState {
         let auth = AuthStore::load_or_init(&data_dir)?;
         let prefs = PrefsStore::load(&data_dir);
         let office = OfficeState::new(data_dir.clone());
-        let sys = SystemMonitor::new(default_platform(), claude_dir);
+        let sys = SystemMonitor::new(default_platform(), claude_dir.clone());
         let otel = OtelStore::load(data_dir.join("otel"), 30, now);
         let trophies = TrophyStore::load(&data_dir, now);
         let vault = VaultStore::load(&data_dir);
@@ -87,10 +94,14 @@ impl AppState {
         let ag_accounts = AntigravityAccounts::load(&data_dir);
         let claude_version = ClaudeVersionWatcher::load(&data_dir, home_dir());
         let images = ImageStore::load(&data_dir);
+        let git = Arc::new(Mutex::new(GitTracker::new()));
+        let usage = Arc::new(Mutex::new(UsageScanner::new()));
+        let auto_resume = Mutex::new(AutoResumeGuard::default());
         let lift = LiftService::init(&data_dir, env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_VERSION"), now);
 
         Ok(Self {
             data_dir,
+            claude_dir,
             auth,
             pin_limiter: Mutex::new(PinRateLimiter::new()),
             prefs: Mutex::new(prefs),
@@ -107,6 +118,9 @@ impl AppState {
             ag_accounts: Mutex::new(ag_accounts),
             claude_version: Mutex::new(claude_version),
             images: Mutex::new(images),
+            git,
+            usage,
+            auto_resume,
             lift,
             harnesses,
         })
@@ -187,6 +201,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/hook/denied", post(hooks::post_hook_denied))
         // Core GET/POST APIs
         .route("/api/live", get(api::get_live))
+        .route("/api/git", get(api::get_git))
         .route("/api/doctor", get(api::get_doctor))
         .route("/api/log", get(api::get_log))
         .route("/api/timeline", get(api::get_timeline))

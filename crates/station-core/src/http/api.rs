@@ -67,6 +67,22 @@ pub async fn get_live(
     Ok(Json(snap))
 }
 
+pub async fn get_git(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let repos = state
+        .git
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .all_repos();
+    Ok(Json(json!({ "ok": true, "repos": repos })))
+}
+
 pub async fn get_doctor(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1702,5 +1718,126 @@ mod tests {
             assert_eq!(resp.headers().get("content-security-policy").unwrap(), "sandbox");
             assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
         }
+    }
+
+    #[tokio::test]
+    async fn post_event_populates_session_git_usage_cost_tokens_and_test_counts_in_api_live() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let git = |args: &[&str]| {
+            let mut cmd = Command::new("git");
+            cmd.args(args).current_dir(&repo);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let out = cmd.output().expect("git must run");
+            assert!(out.status.success(), "git {args:?} failed: {:?}", out);
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(repo.join("a.txt"), "v1\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-m", "init"]);
+        // Dirty working tree
+        std::fs::write(repo.join("a.txt"), "v2\n").unwrap();
+
+        let transcript = dir.path().join("s-usage.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":1000000,"output_tokens":200000,"cache_read_input_tokens":0}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        let app = build_router(state.clone());
+
+        let ev1 = json!({
+            "session_id": "s-usage",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": repo.to_string_lossy(),
+            "transcript_path": transcript.to_string_lossy(),
+            "prompt": "run tests"
+        });
+        let req1 = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(ev1.to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req1).await.unwrap().status(), StatusCode::OK);
+
+        let ev2 = json!({
+            "session_id": "s-usage",
+            "hook_event_name": "PostToolUse",
+            "cwd": repo.to_string_lossy(),
+            "transcript_path": transcript.to_string_lossy(),
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo test -p station-core" },
+            "tool_response": { "stdout": "test result: ok. 12 passed; 0 failed;" }
+        });
+        let req2 = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(ev2.to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req2).await.unwrap().status(), StatusCode::OK);
+
+        let live_req = Request::builder()
+            .uri("/api/live")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let live_resp = app.clone().oneshot(live_req).await.unwrap();
+        assert_eq!(live_resp.status(), StatusCode::OK);
+        let live: Value =
+            serde_json::from_slice(&to_bytes(live_resp.into_body(), 128 * 1024).await.unwrap())
+                .unwrap();
+        let sess = live["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == "s-usage")
+            .expect("session s-usage must exist");
+
+        assert!(
+            !sess["git"]["branch"].as_str().unwrap_or("").is_empty(),
+            "git branch must be populated: {sess}"
+        );
+        assert!(
+            sess["git"]["dirty"].as_u64().unwrap_or(0) >= 1,
+            "git dirty count must reflect modified file: {sess}"
+        );
+        let cost = sess["cost_usd"].as_f64().unwrap_or(0.0);
+        assert!((cost - 4.0).abs() < 1e-4, "expected cost_usd ~ 4.0, got {cost} in {sess}");
+        assert_eq!(sess["input_tokens"], 1_000_000);
+        assert_eq!(sess["output_tokens"], 200_000);
+        assert_eq!(sess["model"], "claude-sonnet-5-5");
+        assert_eq!(sess["model_label"], "Sonnet 5.5");
+        assert_eq!(sess["last_test"]["runner"], "cargo test");
+        assert_eq!(sess["last_test"]["pass"], 12);
+        assert_eq!(sess["last_test"]["fail"], 0);
+
+        let git_req = Request::builder()
+            .uri("/api/git")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let git_resp = app.oneshot(git_req).await.unwrap();
+        assert_eq!(git_resp.status(), StatusCode::OK);
     }
 }
