@@ -47,10 +47,14 @@ fn handle_window_close_requests(
     mut close_events: EventReader<WindowCloseRequested>,
     worker_mode: Res<bridge::GuiWorkerMode>,
     ui: Option<Res<station_ui::UiState>>,
+    bridge: Option<Res<bridge::LiveServerBridge>>,
     mut app_exit: EventWriter<AppExit>,
 ) {
     if close_events.read().next().is_none() {
         return;
+    }
+    if let Some(b) = bridge.as_deref() {
+        b.notify_presence_unfocused();
     }
     let close_to_tray = ui.as_ref().map(|u| u.auto_close_tray).unwrap_or(true);
     if worker_mode.0 {
@@ -258,6 +262,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
 }
 
 struct ParentHttpGuard {
+    state: Arc<station_core::http::AppState>,
     shutdown: tokio::sync::watch::Sender<bool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -288,6 +293,7 @@ fn start_parent_http_if_needed(cli: &cli::Cli) -> Option<ParentHttpGuard> {
         return None;
     };
     let state = Arc::new(state);
+    let state_guard = state.clone();
     let host = cli.host.clone();
     let port = cli.port;
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
@@ -329,6 +335,7 @@ fn start_parent_http_if_needed(cli: &cli::Cli) -> Option<ParentHttpGuard> {
         .unwrap_or(false);
     if bound {
         Some(ParentHttpGuard {
+            state: state_guard,
             shutdown: shutdown_tx,
             thread: Some(thread),
         })
@@ -357,6 +364,15 @@ fn run_tray_parent(cli: &cli::Cli) -> anyhow::Result<()> {
         default_lite: cli.lite,
     };
     let mut daemon = tray::TrayDaemon::new(cli.port, worker_cfg)?;
+    if let Some(guard) = &_http_guard {
+        let st = guard.state.clone();
+        daemon.set_on_worker_hidden(Arc::new(move || {
+            st.office
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .presence_focused = false;
+        }));
+    }
     let hwnd_raw = daemon.hwnd_raw();
 
     let stop_listener = Arc::new(AtomicBool::new(false));
