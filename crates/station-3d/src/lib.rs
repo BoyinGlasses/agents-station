@@ -1,6 +1,8 @@
+pub mod audio;
 pub mod backdrops;
 pub mod camera;
 pub mod chibi;
+pub mod demo;
 pub mod desks;
 pub mod entrance;
 pub mod furniture;
@@ -11,6 +13,7 @@ pub mod lights;
 pub mod palette;
 pub mod people;
 pub mod props;
+pub mod replay;
 pub mod rooms;
 
 use bevy::prelude::*;

@@ -1,5 +1,5 @@
 use crate::layout::LayoutSpec;
-use crate::palette::{WorldEntity, WorldPalette, spawn_box, spawn_cyl, spawn_quad, spawn_sphere};
+use crate::palette::{WorldPalette, spawn_box, spawn_cyl, spawn_quad, spawn_sphere};
 use bevy::prelude::*;
 use station_canvas2d::boards_and_social::{PhotostripInput, StripPerson, draw_photostrip};
 use station_canvas2d::{FontEngine, hex};
