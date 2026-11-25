@@ -1,5 +1,5 @@
 use crate::atomic::{write_bytes_atomic, write_json_atomic};
-use crate::redact::redact;
+use crate::redact::{redact, redact_json_value};
 use crate::state::sessions::now_ms;
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -293,6 +293,24 @@ fn parse_transcript_jsonl(text: &str) -> ParsedTranscript {
     out
 }
 
+fn redact_jsonl_lines(raw_text: &str) -> String {
+    let mut out = String::with_capacity(raw_text.len());
+    for line in raw_text.lines() {
+        if let Ok(val) = serde_json::from_str::<Value>(line) {
+            let clean = redact_json_value(&val);
+            if let Ok(serialized) = serde_json::to_string(&clean) {
+                out.push_str(&serialized);
+            } else {
+                out.push_str(&redact(line));
+            }
+        } else {
+            out.push_str(&redact(line));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 fn read_gzip_bounded(path: &Path, max_bytes: u64) -> Option<String> {
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() || meta.len() > max_bytes {
@@ -484,7 +502,7 @@ impl VaultStore {
                 continue;
             }
 
-            let redacted_raw = redact(&raw_text);
+            let redacted_raw = redact_jsonl_lines(&raw_text);
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
             if encoder.write_all(redacted_raw.as_bytes()).is_err() {
                 continue;
@@ -852,5 +870,41 @@ mod tests {
             "vault entries grew past cap: {}",
             vault.data.entries.len()
         );
+    }
+
+    #[test]
+    fn vault_gz_archive_preserves_valid_jsonl_syntax_with_bearer_and_null_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let claude_dir = dir.path().join("claude");
+        let proj = claude_dir.join("projects").join("jsonl-syntax");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let lines = [
+            r#"{"type":"user","cwd":"/repo","token":null,"timestamp":"2026-11-25T10:00:00Z","message":{"content":"curl -H \"Authorization: Bearer secret123\" https://api.example.com"}}"#,
+            r#"{"type":"assistant","token":null,"timestamp":"2026-11-25T10:00:05Z","message":{"content":[{"type":"text","text":"Confirmed header check"}]}}"#,
+        ]
+        .join("\n");
+        std::fs::write(proj.join("sess-jsonl-1.jsonl"), format!("{lines}\n")).unwrap();
+
+        let mut vault = VaultStore::load(&data_dir);
+        assert_eq!(vault.scan_claude_projects(&claude_dir), 1);
+
+        // Archived .jsonl.gz must have valid JSON on every line and zero raw secret
+        let gz_path = data_dir.join("vault").join("c").join("sess-jsonl-1.jsonl.gz");
+        let gz_text = read_gzip_bounded(&gz_path, MAX_RAW_JSONL_BYTES).unwrap();
+        assert!(!gz_text.contains("secret123"), "raw Bearer secret leaked in archive");
+        for line in gz_text.lines() {
+            assert!(
+                serde_json::from_str::<Value>(line).is_ok(),
+                "archived JSONL line corrupted: {line}"
+            );
+        }
+
+        // get_transcript() must parse ALL messages cleanly from the .jsonl.gz archive
+        let tr = vault.get_transcript("sess-jsonl-1").unwrap();
+        assert_eq!(tr.msgs.len(), 2, "expected both user and assistant messages, got {:?}", tr.msgs);
+        assert!(!tr.msgs[0].t.contains("secret123"));
+        assert_eq!(tr.msgs[1].t, "Confirmed header check");
     }
 }
