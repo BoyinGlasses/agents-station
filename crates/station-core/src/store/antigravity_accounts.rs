@@ -1,15 +1,20 @@
 use crate::atomic::{write_bytes_atomic, write_json_atomic};
 use crate::config::home_dir;
 use crate::state::sessions::{now_ms, one_line};
-use crate::store::codex_accounts::AiAccountSlot;
+use crate::store::codex_accounts::{AiAccountSlot, is_safe_id};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+const SQLITE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SQLITE_STDOUT: u64 = 16 * 1024 * 1024;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -232,25 +237,67 @@ fn is_sqlite_header(bytes: &[u8]) -> bool {
     bytes.starts_with(b"SQLite format 3\0")
 }
 
+/// Checks the 16-byte SQLite magic header without loading the entire file into RAM.
+pub fn has_sqlite_magic(path: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 16];
+    f.read_exact(&mut header).is_ok() && is_sqlite_header(&header)
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 fn sqlite_read_keys(vscdb: &Path, keys: &[&str]) -> Option<HashMap<String, String>> {
     let key_list = keys.iter().map(|k| sql_quote(k)).collect::<Vec<_>>().join(", ");
     let query = format!(
         "SELECT key, CAST(value AS TEXT) AS value FROM ItemTable WHERE key IN ({key_list})"
     );
     let mut cmd = Command::new("sqlite3");
-    cmd.args(["-readonly", "-json"])
-        .arg(vscdb)
-        .arg(&query)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    cmd.args([
+        "-readonly",
+        "-json",
+        "-cmd",
+        "PRAGMA busy_timeout=2000;",
+    ])
+    .arg(vscdb)
+    .arg(&query)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
+
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.take(MAX_SQLITE_STDOUT).read_to_end(&mut buf);
+        buf
+    });
+
+    let status = wait_with_timeout(&mut child, SQLITE_TIMEOUT)?;
+    let out_bytes = reader.join().ok()?;
+    if !status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = String::from_utf8_lossy(&out_bytes);
     let rows: Vec<Value> = if text.trim().is_empty() {
         Vec::new()
     } else {
@@ -270,7 +317,7 @@ fn sqlite_read_keys(vscdb: &Path, keys: &[&str]) -> Option<HashMap<String, Strin
 
 fn sqlite_write_keys(vscdb: &Path, set: &[(&str, &str)]) -> bool {
     use std::io::Write;
-    let mut sql = String::from("BEGIN;\n");
+    let mut sql = String::from("PRAGMA busy_timeout=2000;\nBEGIN;\n");
     for (k, v) in set {
         sql.push_str(&format!(
             "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ({}, {});\n",
@@ -291,9 +338,11 @@ fn sqlite_write_keys(vscdb: &Path, set: &[(&str, &str)]) -> bool {
         return false;
     };
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(sql.as_bytes());
+        let _ = std::thread::spawn(move || {
+            let _ = stdin.write_all(sql.as_bytes());
+        });
     }
-    child.wait().is_ok_and(|s| s.success())
+    wait_with_timeout(&mut child, SQLITE_TIMEOUT).is_some_and(|s| s.success())
 }
 
 fn default_vscdb_path() -> PathBuf {
@@ -343,10 +392,16 @@ impl AntigravityAccounts {
     pub fn load_with_vscdb(data_dir: &Path, vscdb_path: PathBuf) -> Self {
         let file = data_dir.join("antigravity-accounts.json");
         let snapshots_dir = data_dir.join("antigravity-accounts");
-        let data = std::fs::read_to_string(&file)
+        let mut data = std::fs::read_to_string(&file)
             .ok()
             .and_then(|s| serde_json::from_str::<AgAccountsFile>(&s).ok())
             .unwrap_or_default();
+        data.accounts.retain(|a| is_safe_id(&a.slug));
+        data.tokens.retain(|k, _| is_safe_id(k));
+        data.statuses.retain(|k, _| is_safe_id(k));
+        if data.pending.as_deref().is_some_and(|p| !is_safe_id(p)) {
+            data.pending = None;
+        }
         let seat_id = data
             .accounts
             .iter()
@@ -362,8 +417,8 @@ impl AntigravityAccounts {
         }
     }
 
-    fn snapshot_file(&self, id: &str) -> PathBuf {
-        self.snapshots_dir.join(id).join("state.vscdb")
+    fn snapshot_file(&self, id: &str) -> Option<PathBuf> {
+        is_safe_id(id).then(|| self.snapshots_dir.join(id).join("state.vscdb"))
     }
 
     fn backup_file(&self) -> PathBuf {
@@ -463,7 +518,9 @@ impl AntigravityAccounts {
         if !status_raw.is_empty() {
             self.data.statuses.insert(slug.clone(), status_raw);
         }
-        let _ = write_bytes_atomic(&self.snapshot_file(&slug), &bytes);
+        if let Some(snap_path) = self.snapshot_file(&slug) {
+            let _ = write_bytes_atomic(&snap_path, &bytes);
+        }
 
         for a in &mut self.data.accounts {
             a.active = a.slug == slug;
@@ -533,6 +590,9 @@ impl AntigravityAccounts {
             }
             "use" => {
                 let target = Self::target_id(body).to_owned();
+                if !is_safe_id(&target) {
+                    return json!({ "ok": false, "code": "badId" });
+                }
                 if !self.data.accounts.iter().any(|a| a.slug == target) {
                     return json!({ "ok": false, "code": "noAccount" });
                 }
@@ -542,23 +602,28 @@ impl AntigravityAccounts {
                     return json!({ "ok": true, "same": true, "id": target });
                 }
 
+                let snap_path = self.snapshot_file(&target);
+                let has_snap = snap_path.as_ref().is_some_and(|p| p.is_file());
+                let is_sqlite = has_sqlite_magic(&self.vscdb_path);
+                let has_sql_token = is_sqlite && self.data.tokens.contains_key(&target);
+                if !has_snap && !has_sql_token {
+                    return json!({ "ok": false, "code": "noCopy" });
+                }
+
                 // Back up current state.vscdb (and save back into outgoing seat snapshot).
                 if let Ok(cur_bytes) = std::fs::read(&self.vscdb_path) {
                     let _ = write_bytes_atomic(&self.backup_file(), &cur_bytes);
-                    if let Some(cur_id) = &self.seat_id {
-                        let _ = write_bytes_atomic(&self.snapshot_file(cur_id), &cur_bytes);
+                    if let Some(cur_id) = &self.seat_id
+                        && let Some(cur_snap) = self.snapshot_file(cur_id)
+                    {
+                        let _ = write_bytes_atomic(&cur_snap, &cur_bytes);
                     }
                 }
 
                 // Prefer SQLite key update when token/status + sqlite3 are available; else swap snapshot bytes atomically.
                 let mut wrote = false;
-                if let Some(tok) = self.data.tokens.get(&target)
-                    && self
-                        .vscdb_path
-                        .is_file()
-                    && std::fs::read(&self.vscdb_path)
-                        .ok()
-                        .is_some_and(|b| is_sqlite_header(&b))
+                if has_sql_token
+                    && let Some(tok) = self.data.tokens.get(&target)
                 {
                     let mut pairs = vec![(KEY_TOKEN, tok.as_str())];
                     if let Some(st) = self.data.statuses.get(&target) {
@@ -567,14 +632,14 @@ impl AntigravityAccounts {
                     wrote = sqlite_write_keys(&self.vscdb_path, &pairs);
                 }
                 if !wrote {
-                    let snap = self.snapshot_file(&target);
-                    if snap.is_file() {
-                        let Ok(bytes) = std::fs::read(&snap) else {
-                            return json!({ "ok": false, "code": "writeFailed" });
-                        };
-                        if write_bytes_atomic(&self.vscdb_path, &bytes).is_err() {
-                            return json!({ "ok": false, "code": "writeFailed" });
-                        }
+                    let Some(snap) = snap_path.filter(|p| p.is_file()) else {
+                        return json!({ "ok": false, "code": "writeFailed" });
+                    };
+                    let Ok(bytes) = std::fs::read(&snap) else {
+                        return json!({ "ok": false, "code": "writeFailed" });
+                    };
+                    if write_bytes_atomic(&self.vscdb_path, &bytes).is_err() {
+                        return json!({ "ok": false, "code": "writeFailed" });
                     }
                 }
 
@@ -589,6 +654,9 @@ impl AntigravityAccounts {
             }
             "rename" => {
                 let target = Self::target_id(body);
+                if !is_safe_id(target) {
+                    return json!({ "ok": false, "code": "badId" });
+                }
                 let label: String = one_line(body.get("label").and_then(Value::as_str).unwrap_or(""))
                     .chars()
                     .take(24)
@@ -605,6 +673,9 @@ impl AntigravityAccounts {
             }
             "remove" => {
                 let target = Self::target_id(body);
+                if !is_safe_id(target) {
+                    return json!({ "ok": false, "code": "badId" });
+                }
                 if !self.data.accounts.iter().any(|a| a.slug == target) {
                     return json!({ "ok": false, "code": "noAccount" });
                 }
@@ -767,5 +838,63 @@ mod tests {
         assert_eq!(mgr.mutate("remove", &json!({ "id": id1 }))["code"], "inSeat");
         assert_eq!(mgr.mutate("remove", &json!({ "id": id2 }))["ok"], true);
         assert!(!data_dir.join("antigravity-accounts").join(&id2).exists());
+    }
+
+    #[test]
+    fn antigravity_accounts_rejects_unsnapshotted_switch_and_unsafe_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let vscdb = dir.path().join("User").join("globalStorage").join("state.vscdb");
+        let victim_dir = dir.path().join("victim-outside");
+        std::fs::create_dir_all(vscdb.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&victim_dir).unwrap();
+
+        let seat1_bytes = b"VSCDB_STATE_ONE";
+        std::fs::write(&vscdb, seat1_bytes).unwrap();
+
+        let mut mgr = AntigravityAccounts::load_with_vscdb(&data_dir, vscdb.clone());
+        mgr.sync_vscdb();
+        let id1 = mgr.view()["now"].as_str().unwrap().to_owned();
+
+        // Add manual unsnapshotted slot -> switch must return ok:false, code:noCopy without touching vscdb
+        let added = mgr.mutate("add", &json!({ "label": "Empty" }));
+        let empty_id = added["id"].as_str().unwrap().to_owned();
+        let sw = mgr.mutate("use", &json!({ "id": empty_id }));
+        assert_eq!(sw["ok"], false);
+        assert_eq!(sw["code"], "noCopy");
+        assert_eq!(mgr.view()["now"].as_str(), Some(id1.as_str()));
+        assert_eq!(std::fs::read(&vscdb).unwrap(), seat1_bytes);
+        assert!(
+            !data_dir
+                .join("antigravity-accounts")
+                .join("state-before-switch.vscdb")
+                .exists()
+        );
+
+        // Crafted state file with traversal slug must be stripped on load and rejected on mutate
+        std::fs::write(
+            data_dir.join("antigravity-accounts.json"),
+            json!({
+                "auto": false,
+                "accounts": [
+                    { "slug": "../../victim-outside", "label": "bad", "email": "", "active": false, "later": false }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut reloaded = AntigravityAccounts::load_with_vscdb(&data_dir, vscdb.clone());
+        assert!(reloaded.view()["accounts"].as_array().unwrap().is_empty());
+        assert_eq!(
+            reloaded.mutate("remove", &json!({ "id": "../../victim-outside" }))["ok"],
+            false
+        );
+        assert!(victim_dir.is_dir(), "outside directory must never be deleted");
+
+        // 16-byte magic check helper works cleanly
+        assert!(!has_sqlite_magic(&vscdb));
+        let fake_sq = dir.path().join("fake.vscdb");
+        std::fs::write(&fake_sq, b"SQLite format 3\0extra-bytes").unwrap();
+        assert!(has_sqlite_magic(&fake_sq));
     }
 }
