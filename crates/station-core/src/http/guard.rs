@@ -80,17 +80,17 @@ fn parse_host_port(raw: &str) -> Option<(String, Option<u16>)> {
     }
 }
 
-fn parse_origin(raw: &str) -> Option<(u16, String, Option<u16>)> {
+fn parse_origin(raw: &str) -> Option<(&'static str, String, Option<u16>)> {
     let s = raw.trim();
-    let (default_port, rest) = if s.len() > 7 && s[..7].eq_ignore_ascii_case("http://") {
-        (80u16, &s[7..])
+    let (scheme, rest) = if s.len() > 7 && s[..7].eq_ignore_ascii_case("http://") {
+        ("http", &s[7..])
     } else if s.len() > 8 && s[..8].eq_ignore_ascii_case("https://") {
-        (443u16, &s[8..])
+        ("https", &s[8..])
     } else {
         return None;
     };
     let (host, port) = parse_host_port(rest)?;
-    Some((default_port, host, port))
+    Some((scheme, host, port))
 }
 
 fn is_local_ip(ip: IpAddr) -> bool {
@@ -129,14 +129,14 @@ pub fn is_loopback_host(raw: &str) -> bool {
 
 /// Universal DNS-rebinding guard for all HTTP routes.
 /// Allows loopback hosts, raw local private/link-local IPv4/IPv6 literals (for LAN `/phone`),
-/// and an explicitly configured tunnel hostname. Rejects unknown hosts with `421 Misdirected Request`.
+/// and an explicitly configured tunnel hostname. Rejects missing or unknown hosts with `421 Misdirected Request`.
 pub fn enforce_host_allowed(
     headers: &HeaderMap,
     allowed_tunnel_host: Option<&str>,
 ) -> Result<(), StatusCode> {
     let mut hosts = headers.get_all("host").iter();
     let Some(first) = hosts.next() else {
-        return Ok(());
+        return Err(StatusCode::MISDIRECTED_REQUEST);
     };
     if hosts.next().is_some() {
         return Err(StatusCode::MISDIRECTED_REQUEST);
@@ -170,11 +170,21 @@ pub fn enforce_host_allowed(
     Err(StatusCode::MISDIRECTED_REQUEST)
 }
 
-/// Exact-port CSRF guard for state-mutating browser POST requests.
-/// When an `Origin` header is present, its authority and port must match `Host` exactly.
+/// Exact-port CSRF guard for state-mutating browser POST requests over local plain HTTP.
+/// When an `Origin` header is present, its scheme (`http`), authority, and port must match `Host` exactly.
 pub fn enforce_same_origin_post(
     headers: &HeaderMap,
     allowed_tunnel_host: Option<&str>,
+) -> Result<(), StatusCode> {
+    enforce_same_origin_post_with_transport(headers, allowed_tunnel_host, false)
+}
+
+/// Exact-scheme and exact-port CSRF guard for state-mutating browser POST requests.
+/// Expects `https` (default port 443) when `via_tunnel` is true, and `http` (default port 80) otherwise.
+pub fn enforce_same_origin_post_with_transport(
+    headers: &HeaderMap,
+    allowed_tunnel_host: Option<&str>,
+    via_tunnel: bool,
 ) -> Result<(), StatusCode> {
     enforce_host_allowed(headers, allowed_tunnel_host)?;
     let mut origins = headers.get_all("origin").iter();
@@ -187,9 +197,17 @@ pub fn enforce_same_origin_post(
     let Ok(origin_raw) = first_origin.to_str() else {
         return Err(StatusCode::FORBIDDEN);
     };
-    let Some((default_port, origin_host, origin_port)) = parse_origin(origin_raw) else {
+    let Some((origin_scheme, origin_host, origin_port)) = parse_origin(origin_raw) else {
         return Err(StatusCode::FORBIDDEN);
     };
+    let (expected_scheme, expected_default_port) = if via_tunnel {
+        ("https", 443u16)
+    } else {
+        ("http", 80u16)
+    };
+    if origin_scheme != expected_scheme {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let Some(host_raw) = headers.get("host").and_then(|v| v.to_str().ok()) else {
         return Err(StatusCode::FORBIDDEN);
     };
@@ -199,13 +217,7 @@ pub fn enforce_same_origin_post(
     if origin_host != host {
         return Err(StatusCode::FORBIDDEN);
     }
-    let port_matches = match (origin_port, host_port) {
-        (Some(op), Some(hp)) => op == hp,
-        (None, Some(hp)) => default_port == hp,
-        (Some(op), None) => op == default_port,
-        (None, None) => true,
-    };
-    if !port_matches {
+    if origin_port.unwrap_or(expected_default_port) != host_port.unwrap_or(expected_default_port) {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(())
@@ -225,13 +237,30 @@ pub fn is_loopback_peer(peer: Option<SocketAddr>, via_tunnel: bool, headers: &He
             headers
                 .get("host")
                 .and_then(|v| v.to_str().ok())
-                .is_none_or(is_loopback_host)
+                .is_some_and(is_loopback_host)
         }
     }
 }
 
+fn require_loopback_host(headers: &HeaderMap) -> Result<(), StatusCode> {
+    let mut hosts = headers.get_all("host").iter();
+    let Some(first_host) = hosts.next() else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if hosts.next().is_some() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Ok(host) = first_host.to_str() else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !is_loopback_host(host) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 /// Strict guard for non-browser local hook & OTLP routes (`/event`, `/hook/*`, `/v1/*`).
-/// Rejects non-loopback peers, tunnel connections, non-loopback `Host`, and ANY `Origin` header.
+/// Rejects non-loopback peers, tunnel connections, missing/non-loopback `Host`, and ANY `Origin` header.
 pub fn enforce_hook_loopback(
     peer: Option<SocketAddr>,
     via_tunnel: bool,
@@ -240,18 +269,7 @@ pub fn enforce_hook_loopback(
     if !is_loopback_peer(peer, via_tunnel, headers) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let mut hosts = headers.get_all("host").iter();
-    if let Some(first_host) = hosts.next() {
-        if hosts.next().is_some() {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        let Ok(host) = first_host.to_str() else {
-            return Err(StatusCode::FORBIDDEN);
-        };
-        if !is_loopback_host(host) {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
+    require_loopback_host(headers)?;
     if headers.contains_key("origin") {
         return Err(StatusCode::FORBIDDEN);
     }
@@ -259,7 +277,7 @@ pub fn enforce_hook_loopback(
 }
 
 /// Strict guard for loopback-only local UI routes (`/api/harnesses/*`, local mutations).
-/// Rejects non-loopback peers, tunnel connections, non-loopback `Host`, and cross-port/cross-origin browser requests.
+/// Rejects non-loopback peers, tunnel connections, missing/non-loopback `Host`, and cross-port/cross-origin browser requests.
 pub fn enforce_loopback_strict(
     peer: Option<SocketAddr>,
     via_tunnel: bool,
@@ -268,11 +286,7 @@ pub fn enforce_loopback_strict(
     if !is_loopback_peer(peer, via_tunnel, headers) {
         return Err(StatusCode::FORBIDDEN);
     }
-    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok())
-        && !is_loopback_host(host)
-    {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    require_loopback_host(headers)?;
     enforce_same_origin_post(headers, None)
 }
 
@@ -550,14 +564,11 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            enforce_same_origin_post(&mk("[::1]:4310", Some("http://[::1]:4310")), None),
+            enforce_same_origin_post(&mk("localhost", Some("http://localhost:80")), None),
             Ok(())
         );
         assert_eq!(
-            enforce_same_origin_post(
-                &mk("station.example.com", Some("https://station.example.com")),
-                Some("station.example.com"),
-            ),
+            enforce_same_origin_post(&mk("[::1]:4310", Some("http://[::1]:4310")), None),
             Ok(())
         );
 
@@ -569,6 +580,9 @@ mod tests {
             ("[::1]:4310", "http://[::1]:5173"),
             ("127.0.0.1:4310", "null"),
             ("127.0.0.1:4310", "http://127.0.0.1:4310/extra"),
+            // Scheme confusion against local plain-HTTP server
+            ("localhost", "https://localhost:443"),
+            ("127.0.0.1:4310", "https://127.0.0.1:4310"),
         ] {
             assert_eq!(
                 enforce_same_origin_post(&mk(host, Some(origin)), None),
@@ -576,6 +590,69 @@ mod tests {
                 "expected 403 for Host={host} Origin={origin}"
             );
         }
+
+        // HTTPS tunnel transport (via_tunnel = true): requires https + effective port 443
+        assert_eq!(
+            enforce_same_origin_post_with_transport(
+                &mk("station.example.com", Some("https://station.example.com")),
+                Some("station.example.com"),
+                true,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            enforce_same_origin_post_with_transport(
+                &mk("station.example.com", Some("https://station.example.com:443")),
+                Some("station.example.com"),
+                true,
+            ),
+            Ok(())
+        );
+        for (host, origin) in [
+            ("station.example.com", "http://station.example.com:80"),
+            ("station.example.com", "http://station.example.com"),
+            ("station.example.com", "https://station.example.com:8443"),
+        ] {
+            assert_eq!(
+                enforce_same_origin_post_with_transport(
+                    &mk(host, Some(origin)),
+                    Some("station.example.com"),
+                    true,
+                ),
+                Err(StatusCode::FORBIDDEN),
+                "expected 403 over tunnel for Host={host} Origin={origin}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_host_header_fails_closed_with_421_and_403_on_hooks() {
+        let empty = HeaderMap::new();
+        assert_eq!(
+            enforce_host_allowed(&empty, None),
+            Err(StatusCode::MISDIRECTED_REQUEST)
+        );
+        assert_eq!(
+            enforce_hook_loopback(Some(loopback_addr()), false, &empty),
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert_eq!(
+            enforce_loopback_strict(Some(loopback_addr()), false, &empty),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state);
+
+        let mut req = Request::builder()
+            .method("GET")
+            .uri("/api/live")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(loopback_addr()));
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
     }
 
     #[test]

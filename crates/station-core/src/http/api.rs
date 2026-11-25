@@ -1,7 +1,7 @@
 use crate::http::AppState;
 use crate::http::guard::{
-    OptionalPeer, ViaTunnel, enforce_loopback_strict, enforce_same_origin_post, is_authorized,
-    is_loopback_peer,
+    OptionalPeer, ViaTunnel, enforce_loopback_strict, enforce_same_origin_post_with_transport,
+    is_authorized, is_loopback_peer,
 };
 use crate::shared::timeline::build_timeline;
 use crate::state::loops::LoopConfig;
@@ -357,7 +357,11 @@ pub async fn post_chat(
     Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_same_origin_post(&headers, state.allowed_tunnel_host().as_deref())?;
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let ts = now_ms();
     let mut office = state.office.lock().expect("office");
@@ -628,7 +632,11 @@ pub async fn post_presence(
     Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_same_origin_post(&headers, state.allowed_tunnel_host().as_deref())?;
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let focused = body.get("focused").and_then(Value::as_bool).unwrap_or(false);
     state.office.lock().expect("office").presence_focused = focused;
@@ -643,7 +651,11 @@ pub async fn post_perm(
     Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_same_origin_post(&headers, state.allowed_tunnel_host().as_deref())?;
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let id = body.get("id").and_then(Value::as_str).unwrap_or("");
     let removed = state.office.lock().expect("office").pending_perms.remove(id).is_some();
@@ -670,7 +682,11 @@ pub async fn post_push(
     Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_same_origin_post(&headers, state.allowed_tunnel_host().as_deref())?;
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let mut push = state.push.lock().expect("push");
     if let Some(ep) = body.get("remove").and_then(Value::as_str) {

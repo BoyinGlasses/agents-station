@@ -1,7 +1,8 @@
 use crate::auth::constant_time_eq;
 use crate::http::AppState;
 use crate::http::guard::{
-    OptionalPeer, ViaTunnel, enforce_same_origin_post, is_authorized, is_loopback_peer,
+    OptionalPeer, ViaTunnel, enforce_same_origin_post_with_transport, is_authorized,
+    is_loopback_peer,
 };
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -58,7 +59,11 @@ pub async fn post_pin(
     ViaTunnel(via_tunnel): ViaTunnel,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
-    if let Err(code) = enforce_same_origin_post(&headers, state.allowed_tunnel_host().as_deref()) {
+    if let Err(code) = enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    ) {
         return code.into_response();
     }
     let pin = body.get("pin").and_then(Value::as_str).unwrap_or("").trim();

@@ -329,7 +329,11 @@ mod tests {
         assert_eq!(state.office.lock().unwrap().sessions.len(), 1);
 
         // 4. Health check -> 200 ok
-        let health = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let health = Request::builder()
+            .uri("/health")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.clone().oneshot(health).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
@@ -347,6 +351,7 @@ mod tests {
         // 6. Remote unauthenticated request -> 303 on / and 401 on /api/live
         let remote_root = Request::builder()
             .uri("/")
+            .header("host", "127.0.0.1:4310")
             .header("x-office-remote-test", "1")
             .body(Body::empty())
             .unwrap();
@@ -355,6 +360,7 @@ mod tests {
 
         let remote_api = Request::builder()
             .uri("/api/live")
+            .header("host", "127.0.0.1:4310")
             .header("x-office-remote-test", "1")
             .body(Body::empty())
             .unwrap();
@@ -362,7 +368,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
         // 7. /api/image includes sandbox CSP + nosniff
-        let img = Request::builder().uri("/api/image").body(Body::empty()).unwrap();
+        let img = Request::builder()
+            .uri("/api/image")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.clone().oneshot(img).await.unwrap();
         assert_eq!(resp.headers().get("content-security-policy").unwrap(), "sandbox");
         assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
