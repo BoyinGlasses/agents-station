@@ -18,7 +18,7 @@ pub mod rooms;
 
 use bevy::prelude::*;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
-pub use camera::Lite2dCamera;
+pub use camera::{Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
@@ -90,6 +90,7 @@ fn register_office_runtime(
         .insert_resource(audio::SfxEngine::new(true))
         .insert_resource(interact::PlaceCardState::default())
         .insert_resource(SharedFontEngine::new(assets_dir))
+        .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
         .add_systems(
             Update,
