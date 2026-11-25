@@ -9,13 +9,67 @@ use station_core::hooks_cli::{
 use station_core::http::{AppState, HarnessApi, start_http_server};
 use std::collections::HashMap;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+fn is_repo_root(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file() && dir.join("crates").join("station-app").is_dir()
+}
+
+fn is_cargo_target_output(dir: &Path) -> bool {
+    let name_matches = dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|n| matches!(n.to_ascii_lowercase().as_str(), "debug" | "release" | "deps"));
+    if name_matches {
+        return true;
+    }
+    dir.ancestors().any(|a| {
+        a.file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| matches!(n.to_ascii_lowercase().as_str(), "target" | "cargo-target"))
+    })
+}
+
+fn resolve_install_root_from(exe_path: Option<&Path>, manifest_dir: Option<&Path>) -> PathBuf {
+    let repo_from_manifest = manifest_dir
+        .and_then(|m| m.parent())
+        .and_then(|p| p.parent())
+        .filter(|root| is_repo_root(root))
+        .map(Path::to_path_buf);
+
+    if let Some(exe_dir) = exe_path.and_then(Path::parent) {
+        for ancestor in exe_dir.ancestors() {
+            if is_repo_root(ancestor) {
+                return ancestor.to_path_buf();
+            }
+        }
+        if exe_dir.join("assets").join("fonts").is_dir() {
+            return exe_dir.to_path_buf();
+        }
+        if is_cargo_target_output(exe_dir)
+            && let Some(repo) = repo_from_manifest
+        {
+            return repo;
+        }
+        return exe_dir.to_path_buf();
+    }
+
+    repo_from_manifest.unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Anchors default runtime `data/` to the workspace repo root (during dev/cargo runs)
+/// or the executable's parent directory (when installed/portable) — never arbitrary CWD.
+pub fn resolve_install_root() -> PathBuf {
+    let exe = std::env::current_exe().ok();
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    resolve_install_root_from(exe.as_deref(), Some(manifest))
+}
+
 pub fn resolve_runtime_data_dir() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let root = resolve_install_root();
     let env_dir = std::env::var("OFFICE_DATA_DIR").ok();
-    resolve_data_dir(&cwd, env_dir.as_deref())
+    resolve_data_dir(&root, env_dir.as_deref())
 }
 
 pub fn run_cli_command(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Result<()> {
@@ -120,5 +174,48 @@ async fn run_cli_async(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Res
             Ok(())
         }
         None | Some(Command::Gui) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RestoreCwd(PathBuf);
+    impl Drop for RestoreCwd {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn resolve_runtime_data_dir_ignores_unrelated_temp_cwd_when_env_unset() {
+        let orig = std::env::current_dir().unwrap();
+        let _guard = RestoreCwd(orig);
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        let prev_env = std::env::var_os("OFFICE_DATA_DIR");
+        // SAFETY: serialized test in station-app; restored before exit.
+        unsafe { std::env::remove_var("OFFICE_DATA_DIR") };
+        let resolved = resolve_runtime_data_dir();
+        if let Some(val) = prev_env {
+            unsafe { std::env::set_var("OFFICE_DATA_DIR", val) };
+        }
+
+        assert_ne!(
+            resolved,
+            tmp.path().join("data"),
+            "data_dir must not anchor to arbitrary CWD"
+        );
+        assert_eq!(resolved, resolve_install_root().join("data"));
+    }
+
+    #[test]
+    fn resolve_install_root_anchors_installed_exe_to_exe_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed_exe = tmp.path().join("agents-station.exe");
+        let root = resolve_install_root_from(Some(&installed_exe), None);
+        assert_eq!(root, tmp.path());
     }
 }
