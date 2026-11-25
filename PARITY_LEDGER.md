@@ -4,10 +4,10 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 
 ## P0 — Bootstrap & Guardrails
 
-- [ ] workspace/Cargo.toml & 6 crates -> (pending)
-- [ ] scripts/sync-assets.mjs & Vietnamese/Thai TTF fonts -> (pending)
-- [ ] station-app CLI, Win32 single-instance mutex & GPU selector -> (pending)
-- [ ] station-app --capture-scene smoke PNG harness -> (pending)
+- [x] workspace/Cargo.toml & 6 crates -> `Cargo.toml`, `crates/station-{core,launcher,canvas2d,3d,ui,app}` (verified: `cargo test --workspace`, target on `D:\mystation\cargo-target` = 1.99 GB)
+- [x] scripts/sync-assets.mjs & Vietnamese/Thai TTF fonts -> `scripts/sync-assets.mjs`, `crates/station-ui/src/fonts.rs`, `assets/` (verified: 25 TTF fonts decoded, 119 assets/i18n synced, `bundled_fonts_cover_vietnamese_thai_and_ascii_glyphs` PASS)
+- [x] station-app CLI, Win32 single-instance mutex & GPU selector -> `crates/station-app/src/{cli,instance,gpu}.rs` (verified: 4 unit tests PASS)
+- [x] station-app --capture-scene smoke PNG harness -> `crates/station-app/src/capture.rs`, `crates/station-app/tests/capture_smoke.rs` (verified: composited 3D + Vietnamese/Thai `bevy_egui` HUD PNG, 104.2 MB Private Working Set)
 
 ## P1 — Backend, Shared, CLI & Hooks (61 files)
 
