@@ -57,6 +57,7 @@ mod tests {
                     "get_generic_ok",
                     "post_accounts_any",
                     "Platform trait stub",
+                    "draw_qr_block",
                 ] {
                     assert!(
                         !line.contains(forbidden),
