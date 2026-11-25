@@ -2,9 +2,14 @@ use crate::state::git::CREATE_NO_WINDOW;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_PROBE_BYTES: u64 = 256 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BgProbeResult {
@@ -14,22 +19,62 @@ pub struct BgProbeResult {
 
 fn run_claude_probe(bin: &Path, arg: &str) -> String {
     let mut cmd = Command::new(bin);
-    cmd.arg(arg);
+    cmd.arg(arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    match cmd.output() {
-        Ok(out) => {
-            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
-            if s.trim().is_empty() {
-                s = String::from_utf8_lossy(&out.stderr).into_owned();
+    let Ok(mut child) = cmd.spawn() else {
+        return String::new();
+    };
+    let out_h = child.stdout.take().map(|o| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = o.take(MAX_PROBE_BYTES).read_to_end(&mut b);
+            b
+        })
+    });
+    let err_h = child.stderr.take().map(|e| {
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            let _ = e.take(MAX_PROBE_BYTES).read_to_end(&mut b);
+            b
+        })
+    });
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(h) = out_h {
+                    let _ = h.join();
+                }
+                if let Some(h) = err_h {
+                    let _ = h.join();
+                }
+                return String::new();
             }
-            s
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return String::new();
+            }
         }
-        Err(_) => String::new(),
     }
+    let out_bytes = out_h.and_then(|h| h.join().ok()).unwrap_or_default();
+    let s = String::from_utf8_lossy(&out_bytes).into_owned();
+    if !s.trim().is_empty() {
+        return s;
+    }
+    let err_bytes = err_h.and_then(|h| h.join().ok()).unwrap_or_default();
+    String::from_utf8_lossy(&err_bytes).into_owned()
 }
 
 pub fn probe_claude_bg(bin: &Path) -> BgProbeResult {

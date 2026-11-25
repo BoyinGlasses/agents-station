@@ -1366,11 +1366,20 @@ pub async fn post_tasks_bg(
         let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
         let _ = prefs.set("phoneTasksBg", if on { Some(Value::Bool(true)) } else { None });
     }
-    let tasks = Arc::clone(&state.tasks);
-    let _ = tokio::task::spawn_blocking(move || {
-        tasks.lock().unwrap_or_else(|e| e.into_inner()).probe_bg()
+    let probe = tokio::task::spawn_blocking(|| {
+        if let Some(cli) = crate::state::tasks::resolve_agent_cli("claude") {
+            crate::state::bg_sessions::probe_claude_bg(&cli.file)
+        } else {
+            crate::state::bg_sessions::BgProbeResult::default()
+        }
     })
-    .await;
+    .await
+    .unwrap_or_default();
+    state
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set_bg_probe(probe);
     Ok(Json(tasks_out(&state, true)))
 }
 
