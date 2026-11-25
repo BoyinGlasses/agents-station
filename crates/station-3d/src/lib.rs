@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod chibi;
 pub mod desks;
 pub mod entrance;
 pub mod furniture;
@@ -6,6 +7,7 @@ pub mod interact;
 pub mod layout;
 pub mod lights;
 pub mod palette;
+pub mod people;
 pub mod props;
 pub mod rooms;
 
