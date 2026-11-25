@@ -14,6 +14,7 @@ use crate::state::claude_version::ClaudeVersionWatcher;
 use crate::state::git::GitTracker;
 use crate::state::lift_service::LiftService;
 use crate::state::sessions::{OfficeState, ReapReport, now_ms};
+use crate::state::stranded::StrandedScanner;
 use crate::state::tasks::TaskManager;
 use crate::state::tenure::TenureStore;
 use crate::store::antigravity_accounts::AntigravityAccounts;
@@ -70,6 +71,7 @@ pub struct AppState {
     pub images: Mutex<ImageStore>,
     pub git: Arc<Mutex<GitTracker>>,
     pub usage: Arc<Mutex<UsageScanner>>,
+    pub stranded: Arc<Mutex<StrandedScanner>>,
     pub auto_resume: Mutex<AutoResumeGuard>,
     pub lift: LiftService,
     pub harnesses: Option<Arc<dyn HarnessApi>>,
@@ -96,6 +98,7 @@ impl AppState {
         let images = ImageStore::load(&data_dir);
         let git = Arc::new(Mutex::new(GitTracker::new()));
         let usage = Arc::new(Mutex::new(UsageScanner::new()));
+        let stranded = Arc::new(Mutex::new(StrandedScanner::new()));
         let auto_resume = Mutex::new(AutoResumeGuard::default());
         let lift = LiftService::init(&data_dir, env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_VERSION"), now);
 
@@ -120,6 +123,7 @@ impl AppState {
             images: Mutex::new(images),
             git,
             usage,
+            stranded,
             auto_resume,
             lift,
             harnesses,
@@ -209,8 +213,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/replay", get(api::get_replay))
         .route("/api/replay/days", get(api::get_replay_days))
         .route("/api/stranded", get(api::get_stranded))
-        .route("/api/stranded/open", post(api::post_local_ok))
-        .route("/api/stranded/remove", post(api::post_local_ok))
+        .route("/api/stranded/open", post(api::post_stranded_open))
+        .route("/api/stranded/remove", post(api::post_stranded_remove))
         .route("/api/pins", get(api::get_pins).post(api::post_pins))
         .route("/api/vault", get(api::get_vault))
         .route("/api/vault/report", get(api::get_vault_report))

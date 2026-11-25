@@ -199,6 +199,31 @@ pub async fn get_replay_days(
     Ok(Json(json!({ "ok": true, "days": days })))
 }
 
+fn collect_stranded_dirs(state: &AppState) -> (Vec<String>, Vec<String>) {
+    let mut dirs = Vec::new();
+    let mut in_use = Vec::new();
+    {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        dirs.extend(office.known_dirs.iter().cloned());
+        for s in office.sessions.values() {
+            if !s.cwd.is_empty() {
+                dirs.push(s.cwd.clone());
+                in_use.push(s.cwd.clone());
+            }
+        }
+    }
+    {
+        let tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        for t in tasks.list() {
+            if !t.dir.is_empty() {
+                dirs.push(t.dir.clone());
+                in_use.push(t.dir.clone());
+            }
+        }
+    }
+    (dirs, in_use)
+}
+
 pub async fn get_stranded(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -206,8 +231,75 @@ pub async fn get_stranded(
     ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    Ok(Json(json!({ "ok": true, "at": now_ms(), "items": [], "repos": 0 })))
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let force = q.contains_key("fresh");
+    let (dirs, in_use) = collect_stranded_dirs(&state);
+    let scanner = Arc::clone(&state.stranded);
+    let now = now_ms();
+    let snap = tokio::task::spawn_blocking(move || {
+        scanner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scan(&dirs, &in_use, now, force)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({
+        "ok": snap.ok,
+        "at": snap.at,
+        "repos": snap.repos,
+        "items": snap.items,
+        "local": local,
+    })))
+}
+
+pub async fn post_stranded_open(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let entry = state
+        .stranded
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(id);
+    let Some(entry) = entry else {
+        return Ok(Json(json!({ "ok": false, "code": "gone" })));
+    };
+    let path = std::path::PathBuf::from(&entry.item.path);
+    let res = tokio::task::spawn_blocking(move || crate::state::stranded::open_folder(&path))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match res {
+        Ok(()) => Ok(Json(json!({ "ok": true, "path": entry.item.path }))),
+        Err(msg) => Ok(Json(json!({ "ok": false, "message": msg }))),
+    }
+}
+
+pub async fn post_stranded_remove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+    let (_, in_use) = collect_stranded_dirs(&state);
+    let scanner = Arc::clone(&state.stranded);
+    let res = tokio::task::spawn_blocking(move || {
+        scanner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id, &in_use)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!(res)))
 }
 
 pub async fn get_pins(
@@ -1839,5 +1931,120 @@ mod tests {
             .unwrap();
         let git_resp = app.oneshot(git_req).await.unwrap();
         assert_eq!(git_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn stranded_lists_worktrees_refuses_dirty_or_unknown_and_removes_clean_linked_worktree() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let main_repo = dir.path().join("main-repo");
+        let wt_clean = dir.path().join("wt-clean");
+        let wt_dirty = dir.path().join("wt-dirty");
+        std::fs::create_dir_all(&main_repo).unwrap();
+
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let mut cmd = Command::new("git");
+            cmd.args(args).current_dir(cwd);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000);
+            }
+            let out = cmd.output().expect("git must run");
+            assert!(out.status.success(), "git {args:?} failed: {:?}", out);
+        };
+        git(&main_repo, &["init"]);
+        git(&main_repo, &["config", "user.email", "test@example.com"]);
+        git(&main_repo, &["config", "user.name", "Test"]);
+        std::fs::write(main_repo.join("readme.md"), "hello\n").unwrap();
+        git(&main_repo, &["add", "readme.md"]);
+        git(&main_repo, &["commit", "-m", "init"]);
+        git(&main_repo, &["worktree", "add", "-b", "clean-br", wt_clean.to_str().unwrap()]);
+        git(&main_repo, &["worktree", "add", "-b", "dirty-br", wt_dirty.to_str().unwrap()]);
+        std::fs::write(wt_dirty.join("uncommitted.txt"), "dirty\n").unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        state
+            .office
+            .lock()
+            .unwrap()
+            .note_dir(&main_repo.to_string_lossy());
+        let app = build_router(state.clone());
+
+        // 1. GET /api/stranded?fresh=1 lists both linked worktrees
+        let req = Request::builder()
+            .uri("/api/stranded?fresh=1")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 128 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert!(body["repos"].as_u64().unwrap_or(0) >= 1, "expected repos >= 1: {body}");
+        let items = body["items"].as_array().unwrap();
+        let clean_item = items
+            .iter()
+            .find(|i| i["branch"] == "clean-br")
+            .expect("clean-br worktree must appear in /api/stranded");
+        let dirty_item = items
+            .iter()
+            .find(|i| i["branch"] == "dirty-br")
+            .expect("dirty-br worktree must appear in /api/stranded");
+        assert_eq!(clean_item["removable"], true);
+        assert_eq!(dirty_item["removable"], false);
+        assert_eq!(dirty_item["work"], true);
+
+        let clean_id = clean_item["id"].as_str().unwrap().to_owned();
+        let dirty_id = dirty_item["id"].as_str().unwrap().to_owned();
+
+        // 2. POST /api/stranded/open rejects unknown id (never stubs ok:true)
+        let bad_open = Request::builder()
+            .method("POST")
+            .uri("/api/stranded/open")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": "unknown-id" }).to_string()))
+            .unwrap();
+        let open_resp = app.clone().oneshot(bad_open).await.unwrap();
+        let open_body: Value =
+            serde_json::from_slice(&to_bytes(open_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(open_body["ok"], false);
+
+        // 3. POST /api/stranded/remove refuses dirty worktree
+        let rm_dirty = Request::builder()
+            .method("POST")
+            .uri("/api/stranded/remove")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": dirty_id }).to_string()))
+            .unwrap();
+        let rm_dirty_resp = app.clone().oneshot(rm_dirty).await.unwrap();
+        let rm_dirty_body: Value =
+            serde_json::from_slice(&to_bytes(rm_dirty_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(rm_dirty_body["ok"], false);
+        assert_eq!(rm_dirty_body["code"], "notClean");
+        assert!(wt_dirty.exists(), "dirty worktree must not be deleted");
+
+        // 4. POST /api/stranded/remove deletes clean linked worktree
+        let rm_clean = Request::builder()
+            .method("POST")
+            .uri("/api/stranded/remove")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": clean_id }).to_string()))
+            .unwrap();
+        let rm_clean_resp = app.oneshot(rm_clean).await.unwrap();
+        let rm_clean_body: Value =
+            serde_json::from_slice(&to_bytes(rm_clean_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(rm_clean_body["ok"], true, "clean worktree must remove cleanly: {rm_clean_body}");
+        assert!(!wt_clean.exists(), "clean worktree directory must be removed");
     }
 }
