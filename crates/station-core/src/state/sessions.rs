@@ -21,6 +21,14 @@ pub const DESKS: usize = 9;
 pub const FEED_MAX: usize = 80;
 pub const PIN_MAX: usize = 12;
 pub const PIN_LEN: usize = 500;
+pub const PERM_TTL_MS: u64 = 10 * 60 * 1000;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReapReport {
+    pub reaped_sessions: usize,
+    pub reaped_perms: usize,
+    pub reaped_undo_dirs: usize,
+}
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -465,6 +473,40 @@ impl OfficeState {
         self.save_chat()?;
         Ok(())
     }
+
+    pub fn reap_stale(&mut self, now: u64, auto_close_hours: u8) -> ReapReport {
+        let mut reaped_sids = std::collections::HashSet::new();
+        if auto_close_hours > 0 {
+            let idle_limit_ms = (auto_close_hours as u64).saturating_mul(3_600_000);
+            let stale: Vec<String> = self
+                .sessions
+                .iter()
+                .filter(|(_, s)| now.saturating_sub(s.updated_at) >= idle_limit_ms)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for sid in stale {
+                if self.sessions.remove(&sid).is_some() {
+                    let msg = json!({ "k": "gone", "id": sid });
+                    let _ = append_replay_event(&self.data_dir, now, &msg);
+                    self.broadcast(msg);
+                    reaped_sids.insert(sid);
+                }
+            }
+        }
+
+        let perms_before = self.pending_perms.len();
+        self.pending_perms.retain(|_, p| {
+            now.saturating_sub(p.created_at) < PERM_TTL_MS && !reaped_sids.contains(&p.sess)
+        });
+        let reaped_perms = perms_before - self.pending_perms.len();
+        let reaped_undo_dirs = self.undo.prune_stale_disk();
+
+        ReapReport {
+            reaped_sessions: reaped_sids.len(),
+            reaped_perms,
+            reaped_undo_dirs,
+        }
+    }
 }
 
 fn classify_tool(name: &str, input: &Value) -> ToolSummary {
@@ -626,5 +668,69 @@ mod tests {
         let fixed_day = crate::store::otel::day_key(fixed_ts);
         let fixed_file = dir.path().join("replay").join(format!("{fixed_day}.jsonl"));
         assert!(fixed_file.exists());
+    }
+
+    #[test]
+    fn reap_stale_removes_idle_sessions_expired_perms_and_stale_undo_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = OfficeState::new(dir.path().to_path_buf());
+        let now = 1_793_091_600_000u64;
+        let hour = 3_600_000u64;
+
+        st.ingest_raw_event(json!({
+            "session_id": "s-idle",
+            "hook_event_name": "SessionStart",
+            "cwd": "D:/repo/idle"
+        }))
+        .unwrap();
+        st.ingest_raw_event(json!({
+            "session_id": "s-active",
+            "hook_event_name": "SessionStart",
+            "cwd": "D:/repo/active"
+        }))
+        .unwrap();
+        st.sessions.get_mut("s-idle").unwrap().updated_at = now - 3 * hour;
+        st.sessions.get_mut("s-active").unwrap().updated_at = now - 10 * 60_000;
+
+        let make_perm = |id: &str, sess: &str, created_at: u64| PendingPerm {
+            id: id.to_owned(),
+            sess: sess.to_owned(),
+            name: sess.to_owned(),
+            kind: "perm".to_owned(),
+            tool_type: "bash".to_owned(),
+            label: "cmd".to_owned(),
+            detail: "echo hi".to_owned(),
+            danger: None,
+            created_at,
+        };
+        st.pending_perms
+            .insert("p-expired".into(), make_perm("p-expired", "s-active", now - 15 * 60_000));
+        st.pending_perms
+            .insert("p-orphaned".into(), make_perm("p-orphaned", "s-idle", now - 60_000));
+        st.pending_perms
+            .insert("p-fresh".into(), make_perm("p-fresh", "s-active", now - 60_000));
+
+        let undo_dir = dir.path().join("undo");
+        for i in 0..53usize {
+            std::fs::create_dir_all(undo_dir.join(format!("old_{i:03}"))).unwrap();
+        }
+
+        // autoCloseHours = 0: sessions kept, expired perms & stale undo dirs still cleaned.
+        let r0 = st.reap_stale(now, 0);
+        assert_eq!(r0.reaped_sessions, 0);
+        assert_eq!(r0.reaped_perms, 1);
+        assert!(r0.reaped_undo_dirs >= 3);
+        assert!(st.sessions.contains_key("s-idle"));
+        assert!(!st.pending_perms.contains_key("p-expired"));
+        assert!(st.pending_perms.contains_key("p-fresh"));
+
+        // autoCloseHours = 2: s-idle (3h idle) and its perm are reaped; s-active survives.
+        let r2 = st.reap_stale(now, 2);
+        assert_eq!(r2.reaped_sessions, 1);
+        assert_eq!(r2.reaped_perms, 1);
+        assert!(!st.sessions.contains_key("s-idle"));
+        assert!(st.sessions.contains_key("s-active"));
+        assert!(!st.pending_perms.contains_key("p-orphaned"));
+        assert!(st.pending_perms.contains_key("p-fresh"));
     }
 }
