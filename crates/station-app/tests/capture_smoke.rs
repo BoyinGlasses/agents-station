@@ -1,5 +1,5 @@
 #[test]
-fn capture_scene_smoke_writes_non_black_png_and_exits_cleanly() {
+fn capture_scene_smoke_writes_non_black_png_with_3d_and_hud_and_exits_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("smoke.png");
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_agents-station"))
@@ -22,4 +22,19 @@ fn capture_scene_smoke_writes_non_black_png_and_exits_cleanly() {
         "image appears black"
     );
     assert!(unique_buckets.len() >= 3, "image appears flat single color");
+
+    // Verify the top-left egui HUD badge (light text + terracotta stroke) composited onto the frame.
+    let mut hud_bright_pixels = 0usize;
+    for y in 16..70 {
+        for x in 16..360 {
+            let p = img.get_pixel(x, y);
+            if p[0] > 150 && p[1] > 80 {
+                hud_bright_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        hud_bright_pixels > 50,
+        "expected visible egui HUD badge pixels in top-left region, got {hud_bright_pixels}"
+    );
 }
