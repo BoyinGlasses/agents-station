@@ -289,18 +289,19 @@ impl ClaudeAccounts {
         }
 
         if self.data.active != target {
+            let snap = self.snapshot_cred_path(&target);
+            if !snap.is_file() {
+                return json!({ "ok": false, "code": "noCopy" });
+            }
+            let Ok(bytes) = std::fs::read(&snap) else {
+                return json!({ "ok": false, "code": "readFailed" });
+            };
             // Preserve current seat credentials back to the outgoing slot before swapping.
             let prev = self.data.active.clone();
             let _ = self.copy_seat_to_snapshot(&prev);
 
-            let snap = self.snapshot_cred_path(&target);
-            if snap.is_file() {
-                let Ok(bytes) = std::fs::read(&snap) else {
-                    return json!({ "ok": false, "code": "readFailed" });
-                };
-                if write_bytes_atomic(&self.main_dir.join(CREDENTIALS_FILE), &bytes).is_err() {
-                    return json!({ "ok": false, "code": "seatFailed" });
-                }
+            if write_bytes_atomic(&self.main_dir.join(CREDENTIALS_FILE), &bytes).is_err() {
+                return json!({ "ok": false, "code": "seatFailed" });
             }
         }
 
@@ -533,5 +534,33 @@ mod tests {
         let view = reloaded.view();
         assert_eq!(view["auto"], true);
         assert_eq!(view["active"], "");
+    }
+
+    #[test]
+    fn claude_accounts_rejects_switch_to_unsnapshotted_slot_without_contamination() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let main_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&main_dir).unwrap();
+        std::fs::write(
+            main_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"tok-main-clean"}}"#,
+        )
+        .unwrap();
+
+        let mut mgr = ClaudeAccounts::load(&data_dir, &main_dir);
+        assert_eq!(mgr.mutate("save", &json!({ "name": "" }))["ok"], true);
+        assert_eq!(mgr.mutate("prepare", &json!({ "name": "unsaved" }))["ok"], true);
+
+        let res = mgr.mutate("switch", &json!({ "name": "unsaved" }));
+        assert_eq!(res["ok"], false);
+        assert_eq!(res["code"], "noCopy");
+        assert_eq!(mgr.view()["active"], "");
+        assert!(
+            std::fs::read_to_string(main_dir.join(".credentials.json"))
+                .unwrap()
+                .contains("tok-main-clean")
+        );
+        assert!(!data_dir.join("claude-accounts").join("unsaved").exists());
     }
 }
