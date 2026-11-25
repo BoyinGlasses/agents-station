@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 107 verified `[x]` | 296 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
+Status: 105 verified `[x]` | 298 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -547,7 +547,7 @@ Status: 107 verified `[x]` | 296 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [~] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
 - [ ] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [~] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
-- [x] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
+- [~] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
 - [~] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
 - [~] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
 - [ ] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
@@ -558,7 +558,7 @@ Status: 107 verified `[x]` | 296 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [~] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
 - [ ] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/pins -> `crates/station-core/src/http/api.rs::post_pins`
-- [x] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
+- [~] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
 - [ ] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/loop -> `crates/station-core/src/http/api.rs::post_loop`
 - [~] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
