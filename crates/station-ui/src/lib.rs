@@ -1,5 +1,8 @@
 pub mod fonts;
+pub mod hud;
 pub mod i18n;
+pub mod launcher_dock;
+pub mod state;
 pub mod theme;
 
 use bevy::ecs::schedule::ScheduleLabel;
