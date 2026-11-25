@@ -320,6 +320,15 @@ impl UndoManager {
     }
 
     pub fn apply(&mut self, sid: &str, now_ms: u64) -> UndoApplyResult {
+        self.apply_filtered(sid, now_ms, None)
+    }
+
+    pub fn apply_filtered(
+        &mut self,
+        sid: &str,
+        now_ms: u64,
+        only_files: Option<&[String]>,
+    ) -> UndoApplyResult {
         let Some(p) = self.plan(sid) else {
             return UndoApplyResult { done: Vec::new(), after: None };
         };
@@ -330,6 +339,24 @@ impl UndoManager {
             .files
             .into_iter()
             .filter(|x| x.action == "restore" || x.action == "delete")
+            .filter(|x| match only_files {
+                Some(filter) if !filter.is_empty() => filter.iter().any(|f| {
+                    if cfg!(windows) {
+                        f.eq_ignore_ascii_case(&x.file)
+                            || Path::new(&x.file)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.eq_ignore_ascii_case(f))
+                    } else {
+                        f == &x.file
+                            || Path::new(&x.file)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n == f)
+                    }
+                }),
+                _ => true,
+            })
             .collect();
         let Some(turn_id) = self.turns.get(sid).and_then(|l| l.last()).map(|t| t.id.clone()) else {
             return UndoApplyResult { done: Vec::new(), after: None };
