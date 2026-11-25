@@ -164,6 +164,21 @@ fn parse_launch_outcome_from_json(val: &Value) -> Option<LaunchOutcome> {
         .and_then(|r| serde_json::from_value::<LaunchOutcome>(r.clone()).ok())
 }
 
+fn interpret_remote_launch_response(label: &str, val: &Value) -> (bool, (String, String)) {
+    if val.get("ok").and_then(Value::as_bool) == Some(false) || val.get("error").is_some() {
+        let err = val
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("launch failed");
+        return (false, launch_error_toast(label, err));
+    }
+    match parse_launch_outcome_from_json(val) {
+        Some(outcome) => (true, launch_outcome_toast(label, &outcome)),
+        None => (false, launch_error_toast(label, "invalid launch response")),
+    }
+}
+
 #[derive(Default, Clone)]
 struct RemoteSnapshot {
     has_snapshot: bool,
@@ -576,13 +591,24 @@ fn spawn_attached_sse_client(
                                 let ok = match resp {
                                     Ok(r) if r.status().is_success() => {
                                         if let Some(label) = cmd.launch_toast_label.as_deref() {
-                                            if let Ok(val) = r.json::<Value>().await
-                                                && let Some(outcome) = parse_launch_outcome_from_json(&val)
-                                            {
-                                                let _ = toast_a.try_send(launch_outcome_toast(label, &outcome));
+                                            match r.json::<Value>().await {
+                                                Ok(val) => {
+                                                    let (launch_ok, notice) =
+                                                        interpret_remote_launch_response(label, &val);
+                                                    let _ = toast_a.try_send(notice);
+                                                    launch_ok
+                                                }
+                                                Err(err) => {
+                                                    let _ = toast_a.try_send(launch_error_toast(
+                                                        label,
+                                                        &err.to_string(),
+                                                    ));
+                                                    false
+                                                }
                                             }
+                                        } else {
+                                            true
                                         }
-                                        true
                                     }
                                     Ok(r) => {
                                         if let Some(label) = cmd.launch_toast_label.as_deref() {
@@ -2802,5 +2828,125 @@ mod tests {
             saw_not_installed_toast,
             "launching an uninstalled harness must push an accurate NotInstalled toast into UiState"
         );
+    }
+
+    #[test]
+    fn attached_http_200_launch_error_emits_error_toast_and_skips_extra_refresh() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Direct unit check on response interpreter.
+        let (ok, (title, body)) = interpret_remote_launch_response(
+            "Claude",
+            &json!({ "ok": false, "error": "boom" }),
+        );
+        assert!(!ok);
+        assert_eq!(title, "Failed to open Claude");
+        assert_eq!(body, "boom");
+
+        let (bad_ok, (bad_title, _)) =
+            interpret_remote_launch_response("Claude", &json!({ "ok": true }));
+        assert!(!bad_ok);
+        assert_eq!(bad_title, "Failed to open Claude");
+
+        // End-to-end over real loopback HTTP server where POST /api/harnesses/launch returns HTTP 200 {"ok": false, "error": "boom"}.
+        struct FailingHarnessApi {
+            list_calls: AtomicUsize,
+        }
+        impl HarnessApi for FailingHarnessApi {
+            fn list_json(&self) -> Value {
+                self.list_calls.fetch_add(1, Ordering::SeqCst);
+                json!({
+                    "ok": true,
+                    "harnesses": [{
+                        "id": "claude",
+                        "label": "Claude",
+                        "hook_agent": "claude",
+                        "status": "installed_hooked",
+                        "custom": false
+                    }]
+                })
+            }
+            fn launch(&self, _id: &str) -> anyhow::Result<Value> {
+                anyhow::bail!("boom")
+            }
+            fn mutate_custom(&self, _body: Value) -> anyhow::Result<Value> {
+                Ok(json!({ "ok": true }))
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tmp_srv = tempfile::tempdir().unwrap();
+        let api = Arc::new(FailingHarnessApi {
+            list_calls: AtomicUsize::new(0),
+        });
+        let srv_state = Arc::new(
+            AppState::new(tmp_srv.path().to_path_buf(), Some(api.clone())).unwrap(),
+        );
+        let handle = rt
+            .block_on(start_http_server(srv_state, "127.0.0.1", 0))
+            .unwrap();
+        let port = handle.addr.port();
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp_client = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp_client.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            true,
+        );
+        assert_eq!(bridge.mode(), BridgeMode::AttachedHttp);
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(UiState::default())
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, (process_ui_actions, sync_live_state_to_ui).chain());
+
+        // Wait for initial harness fetch to settle before recording baseline.
+        let init_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < init_deadline && api.list_calls.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.toasts.clear();
+            ui.push_action(UiAction::LaunchHarness("claude".to_owned()));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_error_toast = false;
+        while Instant::now() < deadline {
+            app.update();
+            if app
+                .world()
+                .resource::<UiState>()
+                .toasts
+                .iter()
+                .any(|t| t.title == "Failed to open Claude" && t.body == "boom")
+            {
+                saw_error_toast = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(
+            saw_error_toast,
+            "HTTP 200 {{\"ok\": false, \"error\": \"boom\"}} must emit launch_error_toast in AttachedHttp mode"
+        );
+
+        drop(app);
+        let _ = handle.shutdown.send(true);
+        drop(rt);
     }
 }
