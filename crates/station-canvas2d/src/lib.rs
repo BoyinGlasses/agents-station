@@ -1,6 +1,8 @@
+pub mod brands;
 pub mod canvas;
 pub mod text;
 
+pub use brands::BrandRegistry;
 pub use canvas::{Canvas2d, RgbaSurface, hex, hex_rgba};
 pub use text::{FontEngine, TextAlign};
 
