@@ -4,12 +4,13 @@ use crate::redact::redact;
 use crate::shared::cache_clock::cache_from_status;
 use crate::shared::danger::danger_key;
 use crate::state::mac_hold::{
-    BAR_ALIVE_MS, DENY_HOLD_MS, HoldInput, PHONE_HOLD_MS, effective_bar_hold_ms, effective_hold_ms,
-    hold_plan, wait_header_ms,
+    BAR_ALIVE_MS, DENY_HOLD_MS, HoldDecision, HoldInput, PHONE_HOLD_MS, effective_bar_hold_ms,
+    effective_hold_ms, hold_plan, wait_header_ms,
 };
 use crate::state::overlap::{file_of, is_edit_tool};
 use crate::state::sessions::{PendingPerm, classify_tool, clip, now_ms, one_line};
 use crate::store::otel::day_key;
+use crate::store::push::{PushMessage, deliver_prepared};
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -426,7 +427,7 @@ pub async fn post_hook_start(
     Ok(Json(json!({})))
 }
 
-fn compute_hold_ms(state: &AppState, headers: &HeaderMap, normal_ms: u64) -> u64 {
+fn compute_hold_plan(state: &AppState, headers: &HeaderMap, normal_ms: u64) -> HoldDecision {
     let now = now_ms();
     let (focused, bar_last_seen_ms) = {
         let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
@@ -465,10 +466,39 @@ fn compute_hold_ms(state: &AppState, headers: &HeaderMap, normal_ms: u64) -> u64
         phone,
         phone_ms,
     });
-    match header_ms {
+    let ms = match header_ms {
         Some(w) => plan.ms.min(w),
         None => plan.ms,
+    };
+    HoldDecision { ms, by: plan.by }
+}
+
+fn spawn_phone_push(state: &Arc<AppState>, title: String, body: String, tag: String) {
+    let msg = PushMessage {
+        title,
+        body: clip(&body, 180),
+        tag: Some(tag),
+        url: "/phone".to_owned(),
+        urgent: true,
+    };
+    let deliveries = state
+        .push
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare_deliveries(&msg, now_ms() / 1000);
+    if deliveries.is_empty() {
+        return;
     }
+    let st = Arc::clone(state);
+    tokio::spawn(async move {
+        let dead = deliver_prepared(deliveries).await;
+        if !dead.is_empty() {
+            let mut push = st.push.lock().unwrap_or_else(|e| e.into_inner());
+            for ep in dead {
+                push.remove(&ep);
+            }
+        }
+    });
 }
 
 struct HoldCleanupGuard {
@@ -543,7 +573,8 @@ pub async fn post_hook_permission(
         return Ok(Json(json!({})));
     }
 
-    let hold_ms = compute_hold_ms(&state, &headers, effective_hold_ms());
+    let hold = compute_hold_plan(&state, &headers, effective_hold_ms());
+    let hold_ms = hold.ms;
     if hold_ms == 0 {
         return Ok(Json(json!({})));
     }
@@ -567,7 +598,7 @@ pub async fn post_hook_permission(
         .to_owned();
 
     let (tx, rx) = oneshot::channel();
-    let perm_id = {
+    let (perm_id, push_title, push_body) = {
         let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
         let perm_id = format!("p_{}_{}", ts, office.next_seq());
         let name = office
@@ -576,6 +607,8 @@ pub async fn post_hook_permission(
             .map(|s| s.name.clone())
             .or(cwd_name)
             .unwrap_or(agent);
+        let push_title = format!("{name} · {}", summary.label);
+        let push_body = detail.clone();
         let perm = PendingPerm {
             id: perm_id.clone(),
             sess: sid.to_owned(),
@@ -588,8 +621,11 @@ pub async fn post_hook_permission(
             created_at: ts,
         };
         office.register_hold(perm, tx);
-        perm_id
+        (perm_id, push_title, push_body)
     };
+    if hold.by == Some("phone") {
+        spawn_phone_push(&state, push_title, push_body, format!("perm-{perm_id}"));
+    }
 
     let response = await_hold(state, perm_id, hold_ms, rx).await;
     Ok(Json(response))
@@ -636,7 +672,8 @@ pub async fn post_hook_question(
         ("plan", "plan", "Plan", clip(&redact(&one_line(plan)), 200))
     };
 
-    let hold_ms = compute_hold_ms(&state, &headers, effective_hold_ms());
+    let hold = compute_hold_plan(&state, &headers, effective_hold_ms());
+    let hold_ms = hold.ms;
     if hold_ms == 0 {
         return Ok(Json(json!({})));
     }
@@ -650,7 +687,7 @@ pub async fn post_hook_question(
         .map(str::to_owned);
 
     let (tx, rx) = oneshot::channel();
-    let perm_id = {
+    let (perm_id, push_title, push_body) = {
         let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
         let perm_id = format!("q_{}_{}", ts, office.next_seq());
         let name = office
@@ -659,6 +696,8 @@ pub async fn post_hook_question(
             .map(|s| s.name.clone())
             .or(cwd_name)
             .unwrap_or_else(|| "claude".to_owned());
+        let push_title = format!("{name} · {label}");
+        let push_body = detail.clone();
         let perm = PendingPerm {
             id: perm_id.clone(),
             sess: sid.to_owned(),
@@ -671,8 +710,11 @@ pub async fn post_hook_question(
             created_at: ts,
         };
         office.register_hold_with_input(perm, tx, Some(tool_input));
-        perm_id
+        (perm_id, push_title, push_body)
     };
+    if hold.by == Some("phone") {
+        spawn_phone_push(&state, push_title, push_body, format!("perm-{perm_id}"));
+    }
 
     let response = await_hold(state, perm_id, hold_ms, rx).await;
     Ok(Json(response))
@@ -694,11 +736,12 @@ pub async fn post_hook_denied(
         .to_owned();
     let reason = body.get("reason").and_then(Value::as_str).unwrap_or("");
     let can_retry = !is_no_verdict_reason(reason);
-    let hold_ms = if can_retry {
-        compute_hold_ms(&state, &headers, DENY_HOLD_MS.min(effective_hold_ms()))
+    let hold = if can_retry {
+        compute_hold_plan(&state, &headers, DENY_HOLD_MS.min(effective_hold_ms()))
     } else {
-        0
+        HoldDecision { ms: 0, by: None }
     };
+    let hold_ms = hold.ms;
 
     let mut redacted = crate::redact::redact_json_value(&body);
     if let Some(obj) = redacted.as_object_mut() {
@@ -732,6 +775,8 @@ pub async fn post_hook_denied(
         if hold_ms > 0 {
             let (tx, rx) = oneshot::channel();
             let card_id = card.id.clone();
+            let push_title = format!("{sname} · Denied: {}", summary.label);
+            let push_body = detail.clone();
             let perm = PendingPerm {
                 id: card_id.clone(),
                 sess: sid,
@@ -744,13 +789,16 @@ pub async fn post_hook_denied(
                 created_at: ts,
             };
             office.register_hold(perm, tx);
-            Some((card_id, rx))
+            Some((card_id, rx, push_title, push_body))
         } else {
             None
         }
     };
 
-    if let Some((card_id, rx)) = hold_rx {
+    if let Some((card_id, rx, push_title, push_body)) = hold_rx {
+        if hold.by == Some("phone") {
+            spawn_phone_push(&state, push_title, push_body, format!("perm-{card_id}"));
+        }
         let response = await_hold(state, card_id, hold_ms, rx).await;
         Ok(Json(response))
     } else {
