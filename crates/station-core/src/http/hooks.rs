@@ -29,11 +29,31 @@ pub async fn post_event(
     };
 
     if let Some(ev) = ev_opt {
-        let mut trophies = state.trophies.lock().unwrap_or_else(|e| e.into_inner());
-        trophies.session(&ev.session_id, &today, ts);
+        {
+            let mut trophies = state.trophies.lock().unwrap_or_else(|e| e.into_inner());
+            trophies.session(&ev.session_id, &today, ts);
+            match ev.hook_event_name.as_str() {
+                "UserPromptSubmit" => {
+                    trophies.bump("prompts", 1, &today, ts);
+                }
+                "PostToolUse" => {
+                    let tn = ev.tool_name.as_deref().unwrap_or("");
+                    if is_edit_tool(tn) {
+                        trophies.bump("edit", 1, &today, ts);
+                    } else if tn == "Bash" {
+                        trophies.bump("cmd", 1, &today, ts);
+                    } else if matches!(tn, "Read" | "Grep" | "Glob") {
+                        trophies.bump("read", 1, &today, ts);
+                    } else if matches!(tn, "WebSearch" | "WebFetch") {
+                        trophies.bump("web", 1, &today, ts);
+                    }
+                }
+                _ => {}
+            }
+            let _ = trophies.flush();
+        }
         match ev.hook_event_name.as_str() {
             "UserPromptSubmit" => {
-                trophies.bump("prompts", 1, &today, ts);
                 if let Some(prompt) = &ev.prompt {
                     let mut vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     let cwd = ev.cwd.as_deref().unwrap_or("");
@@ -42,18 +62,7 @@ pub async fn post_event(
                         .and_then(|n| n.to_str())
                         .unwrap_or(&ev.agent);
                     vault.record_prompt(&ev.session_id, &ev.agent, title, cwd, prompt, 0, ts);
-                }
-            }
-            "PostToolUse" => {
-                let tn = ev.tool_name.as_deref().unwrap_or("");
-                if is_edit_tool(tn) {
-                    trophies.bump("edit", 1, &today, ts);
-                } else if tn == "Bash" {
-                    trophies.bump("cmd", 1, &today, ts);
-                } else if matches!(tn, "Read" | "Grep" | "Glob") {
-                    trophies.bump("read", 1, &today, ts);
-                } else if matches!(tn, "WebSearch" | "WebFetch") {
-                    trophies.bump("web", 1, &today, ts);
+                    let _ = vault.flush();
                 }
             }
             "Stop" => {
@@ -62,6 +71,7 @@ pub async fn post_event(
                 {
                     let mut tenure = state.tenure.lock().unwrap_or_else(|e| e.into_inner());
                     tenure.touch(name, ts, true);
+                    let _ = tenure.save();
                 }
             }
             _ => {}
@@ -384,6 +394,77 @@ mod tests {
         assert!(
             office.undo.plan("sess-cwd-lock").is_none(),
             "hook payload cwd must not widen registered session.cwd boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_event_persists_vault_trophies_tenure_and_replay_before_shutdown() {
+        use crate::state::sessions::now_ms;
+        use crate::state::tenure::TenureStore;
+        use crate::store::otel::day_key;
+        use crate::store::trophies::TrophyStore;
+        use crate::store::vault::VaultStore;
+        use std::collections::HashSet;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let before = now_ms();
+
+        {
+            let state = Arc::new(AppState::new(data_dir.clone(), None).unwrap());
+            let app = build_router(state);
+            for payload in [
+                json!({
+                    "session_id": "s-kill",
+                    "hook_event_name": "UserPromptSubmit",
+                    "cwd": "D:/repo/persist-me",
+                    "prompt": "persist before SIGKILL"
+                }),
+                json!({
+                    "session_id": "s-kill",
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Edit",
+                    "tool_input": { "file_path": "src/lib.rs" }
+                }),
+                json!({
+                    "session_id": "s-kill",
+                    "hook_event_name": "Stop",
+                    "cwd": "D:/repo/persist-me"
+                }),
+            ] {
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/event")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap();
+                assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+            }
+            // Drop without calling flush_all() to simulate sudden process termination.
+        }
+
+        assert!(data_dir.join("vault.json").exists(), "vault.json must persist before shutdown");
+        assert!(data_dir.join("totals.json").exists(), "totals.json must persist before shutdown");
+        assert!(data_dir.join("tenure.json").exists(), "tenure.json must persist before shutdown");
+        let replay_path = data_dir
+            .join("replay")
+            .join(format!("{}.jsonl", day_key(before)));
+        assert!(replay_path.exists(), "replay JSONL must persist before shutdown");
+
+        let vault = VaultStore::load(&data_dir);
+        assert_eq!(vault.search("SIGKILL", 10).len(), 1);
+
+        let trophies = TrophyStore::load(&data_dir, now_ms());
+        assert_eq!(trophies.total("prompts"), 1);
+        assert_eq!(trophies.total("edit"), 1);
+        assert_eq!(trophies.total("sessions"), 1);
+
+        let tenure = TenureStore::load(&data_dir, now_ms());
+        let list = tenure.list(30, now_ms(), &HashSet::new());
+        assert!(
+            list.iter().any(|p| p.name == "persist-me" && p.turns == 1),
+            "tenure.json must record Stop turn before shutdown: {list:?}"
         );
     }
 }
