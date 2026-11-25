@@ -375,6 +375,45 @@ impl ChatEngine {
         Some(m)
     }
 
+    pub fn ci_card(&mut self, from: &str, name: &str, ci: Value, now_ms: u64) -> ChatMessage {
+        let id = self.next_id(now_ms);
+        let key = staff_key(from).unwrap_or(from).to_owned();
+        self.add_msg(ChatMessage {
+            id,
+            at: now_ms,
+            kind: "ci".to_owned(),
+            from: Some(key),
+            name: Some(name.to_owned()),
+            text: String::new(),
+            reacts: BTreeMap::new(),
+            sticker: None,
+            photo: None,
+            poll: None,
+            remind: None,
+            reply: None,
+            work: None,
+            r#loop: None,
+            ci: Some(ci),
+            deny: None,
+            tag: None,
+            recalled: false,
+        })
+    }
+
+    pub fn set_ci(&mut self, id: &str, patch: Value) -> Option<&ChatMessage> {
+        let m = self.msgs.iter_mut().find(|m| m.id == id && m.kind == "ci")?;
+        if let (Some(Value::Object(cur)), Value::Object(p)) = (&mut m.ci, patch) {
+            for (k, v) in p {
+                cur.insert(k, v);
+            }
+        }
+        Some(m)
+    }
+
+    pub fn by_id(&self, id: &str) -> Option<&ChatMessage> {
+        self.msgs.iter().find(|m| m.id == id)
+    }
+
     pub fn react(&mut self, id: &str, by: &str, emoji: &str) -> bool {
         if !REACTIONS.contains(&emoji) {
             return false;
