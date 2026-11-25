@@ -2,6 +2,7 @@ pub mod agent_events;
 pub mod atomic;
 pub mod auth;
 pub mod config;
+pub mod http;
 pub mod platform;
 pub mod prefs;
 pub mod redact;

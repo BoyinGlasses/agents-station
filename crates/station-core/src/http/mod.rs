@@ -1,0 +1,313 @@
+pub mod api;
+pub mod guard;
+pub mod hooks;
+pub mod otel_routes;
+pub mod phone;
+pub mod sse;
+
+use crate::auth::AuthStore;
+use crate::config::{home_dir, resolve_claude_dir};
+use crate::platform::default_platform;
+use crate::prefs::PrefsStore;
+use crate::state::claude_version::ClaudeVersionWatcher;
+use crate::state::lift_service::LiftService;
+use crate::state::sessions::{OfficeState, now_ms};
+use crate::state::tasks::TaskManager;
+use crate::state::tenure::TenureStore;
+use crate::store::antigravity_accounts::AntigravityAccounts;
+use crate::store::codex_accounts::CodexAccounts;
+use crate::store::otel::OtelStore;
+use crate::store::push::PushStore;
+use crate::store::rewrite::Rewriter;
+use crate::store::trophies::TrophyStore;
+use crate::store::vault::VaultStore;
+use crate::system::SystemMonitor;
+use anyhow::Result;
+use axum::Router;
+use axum::routing::{get, post};
+use serde_json::Value;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
+
+pub trait HarnessApi: Send + Sync {
+    fn list_json(&self) -> Value;
+    fn launch(&self, id: &str) -> Result<Value>;
+    fn mutate_custom(&self, body: Value) -> Result<Value>;
+}
+
+pub struct AppState {
+    pub data_dir: PathBuf,
+    pub auth: AuthStore,
+    pub prefs: Mutex<PrefsStore>,
+    pub office: Mutex<OfficeState>,
+    pub sys: SystemMonitor,
+    pub otel: Mutex<OtelStore>,
+    pub trophies: Mutex<TrophyStore>,
+    pub vault: Mutex<VaultStore>,
+    pub tenure: Mutex<TenureStore>,
+    pub tasks: Mutex<TaskManager>,
+    pub push: Mutex<PushStore>,
+    pub rewriter: Mutex<Rewriter>,
+    pub codex_accounts: Mutex<CodexAccounts>,
+    pub ag_accounts: Mutex<AntigravityAccounts>,
+    pub claude_version: Mutex<ClaudeVersionWatcher>,
+    pub lift: LiftService,
+    pub harnesses: Option<Arc<dyn HarnessApi>>,
+}
+
+impl AppState {
+    pub fn new(data_dir: PathBuf, harnesses: Option<Arc<dyn HarnessApi>>) -> Result<Self> {
+        let now = now_ms();
+        let claude_dir = resolve_claude_dir(std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref());
+        let auth = AuthStore::load_or_init(&data_dir)?;
+        let prefs = PrefsStore::load(&data_dir);
+        let office = OfficeState::new(data_dir.clone());
+        let sys = SystemMonitor::new(default_platform(), claude_dir);
+        let otel = OtelStore::load(data_dir.join("otel"), 30, now);
+        let trophies = TrophyStore::load(&data_dir, now);
+        let vault = VaultStore::load(&data_dir);
+        let tenure = TenureStore::load(&data_dir, now);
+        let tasks = TaskManager::new();
+        let push = PushStore::load(&data_dir);
+        let rewriter = Rewriter::default();
+        let codex_accounts = CodexAccounts::load(&data_dir);
+        let ag_accounts = AntigravityAccounts::load(&data_dir);
+        let claude_version = ClaudeVersionWatcher::load(&data_dir, home_dir());
+        let lift = LiftService::init(&data_dir, env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_VERSION"), now);
+
+        Ok(Self {
+            data_dir,
+            auth,
+            prefs: Mutex::new(prefs),
+            office: Mutex::new(office),
+            sys,
+            otel: Mutex::new(otel),
+            trophies: Mutex::new(trophies),
+            vault: Mutex::new(vault),
+            tenure: Mutex::new(tenure),
+            tasks: Mutex::new(tasks),
+            push: Mutex::new(push),
+            rewriter: Mutex::new(rewriter),
+            codex_accounts: Mutex::new(codex_accounts),
+            ag_accounts: Mutex::new(ag_accounts),
+            claude_version: Mutex::new(claude_version),
+            lift,
+            harnesses,
+        })
+    }
+
+    pub fn flush_all(&self) -> Result<()> {
+        let now = now_ms();
+        self.prefs.lock().expect("prefs").save()?;
+        self.office.lock().expect("office").flush_all()?;
+        self.otel.lock().expect("otel").flush(now)?;
+        self.trophies.lock().expect("trophies").flush()?;
+        self.vault.lock().expect("vault").flush()?;
+        self.tenure.lock().expect("tenure").save()?;
+        Ok(())
+    }
+}
+
+pub fn build_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/", get(phone::get_root))
+        .route("/phone", get(phone::get_phone))
+        .route("/pin", get(phone::get_pin).post(phone::post_pin))
+        .route("/manifest.webmanifest", get(phone::get_manifest))
+        .route("/sw.js", get(phone::get_sw))
+        .route("/health", get(phone::get_health))
+        .route("/stream", get(sse::get_stream))
+        // Hooks & OTLP (strictly loopback)
+        .route("/event", post(hooks::post_event))
+        .route("/v1/metrics", post(otel_routes::post_metrics))
+        .route("/v1/logs", post(otel_routes::post_logs))
+        .route("/hook/loop", post(hooks::post_hook_loop))
+        .route("/hook/status", post(hooks::post_hook_status))
+        .route("/hook/bind", post(hooks::post_hook_bind))
+        .route("/hook/start", post(hooks::post_hook_start))
+        .route("/hook/permission", post(hooks::post_hook_permission))
+        .route("/hook/question", post(hooks::post_hook_question))
+        .route("/hook/denied", post(hooks::post_hook_denied))
+        // Core GET/POST APIs
+        .route("/api/live", get(api::get_live))
+        .route("/api/doctor", get(api::get_doctor))
+        .route("/api/log", get(api::get_log))
+        .route("/api/timeline", get(api::get_timeline))
+        .route("/api/wrapped", get(api::get_wrapped))
+        .route("/api/replay", get(api::get_replay))
+        .route("/api/replay/days", get(api::get_replay_days))
+        .route("/api/stranded", get(api::get_stranded))
+        .route("/api/stranded/open", post(api::post_local_ok))
+        .route("/api/stranded/remove", post(api::post_local_ok))
+        .route("/api/pins", get(api::get_pins).post(api::post_pins))
+        .route("/api/vault", get(api::get_vault))
+        .route("/api/vault/report", get(api::get_vault_report))
+        .route("/api/undo", get(api::get_undo).post(api::post_undo))
+        .route("/api/burn", get(api::get_burn))
+        .route("/api/sys", get(api::get_sys))
+        .route("/api/sys/action", post(api::post_sys_action))
+        .route("/api/sys/auto", post(api::post_sys_auto))
+        .route("/api/panel", get(api::get_panel))
+        .route("/api/panel/answer", post(api::post_local_ok))
+        .route("/api/panel/open", post(api::post_local_ok))
+        .route("/api/chat", get(api::get_chat).post(api::post_chat))
+        .route("/api/loop", get(api::get_loop).post(api::post_loop))
+        .route("/api/tenure", get(api::get_tenure).post(api::post_tenure))
+        .route("/api/cache", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/tasks", get(api::get_tasks).post(api::post_tasks))
+        .route("/api/tasks/allow", post(api::post_local_ok))
+        .route("/api/tasks/bg", post(api::post_local_ok))
+        .route("/api/tasks/stop", post(api::post_tasks_stop))
+        .route("/api/tasks/steer", post(api::post_local_ok))
+        .route("/api/models", get(api::get_models).post(api::post_models))
+        .route("/api/quick", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/claude-version", get(api::get_claude_version))
+        .route("/api/push", get(api::get_push).post(api::post_push))
+        .route("/api/image", get(api::get_image))
+        .route("/api/macapprove", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/tunnel", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/tunnel/domain", post(api::post_local_ok))
+        .route("/api/presence", post(api::post_presence))
+        .route("/api/perm", post(api::post_perm))
+        .route("/api/pin", post(api::post_pin_update))
+        .route("/api/lan", post(api::post_local_ok))
+        .route("/api/phone", post(api::post_local_ok))
+        .route("/api/rc", post(api::post_local_ok))
+        .route("/api/prompt/rewrite", post(api::post_prompt_rewrite))
+        .route("/api/open", post(api::post_local_ok))
+        .route("/api/denied", post(api::post_local_ok))
+        .route("/api/ci", post(api::post_local_ok))
+        .route("/api/prefs", get(api::get_prefs).post(api::post_prefs))
+        .route("/api/todos", post(api::post_todos))
+        // Accounts & multi-AI
+        .route("/api/accounts", post(api::post_accounts_any))
+        .route("/api/accounts/{action}", post(api::post_accounts_any))
+        .route("/api/ai/codex/{action}", post(api::post_codex_ai))
+        .route("/api/ai/ag/{action}", post(api::post_ag_ai))
+        // Native GUI Harness Launcher (strictly loopback)
+        .route("/api/harnesses", get(api::get_harnesses))
+        .route("/api/harnesses/launch", post(api::post_harnesses_launch))
+        .route("/api/harnesses/custom", post(api::post_harnesses_custom))
+        .with_state(state)
+}
+
+pub struct ServerHandle {
+    pub addr: SocketAddr,
+    pub shutdown: watch::Sender<bool>,
+}
+
+pub async fn start_http_server(
+    state: Arc<AppState>,
+    host: &str,
+    port: u16,
+) -> Result<ServerHandle> {
+    let listener = tokio::net::TcpListener::bind((host, port)).await?;
+    let addr = listener.local_addr()?;
+    let (tx, mut rx) = watch::channel(false);
+    let router = build_router(state.clone());
+
+    tokio::spawn(async move {
+        let svc = router.into_make_service_with_connect_info::<SocketAddr>();
+        let _ = axum::serve(listener, svc)
+            .with_graceful_shutdown(async move {
+                let _ = rx.changed().await;
+            })
+            .await;
+        let _ = state.flush_all();
+    });
+
+    Ok(ServerHandle { addr, shutdown: tx })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn security_guards_reject_spoofed_host_origin_and_remote_unauth() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state.clone());
+
+        // 1. Spoofed Host header -> 403 and zero session mutations
+        let bad_host = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "evil.com")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"session_id":"s1","hook_event_name":"SessionStart"}).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(bad_host).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(state.office.lock().unwrap().sessions.len(), 0);
+
+        // 2. Cross-origin browser request -> 403
+        let bad_origin = Request::builder()
+            .method("POST")
+            .uri("/api/harnesses/launch")
+            .header("host", "127.0.0.1:4310")
+            .header("origin", "https://evil.com")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id":"claude"}).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(bad_origin).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 3. Valid loopback SessionStart -> 200 and visible in /api/live
+        let good = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"session_id":"s1","hook_event_name":"SessionStart","cwd":"D:/repo"}).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(good).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.office.lock().unwrap().sessions.len(), 1);
+
+        // 4. Health check -> 200 ok
+        let health = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(health).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 5. OTLP bad schema -> 400
+        let bad_otel = Request::builder()
+            .method("POST")
+            .uri("/v1/metrics")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = app.clone().oneshot(bad_otel).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 6. Remote unauthenticated request -> 303 on / and 401 on /api/live
+        let remote_root = Request::builder()
+            .uri("/")
+            .header("x-office-remote-test", "1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(remote_root).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        let remote_api = Request::builder()
+            .uri("/api/live")
+            .header("x-office-remote-test", "1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(remote_api).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 7. /api/image includes sandbox CSP + nosniff
+        let img = Request::builder().uri("/api/image").body(Body::empty()).unwrap();
+        let resp = app.clone().oneshot(img).await.unwrap();
+        assert_eq!(resp.headers().get("content-security-policy").unwrap(), "sandbox");
+        assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
+    }
+}

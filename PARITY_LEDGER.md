@@ -24,7 +24,7 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 - [x] server/codex-history.mjs -> `crates/station-core/src/store/codex_history.rs` (unit tested)
 - [x] server/data-dir.mjs -> `crates/station-core/src/config.rs` (unit tested)
 - [x] server/git.mjs -> `crates/station-core/src/state/git.rs` (unit tested)
-- [ ] server/index.mjs -> (pending)
+- [x] server/index.mjs -> `crates/station-core/src/http/{mod,guard,otel_routes,hooks,sse,phone,api}.rs` (Axum 0.8 + security guards tested)
 - [x] server/lift-service.mjs -> `crates/station-core/src/state/lift_service.rs` (unit tested)
 - [x] server/loops.mjs -> `crates/station-core/src/state/loops.rs` (unit tested)
 - [x] server/mac-hold.mjs -> `crates/station-core/src/state/mac_hold.rs` (unit tested)
@@ -487,109 +487,109 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 
 ## P1 — HTTP / SSE / OTLP / Launcher Endpoints (106 endpoints)
 
-- [ ] endpoint:POST /event -> (pending)
-- [ ] endpoint:POST /v1/metrics -> (pending)
-- [ ] endpoint:POST /v1/logs -> (pending)
-- [ ] endpoint:POST /hook/question -> (pending)
-- [ ] endpoint:POST /hook/bind -> (pending)
-- [ ] endpoint:POST /hook/status -> (pending)
-- [ ] endpoint:POST /hook/loop -> (pending)
-- [ ] endpoint:POST /hook/start -> (pending)
-- [ ] endpoint:POST /hook/denied -> (pending)
-- [ ] endpoint:POST /hook/permission -> (pending)
-- [ ] endpoint:GET /health -> (pending)
-- [ ] endpoint:GET /stream -> (pending)
-- [ ] endpoint:GET /api/live -> (pending)
-- [ ] endpoint:GET /api/doctor -> (pending)
-- [ ] endpoint:GET /api/log -> (pending)
-- [ ] endpoint:GET /api/timeline -> (pending)
-- [ ] endpoint:GET /api/wrapped -> (pending)
-- [ ] endpoint:GET /api/replay -> (pending)
-- [ ] endpoint:GET /api/replay/days -> (pending)
-- [ ] endpoint:GET /api/stranded -> (pending)
-- [ ] endpoint:GET /api/pins -> (pending)
-- [ ] endpoint:GET /api/vault -> (pending)
-- [ ] endpoint:GET /api/vault/report -> (pending)
-- [ ] endpoint:GET /api/undo -> (pending)
-- [ ] endpoint:GET /api/burn -> (pending)
-- [ ] endpoint:GET /api/sys -> (pending)
-- [ ] endpoint:GET /api/panel -> (pending)
-- [ ] endpoint:GET /api/chat -> (pending)
-- [ ] endpoint:GET /api/loop -> (pending)
-- [ ] endpoint:GET /api/tenure -> (pending)
-- [ ] endpoint:GET /api/cache -> (pending)
-- [ ] endpoint:GET /api/tasks -> (pending)
-- [ ] endpoint:GET /api/models -> (pending)
-- [ ] endpoint:GET /api/quick -> (pending)
-- [ ] endpoint:GET /api/claude-version -> (pending)
-- [ ] endpoint:GET /api/push -> (pending)
-- [ ] endpoint:GET /api/image -> (pending)
-- [ ] endpoint:GET /api/macapprove -> (pending)
-- [ ] endpoint:GET /api/tunnel -> (pending)
-- [ ] endpoint:GET /pin -> (pending)
-- [ ] endpoint:POST /pin -> (pending)
-- [ ] endpoint:POST /api/presence -> (pending)
-- [ ] endpoint:POST /api/perm -> (pending)
-- [ ] endpoint:POST /api/pin -> (pending)
-- [ ] endpoint:POST /api/lan -> (pending)
-- [ ] endpoint:POST /api/phone -> (pending)
-- [ ] endpoint:POST /api/push -> (pending)
-- [ ] endpoint:POST /api/tunnel -> (pending)
-- [ ] endpoint:POST /api/tunnel/domain -> (pending)
-- [ ] endpoint:POST /api/rc -> (pending)
-- [ ] endpoint:POST /api/tasks -> (pending)
-- [ ] endpoint:POST /api/tasks/allow -> (pending)
-- [ ] endpoint:POST /api/tasks/bg -> (pending)
-- [ ] endpoint:POST /api/tasks/stop -> (pending)
-- [ ] endpoint:POST /api/tasks/steer -> (pending)
-- [ ] endpoint:POST /api/prompt/rewrite -> (pending)
-- [ ] endpoint:POST /api/chat -> (pending)
-- [ ] endpoint:POST /api/sys/auto -> (pending)
-- [ ] endpoint:POST /api/sys/action -> (pending)
-- [ ] endpoint:POST /api/panel/answer -> (pending)
-- [ ] endpoint:POST /api/panel/open -> (pending)
-- [ ] endpoint:POST /api/open -> (pending)
-- [ ] endpoint:POST /api/stranded/open -> (pending)
-- [ ] endpoint:POST /api/stranded/remove -> (pending)
-- [ ] endpoint:POST /api/tenure -> (pending)
-- [ ] endpoint:POST /api/denied -> (pending)
-- [ ] endpoint:POST /api/pins -> (pending)
-- [ ] endpoint:POST /api/undo -> (pending)
-- [ ] endpoint:POST /api/ci -> (pending)
-- [ ] endpoint:POST /api/loop -> (pending)
-- [ ] endpoint:POST /api/models -> (pending)
-- [ ] endpoint:POST /api/cache -> (pending)
-- [ ] endpoint:POST /api/prefs -> (pending)
-- [ ] endpoint:POST /api/todos -> (pending)
-- [ ] endpoint:POST /api/macapprove -> (pending)
-- [ ] endpoint:POST /api/accounts -> (pending)
-- [ ] endpoint:POST /api/accounts/code -> (pending)
-- [ ] endpoint:POST /api/accounts/cancel -> (pending)
-- [ ] endpoint:POST /api/accounts/login -> (pending)
-- [ ] endpoint:POST /api/accounts/rename -> (pending)
-- [ ] endpoint:POST /api/accounts/use -> (pending)
-- [ ] endpoint:POST /api/accounts/auto -> (pending)
-- [ ] endpoint:POST /api/accounts/order -> (pending)
-- [ ] endpoint:POST /api/accounts/move -> (pending)
-- [ ] endpoint:POST /api/accounts/renew -> (pending)
-- [ ] endpoint:POST /api/ai/codex/use -> (pending)
-- [ ] endpoint:POST /api/ai/codex/add -> (pending)
-- [ ] endpoint:POST /api/ai/codex/cancel -> (pending)
-- [ ] endpoint:POST /api/ai/codex/remove -> (pending)
-- [ ] endpoint:POST /api/ai/codex/rename -> (pending)
-- [ ] endpoint:POST /api/ai/codex/auto -> (pending)
-- [ ] endpoint:POST /api/ai/codex/order -> (pending)
-- [ ] endpoint:POST /api/ai/codex/later -> (pending)
-- [ ] endpoint:POST /api/ai/codex/read -> (pending)
-- [ ] endpoint:POST /api/ai/ag/use -> (pending)
-- [ ] endpoint:POST /api/ai/ag/add -> (pending)
-- [ ] endpoint:POST /api/ai/ag/cancel -> (pending)
-- [ ] endpoint:POST /api/ai/ag/remove -> (pending)
-- [ ] endpoint:POST /api/ai/ag/rename -> (pending)
-- [ ] endpoint:POST /api/ai/ag/auto -> (pending)
-- [ ] endpoint:POST /api/ai/ag/order -> (pending)
-- [ ] endpoint:POST /api/ai/ag/later -> (pending)
-- [ ] endpoint:POST /api/ai/ag/read -> (pending)
-- [ ] endpoint:GET /api/harnesses -> (pending)
-- [ ] endpoint:POST /api/harnesses/launch -> (pending)
-- [ ] endpoint:POST /api/harnesses/custom -> (pending)
+- [x] endpoint:POST /event -> `crates/station-core/src/http/hooks.rs::post_event`
+- [x] endpoint:POST /v1/metrics -> `crates/station-core/src/http/otel_routes.rs::post_metrics`
+- [x] endpoint:POST /v1/logs -> `crates/station-core/src/http/otel_routes.rs::post_logs`
+- [x] endpoint:POST /hook/question -> `crates/station-core/src/http/hooks.rs::post_hook_question`
+- [x] endpoint:POST /hook/bind -> `crates/station-core/src/http/hooks.rs::post_hook_bind`
+- [x] endpoint:POST /hook/status -> `crates/station-core/src/http/hooks.rs::post_hook_status`
+- [x] endpoint:POST /hook/loop -> `crates/station-core/src/http/hooks.rs::post_hook_loop`
+- [x] endpoint:POST /hook/start -> `crates/station-core/src/http/hooks.rs::post_hook_start`
+- [x] endpoint:POST /hook/denied -> `crates/station-core/src/http/hooks.rs::post_hook_denied`
+- [x] endpoint:POST /hook/permission -> `crates/station-core/src/http/hooks.rs::post_hook_permission`
+- [x] endpoint:GET /health -> `crates/station-core/src/http/phone.rs::get_health`
+- [x] endpoint:GET /stream -> `crates/station-core/src/http/sse.rs::get_stream`
+- [x] endpoint:GET /api/live -> `crates/station-core/src/http/api.rs::get_live`
+- [x] endpoint:GET /api/doctor -> `crates/station-core/src/http/api.rs::get_doctor`
+- [x] endpoint:GET /api/log -> `crates/station-core/src/http/api.rs::get_log`
+- [x] endpoint:GET /api/timeline -> `crates/station-core/src/http/api.rs::get_timeline`
+- [x] endpoint:GET /api/wrapped -> `crates/station-core/src/http/api.rs::get_wrapped`
+- [x] endpoint:GET /api/replay -> `crates/station-core/src/http/api.rs::get_replay`
+- [x] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
+- [x] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
+- [x] endpoint:GET /api/pins -> `crates/station-core/src/http/api.rs::get_pins`
+- [x] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
+- [x] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
+- [x] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
+- [x] endpoint:GET /api/burn -> `crates/station-core/src/http/api.rs::get_burn`
+- [x] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
+- [x] endpoint:GET /api/panel -> `crates/station-core/src/http/api.rs::get_panel`
+- [x] endpoint:GET /api/chat -> `crates/station-core/src/http/api.rs::get_chat`
+- [x] endpoint:GET /api/loop -> `crates/station-core/src/http/api.rs::get_loop`
+- [x] endpoint:GET /api/tenure -> `crates/station-core/src/http/api.rs::get_tenure`
+- [x] endpoint:GET /api/cache -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [x] endpoint:GET /api/tasks -> `crates/station-core/src/http/api.rs::get_tasks`
+- [x] endpoint:GET /api/models -> `crates/station-core/src/http/api.rs::get_models`
+- [x] endpoint:GET /api/quick -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [x] endpoint:GET /api/claude-version -> `crates/station-core/src/http/api.rs::get_claude_version`
+- [x] endpoint:GET /api/push -> `crates/station-core/src/http/api.rs::get_push`
+- [x] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
+- [x] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [x] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [x] endpoint:GET /pin -> `crates/station-core/src/http/phone.rs::get_pin`
+- [x] endpoint:POST /pin -> `crates/station-core/src/http/phone.rs::post_pin`
+- [x] endpoint:POST /api/presence -> `crates/station-core/src/http/api.rs::post_presence`
+- [x] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
+- [x] endpoint:POST /api/pin -> `crates/station-core/src/http/api.rs::post_pin_update`
+- [x] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
+- [x] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
+- [x] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
+- [x] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
+- [x] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
+- [x] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
+- [x] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
+- [x] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
+- [x] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/pins -> `crates/station-core/src/http/api.rs::post_pins`
+- [x] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
+- [x] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/loop -> `crates/station-core/src/http/api.rs::post_loop`
+- [x] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
+- [x] endpoint:POST /api/cache -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/prefs -> `crates/station-core/src/http/api.rs::post_prefs`
+- [x] endpoint:POST /api/todos -> `crates/station-core/src/http/api.rs::post_todos`
+- [x] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [x] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/order -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/later -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/read -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/ag/use -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/add -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/cancel -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/remove -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/rename -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/auto -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/order -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/later -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/read -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:GET /api/harnesses -> `crates/station-core/src/http/api.rs::get_harnesses`
+- [x] endpoint:POST /api/harnesses/launch -> `crates/station-core/src/http/api.rs::post_harnesses_launch`
+- [x] endpoint:POST /api/harnesses/custom -> `crates/station-core/src/http/api.rs::post_harnesses_custom`

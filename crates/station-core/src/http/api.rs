@@ -1,0 +1,813 @@
+use crate::http::AppState;
+use crate::http::guard::{OptionalPeer, enforce_loopback_strict, is_authorized, is_loopback_peer};
+use crate::shared::timeline::build_timeline;
+use crate::state::loops::LoopConfig;
+use crate::state::models::{default_claude_models, models_of, with_models};
+use crate::state::sessions::now_ms;
+use crate::store::prompt_report::build_prompt_report;
+use crate::store::push::{PushKeys, PushSubscription};
+use crate::store::wrapped::week_summary;
+use axum::Json;
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+fn require_auth(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    q: &HashMap<String, String>,
+) -> Result<bool, StatusCode> {
+    if !is_authorized(peer, headers, q.get("k").map(String::as_str), &state.auth) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(is_loopback_peer(peer, headers))
+}
+
+fn require_local_post(peer: Option<SocketAddr>, headers: &HeaderMap) -> Result<(), StatusCode> {
+    enforce_loopback_strict(peer, headers)
+}
+
+pub async fn get_live(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let local = require_auth(&state, peer, &headers, &q)?;
+    let lang = state.prefs.lock().expect("prefs").lang();
+    let office = state.office.lock().expect("office");
+    let mut snap = office.snapshot_json(local, lang);
+    if let Some(obj) = snap.as_object_mut() {
+        obj.insert("trophies".to_owned(), state.trophies.lock().expect("trophies").pub_view());
+        obj.insert("lift".to_owned(), json!(state.lift.pub_view(now_ms())));
+        if local {
+            obj.insert("pin".to_owned(), Value::String(state.auth.current_pin()));
+        }
+    }
+    Ok(Json(snap))
+}
+
+pub async fn get_doctor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    Ok(Json(json!({
+        "ok": true,
+        "platform": state.sys.platform().name(),
+        "dataDir": state.data_dir,
+        "otel": state.otel.lock().expect("otel").info(),
+        "sessions": state.office.lock().expect("office").sessions.len(),
+    })))
+}
+
+pub async fn get_log(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let office = state.office.lock().expect("office");
+    Ok(Json(json!({ "ok": true, "feed": office.feed })))
+}
+
+pub async fn get_timeline(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let now = now_ms();
+    let from = q
+        .get("from")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| now.saturating_sub(86_400_000));
+    let to = q.get("to").and_then(|s| s.parse::<u64>().ok()).unwrap_or(now);
+    let tl = build_timeline(&[], from, to, now);
+    Ok(Json(json!(tl)))
+}
+
+pub async fn get_wrapped(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let summary = week_summary(&state.data_dir.join("replay"), 7, now_ms());
+    Ok(Json(summary))
+}
+
+pub async fn get_replay(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let day = q.get("day").cloned().unwrap_or_default();
+    let file = state.data_dir.join("replay").join(format!("{day}.jsonl"));
+    let items: Vec<Value> = std::fs::read_to_string(file)
+        .ok()
+        .map(|t| {
+            t.lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Json(json!({ "ok": true, "day": day, "items": items })))
+}
+
+pub async fn get_replay_days(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let mut days: Vec<String> = std::fs::read_dir(state.data_dir.join("replay"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.strip_suffix(".jsonl").map(str::to_owned)
+        })
+        .collect();
+    days.sort();
+    Ok(Json(json!({ "ok": true, "days": days })))
+}
+
+pub async fn get_stranded(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    Ok(Json(json!({ "ok": true, "at": now_ms(), "items": [], "repos": 0 })))
+}
+
+pub async fn get_pins(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let office = state.office.lock().expect("office");
+    Ok(Json(json!({ "ok": true, "pins": office.pins })))
+}
+
+pub async fn post_pins(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let sid = body.get("sid").and_then(Value::as_str).unwrap_or("");
+    let mut office = state.office.lock().expect("office");
+    if let Some(idx) = body.get("remove").and_then(Value::as_u64) {
+        let ok = office.remove_pin(sid, idx as usize).unwrap_or(false);
+        return Ok(Json(json!({ "ok": ok, "pins": office.pins })));
+    }
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+    let ok = office.add_pin(sid, text).unwrap_or(false);
+    Ok(Json(json!({ "ok": ok, "pins": office.pins })))
+}
+
+pub async fn get_vault(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let query = q.get("q").map(String::as_str).unwrap_or("");
+    let vault = state.vault.lock().expect("vault");
+    Ok(Json(json!({ "ok": true, "items": vault.search(query, 50) })))
+}
+
+pub async fn get_vault_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let since = now_ms().saturating_sub(7 * 86_400_000);
+    let prompts = state.vault.lock().expect("vault").recent_prompts(since);
+    Ok(Json(json!(build_prompt_report(&prompts, 3))))
+}
+
+pub async fn get_undo(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let sid = q.get("sid").map(String::as_str).unwrap_or("");
+    let office = state.office.lock().expect("office");
+    Ok(Json(json!({ "ok": true, "plan": office.undo.plan(sid) })))
+}
+
+pub async fn post_undo(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let sid = body.get("sid").and_then(Value::as_str).unwrap_or("");
+    let mut office = state.office.lock().expect("office");
+    let res = office.undo.apply(sid, now_ms());
+    Ok(Json(json!({ "ok": true, "result": res })))
+}
+
+pub async fn get_burn(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let range = q.get("range").map(String::as_str).unwrap_or("today");
+    let summary = state.otel.lock().expect("otel").burn_summary(range, now_ms());
+    Ok(Json(json!(summary)))
+}
+
+pub async fn get_sys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    Ok(Json(json!(state.sys.snapshot())))
+}
+
+pub async fn post_sys_action(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let action = body.get("action").and_then(Value::as_str).unwrap_or("");
+    let force = body.get("force").and_then(Value::as_bool).unwrap_or(false);
+    let start = body.get("start").and_then(Value::as_u64);
+    Ok(Json(state.sys.action(action, body.get("target"), force, start)))
+}
+
+pub async fn post_sys_auto(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let hours = body.get("hours").and_then(Value::as_u64).unwrap_or(0) as u8;
+    let ok = state.prefs.lock().expect("prefs").set_auto_close(hours).unwrap_or(false);
+    Ok(Json(json!({ "ok": ok, "hours": hours })))
+}
+
+pub async fn get_panel(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let mut office = state.office.lock().expect("office");
+    office.bar_last_seen_ms = now_ms();
+    Ok(Json(json!({
+        "ok": true,
+        "sessions": office.sessions.values().collect::<Vec<_>>(),
+        "perms": office.pending_perms.values().collect::<Vec<_>>(),
+    })))
+}
+
+pub async fn get_chat(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let office = state.office.lock().expect("office");
+    Ok(Json(json!({
+        "ok": true,
+        "msgs": office.chat.msgs,
+        "pinned": office.chat.pinned,
+        "typing": office.chat.typing,
+    })))
+}
+
+pub async fn post_chat(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let ts = now_ms();
+    let mut office = state.office.lock().expect("office");
+    let op = body.get("op").and_then(Value::as_str).unwrap_or("send");
+    match op {
+        "react" => {
+            let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+            let emoji = body.get("emoji").and_then(Value::as_str).unwrap_or("");
+            let ok = office.chat.react(id, "me", emoji);
+            let _ = office.save_chat();
+            Ok(Json(json!({ "ok": ok })))
+        }
+        "vote" => {
+            let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+            let idx = body.get("i").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let ok = office.chat.vote(id, "me", idx);
+            let _ = office.save_chat();
+            Ok(Json(json!({ "ok": ok })))
+        }
+        "recall" => {
+            let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+            let ok = office.chat.recall(id);
+            let _ = office.save_chat();
+            Ok(Json(json!({ "ok": ok })))
+        }
+        "pin" => {
+            let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+            let ok = office.chat.pin(id);
+            let _ = office.save_chat();
+            Ok(Json(json!({ "ok": ok })))
+        }
+        _ => {
+            let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+            let msg = office.chat.say("me", "Boss", text, ts, false, None);
+            let _ = office.save_chat();
+            Ok(Json(json!({ "ok": true, "msg": msg })))
+        }
+    }
+}
+
+pub async fn get_loop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let cfg = state.office.lock().expect("office").loops.config();
+    Ok(Json(json!({ "ok": true, "config": cfg })))
+}
+
+pub async fn post_loop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let mut office = state.office.lock().expect("office");
+    if let Some(sid) = body.get("stop").and_then(Value::as_str) {
+        let ok = office.loops.stop(sid, now_ms());
+        return Ok(Json(json!({ "ok": ok })));
+    }
+    if let (Some(sid), Some(hint)) = (
+        body.get("sid").and_then(Value::as_str),
+        body.get("hint").and_then(Value::as_str),
+    ) {
+        let ok = office.loops.hint(sid, hint);
+        return Ok(Json(json!({ "ok": ok })));
+    }
+    let cur = office.loops.config();
+    let next = LoopConfig {
+        on: body.get("on").and_then(Value::as_bool).unwrap_or(cur.on),
+        n: body.get("n").and_then(Value::as_u64).map(|v| v as u32).unwrap_or(cur.n),
+        min: body.get("min").and_then(Value::as_u64).map(|v| v as u32).unwrap_or(cur.min),
+    };
+    office.loops.set_config(next);
+    Ok(Json(json!({ "ok": true, "config": office.loops.config() })))
+}
+
+pub async fn get_tenure(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let live: HashSet<String> = state
+        .office
+        .lock()
+        .expect("office")
+        .sessions
+        .values()
+        .map(|s| s.name.clone())
+        .collect();
+    let list = state.tenure.lock().expect("tenure").list(30, now_ms(), &live);
+    Ok(Json(json!({ "ok": true, "items": list })))
+}
+
+pub async fn post_tenure(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let name = body.get("name").and_then(Value::as_str).unwrap_or("");
+    let op = body.get("op").and_then(Value::as_str).unwrap_or("");
+    let mut tenure = state.tenure.lock().expect("tenure");
+    let ok = match op {
+        "official" => tenure.mark_official(name, now_ms()),
+        "farewell" => tenure.mark_farewell(name, 30, now_ms(), false),
+        _ => false,
+    };
+    Ok(Json(json!({ "ok": ok })))
+}
+
+pub async fn get_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let tasks = state.tasks.lock().expect("tasks");
+    Ok(Json(json!({ "ok": true, "tasks": tasks.list() })))
+}
+
+pub async fn post_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let req = crate::state::tasks::TaskStartRequest {
+        dir: body.get("dir").and_then(Value::as_str).unwrap_or("").to_owned(),
+        text: body.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
+        agent: body.get("agent").and_then(Value::as_str).unwrap_or("claude").to_owned(),
+        model: body.get("model").and_then(Value::as_str).unwrap_or("").to_owned(),
+        fork: body.get("fork").and_then(Value::as_bool).unwrap_or(false),
+    };
+    let mut tasks = state.tasks.lock().expect("tasks");
+    Ok(Json(tasks.validate_and_register(req, now_ms())))
+}
+
+pub async fn post_tasks_stop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let ok = state.tasks.lock().expect("tasks").finish(id).is_some();
+    Ok(Json(json!({ "ok": ok })))
+}
+
+pub async fn get_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let settings = state
+        .prefs
+        .lock()
+        .expect("prefs")
+        .get("claudeModels")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok(Json(json!({
+        "ok": true,
+        "models": default_claude_models(),
+        "config": models_of(&settings),
+    })))
+}
+
+pub async fn post_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let mut prefs = state.prefs.lock().expect("prefs");
+    let cur = prefs.get("claudeModels").cloned().unwrap_or_else(|| json!({}));
+    let next = with_models(
+        &cur,
+        body.get("main").and_then(Value::as_str),
+        body.get("sub").and_then(Value::as_str),
+        body.get("force").and_then(Value::as_bool),
+    );
+    let _ = prefs.set("claudeModels", Some(next.clone()));
+    Ok(Json(json!({ "ok": true, "config": models_of(&next) })))
+}
+
+pub async fn get_prefs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let prefs = state.prefs.lock().expect("prefs");
+    Ok(Json(json!({
+        "ok": true,
+        "lang": prefs.lang(),
+        "autoCloseHours": prefs.auto_close(),
+        "prefs": prefs.snapshot(),
+    })))
+}
+
+pub async fn post_prefs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let mut prefs = state.prefs.lock().expect("prefs");
+    if let Some(l) = body.get("lang").and_then(Value::as_str) {
+        let _ = prefs.set_lang(l);
+    }
+    if let Some(h) = body.get("autoCloseHours").and_then(Value::as_u64) {
+        let _ = prefs.set_auto_close(h as u8);
+    }
+    if let Some(obj) = body.as_object() {
+        for (k, v) in obj {
+            if k != "lang" && k != "autoCloseHours" {
+                let _ = prefs.set(k, Some(v.clone()));
+            }
+        }
+    }
+    Ok(Json(json!({ "ok": true, "lang": prefs.lang(), "prefs": prefs.snapshot() })))
+}
+
+pub async fn post_pin_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let pin = body.get("pin").and_then(Value::as_str).unwrap_or("");
+    let ok = state.auth.set_pin(pin).unwrap_or(false);
+    Ok(Json(json!({ "ok": ok, "pin": state.auth.current_pin() })))
+}
+
+pub async fn post_presence(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let focused = body.get("focused").and_then(Value::as_bool).unwrap_or(false);
+    state.office.lock().expect("office").presence_focused = focused;
+    Ok(Json(json!({ "ok": true, "focused": focused })))
+}
+
+pub async fn post_perm(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let removed = state.office.lock().expect("office").pending_perms.remove(id).is_some();
+    Ok(Json(json!({ "ok": removed })))
+}
+
+pub async fn get_push(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let push = state.push.lock().expect("push");
+    Ok(Json(json!({ "ok": true, "publicKey": push.public_key, "count": push.count() })))
+}
+
+pub async fn post_push(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let mut push = state.push.lock().expect("push");
+    if let Some(ep) = body.get("remove").and_then(Value::as_str) {
+        let ok = push.remove(ep);
+        return Ok(Json(json!({ "ok": ok, "count": push.count() })));
+    }
+    let endpoint = body.get("endpoint").and_then(Value::as_str).unwrap_or("").to_owned();
+    let p256dh = body
+        .get("keys")
+        .and_then(|k| k.get("p256dh"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let auth = body
+        .get("keys")
+        .and_then(|k| k.get("auth"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let ok = push.add(
+        PushSubscription {
+            endpoint,
+            keys: PushKeys { p256dh, auth },
+            ua: headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned(),
+            at: 0,
+        },
+        now_ms(),
+    );
+    Ok(Json(json!({ "ok": ok, "count": push.count() })))
+}
+
+pub async fn post_prompt_rewrite(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("");
+    let lang = body.get("lang").and_then(Value::as_str).unwrap_or("en");
+    let photos = body.get("photos").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let mut rw = state.rewriter.lock().expect("rewriter");
+    let res = rw.rewrite_with(text, lang, photos, now_ms(), |redacted, _sys, _ph| {
+        Ok(format!("Goal: {redacted}"))
+    });
+    Ok(Json(json!(res)))
+}
+
+pub async fn get_image(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    if require_auth(&state, peer, &headers, &q).is_err() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    (
+        StatusCode::NOT_FOUND,
+        [
+            (header::CONTENT_SECURITY_POLICY, "sandbox"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        "not found",
+    )
+        .into_response()
+}
+
+pub async fn get_claude_version(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    let v = state.claude_version.lock().expect("claude_version").current().clone();
+    Ok(Json(json!({ "ok": true, "version": v })))
+}
+
+pub async fn post_todos(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    if let Some(arr) = body.get("todos").and_then(Value::as_array) {
+        state.office.lock().expect("office").todos = arr.clone();
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn post_codex_ai(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    AxumPath(action): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let res = state.codex_accounts.lock().expect("codex_accounts").mutate(&action, &body);
+    Ok(Json(res))
+}
+
+pub async fn post_ag_ai(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    AxumPath(action): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    let res = state.ag_accounts.lock().expect("ag_accounts").mutate(&action, &body);
+    Ok(Json(res))
+}
+
+pub async fn post_accounts_any(
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(_body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn get_generic_ok(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, &headers, &q)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn post_local_ok(
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(_body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, &headers)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn get_harnesses(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_loopback_strict(peer, &headers)?;
+    if let Some(api) = &state.harnesses {
+        Ok(Json(api.list_json()))
+    } else {
+        Ok(Json(json!({ "ok": true, "harnesses": [] })))
+    }
+}
+
+pub async fn post_harnesses_launch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_loopback_strict(peer, &headers)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    if let Some(api) = &state.harnesses {
+        match api.launch(id) {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+        }
+    } else {
+        Ok(Json(json!({ "ok": false, "error": "launcher unavailable" })))
+    }
+}
+
+pub async fn post_harnesses_custom(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_loopback_strict(peer, &headers)?;
+    if let Some(api) = &state.harnesses {
+        match api.mutate_custom(body) {
+            Ok(v) => Ok(Json(v)),
+            Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+        }
+    } else {
+        Ok(Json(json!({ "ok": false, "error": "launcher unavailable" })))
+    }
+}
