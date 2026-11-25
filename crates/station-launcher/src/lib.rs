@@ -181,30 +181,36 @@ impl<L: WindowLauncher> HarnessApi for HarnessService<L> {
                     .and_then(Value::as_str)
                     .unwrap_or(&id)
                     .to_owned();
-                let path = body
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .map(PathBuf::from);
-                let target = path.map(|p| {
-                    if p.extension()
+                let raw_path = body.get("path").and_then(Value::as_str).unwrap_or("");
+                let (validated_path, default_procs) = validate_custom_executable_path(raw_path)?;
+                let target = Some(
+                    if validated_path
+                        .extension()
                         .and_then(|e| e.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
                     {
-                        LaunchTarget::Shortcut(p)
+                        LaunchTarget::Shortcut(validated_path)
                     } else {
-                        LaunchTarget::Exe(p)
-                    }
-                });
-                let process_names = body
+                        LaunchTarget::Exe(validated_path)
+                    },
+                );
+                let explicit_procs: Vec<String> = body
                     .get("process_names")
                     .and_then(Value::as_array)
                     .map(|a| {
                         a.iter()
                             .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
                             .map(str::to_owned)
                             .collect()
                     })
                     .unwrap_or_default();
+                let process_names = if explicit_procs.is_empty() {
+                    default_procs
+                } else {
+                    explicit_procs
+                };
                 cat.upsert_custom(HarnessEntry {
                     id,
                     label,
@@ -221,6 +227,64 @@ impl<L: WindowLauncher> HarnessApi for HarnessService<L> {
             other => bail!("unknown op: {other}"),
         }
     }
+}
+
+/// Validates a custom harness executable path before persisting or launching it.
+/// Rejects UNC/device paths (`\\...`, `//...`), URI schemes (`://`), shell commands /
+/// non-absolute paths, `..` traversal, non-`.exe`/`.lnk` extensions, and missing/non-file paths.
+/// Returns the validated `PathBuf` and default `process_names` (`vec![file_name]`).
+pub fn validate_custom_executable_path(raw: &str) -> Result<(PathBuf, Vec<String>)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("executable path is empty");
+    }
+    if trimmed.chars().any(char::is_control) {
+        bail!("executable path contains control characters");
+    }
+    if trimmed.starts_with("\\\\") || trimmed.starts_with("//") {
+        bail!("UNC and device paths are not allowed: {trimmed}");
+    }
+    if trimmed.contains("://") {
+        bail!("URI schemes are not allowed: {trimmed}");
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        bail!("executable path must be absolute: {trimmed}");
+    }
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut comps = path.components();
+        match comps.next() {
+            Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)) => {}
+            _ => bail!("executable path must be on a local drive: {trimmed}"),
+        }
+        if !matches!(comps.next(), Some(Component::RootDir)) {
+            bail!("executable path must be absolute: {trimmed}");
+        }
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        bail!("parent directory traversal is not allowed: {trimmed}");
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !ext.eq_ignore_ascii_case("exe") && !ext.eq_ignore_ascii_case("lnk") {
+        bail!("executable must have a .exe or .lnk extension: {trimmed}");
+    }
+    let meta = std::fs::metadata(&path)
+        .map_err(|_| anyhow::anyhow!("executable file does not exist: {trimmed}"))?;
+    if !meta.is_file() {
+        bail!("executable path is not a file: {trimmed}");
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("invalid executable file name: {trimmed}"))?
+        .to_owned();
+    Ok((path, vec![file_name]))
 }
 
 pub fn launcher_ready() -> bool {
@@ -343,5 +407,82 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(mock.focused.lock().unwrap().len(), 1);
         assert_eq!(mock.launched.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn custom_harness_rejects_unsafe_paths_and_populates_process_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = HarnessService::with_components(
+            HarnessCatalog::load_or_default(dir.path()),
+            vec![],
+            MockLauncher::default(),
+            PathBuf::from("D:/app/agents-station.exe"),
+            4310,
+            HashMap::new(),
+        );
+
+        for bad in ["\\\\evil\\share\\p.exe", "cmd.exe", "https://evil.com"] {
+            let res = svc.mutate_custom(json!({
+                "op": "upsert",
+                "id": "badapp",
+                "label": "Bad App",
+                "path": bad,
+            }));
+            assert!(res.is_err(), "expected mutate_custom to reject {bad}");
+        }
+
+        let temp_exe = dir.path().join("temp.exe");
+        std::fs::write(&temp_exe, b"MZ").unwrap();
+        let res = svc.mutate_custom(json!({
+            "op": "upsert",
+            "id": "goodapp",
+            "label": "Good App",
+            "path": temp_exe.to_string_lossy().to_string(),
+        }));
+        assert!(res.is_ok(), "expected mutate_custom to accept existing .exe: {res:?}");
+        let entries = svc.entries();
+        let entry = entries.iter().find(|e| e.id == "goodapp").unwrap();
+        assert_eq!(entry.process_names, vec!["temp.exe".to_owned()]);
+    }
+
+    #[test]
+    fn validate_custom_executable_path_enforces_local_exe_and_lnk_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp_exe = dir.path().join("temp.exe");
+        std::fs::write(&temp_exe, b"MZ").unwrap();
+        let temp_lnk = dir.path().join("shortcut.lnk");
+        std::fs::write(&temp_lnk, b"L").unwrap();
+        let temp_bat = dir.path().join("evil.bat");
+        std::fs::write(&temp_bat, b"@echo hi").unwrap();
+        let dir_exe = dir.path().join("folder.exe");
+        std::fs::create_dir(&dir_exe).unwrap();
+        let missing_exe = dir.path().join("missing.exe");
+
+        for bad in [
+            "",
+            "\\\\evil\\share\\p.exe",
+            "//evil/share/p.exe",
+            "cmd.exe",
+            "powershell.exe -c whoami",
+            "https://evil.com",
+            "file:///C:/Windows/System32/cmd.exe",
+            temp_bat.to_str().unwrap(),
+            dir_exe.to_str().unwrap(),
+            missing_exe.to_str().unwrap(),
+        ] {
+            assert!(
+                validate_custom_executable_path(bad).is_err(),
+                "expected Err for {bad}"
+            );
+        }
+
+        let (p, procs) = validate_custom_executable_path(temp_exe.to_str().unwrap()).unwrap();
+        assert_eq!(p, temp_exe);
+        assert_eq!(procs, vec!["temp.exe".to_owned()]);
+
+        let (p_lnk, procs_lnk) =
+            validate_custom_executable_path(temp_lnk.to_str().unwrap()).unwrap();
+        assert_eq!(p_lnk, temp_lnk);
+        assert_eq!(procs_lnk, vec!["shortcut.lnk".to_owned()]);
     }
 }
