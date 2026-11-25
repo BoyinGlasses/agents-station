@@ -43,6 +43,31 @@ impl GpuPrefUi {
             Self::Discrete => "Discrete",
         }
     }
+
+    pub fn as_pref_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Integrated => "integrated",
+            Self::Discrete => "discrete",
+        }
+    }
+
+    pub fn from_pref_str(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "integrated" | "low" | "low_power" => Self::Integrated,
+            "discrete" | "high" | "high_performance" => Self::Discrete,
+            _ => Self::Auto,
+        }
+    }
+}
+
+/// Normalizes session status strings to canonical `"work"` / `"wait"` / `"rest"`.
+pub fn normalize_status(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "work" | "working" | "active" => "work",
+        "wait" | "waiting" | "perm" => "wait",
+        _ => "rest",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +79,8 @@ pub struct SessionCard {
     pub model: String,
     pub last_prompt: String,
     pub tool: Option<String>,
+    pub tool_kind: Option<String>,
+    pub desk: usize,
     pub cost_usd: f64,
     pub tokens: u64,
     pub pinned: bool,
@@ -140,6 +167,7 @@ pub enum UiAction {
     SetLang(String),
     SetWeatherCity(String),
     SetSound(bool),
+    SetGpuPref(GpuPrefUi),
     ToggleCameraFp,
     TriggerPhoto,
     ToggleDemo,
@@ -203,11 +231,57 @@ pub struct UiState {
 
 impl Default for UiState {
     fn default() -> Self {
-        Self::with_demo_seed(OfficeLayout::Pro, BackdropKind::City, false)
+        Self::new_live(OfficeLayout::Pro, BackdropKind::City, false)
     }
 }
 
 impl UiState {
+    /// Clean live startup state with zero fake sessions, perms, feed, chat, or vault entries.
+    pub fn new_live(layout: OfficeLayout, backdrop: BackdropKind, night: bool) -> Self {
+        Self {
+            view_mode: ViewMode::Mode3D,
+            active_drawer: ActiveDrawer::None,
+            selected_session: None,
+            layout,
+            backdrop,
+            chibi_look: ChibiLook::Pixar,
+            night,
+            streamer_mode: false,
+            sound_on: true,
+            auto_close_tray: true,
+            gpu_pref: GpuPrefUi::Auto,
+            weather_city: "hcm".to_owned(),
+            weather_temp_c: 31,
+            weather_desc: String::new(),
+            clock_label: "--:--".to_owned(),
+            first_person: false,
+            demo_running: false,
+            replay_playing: false,
+            server_port: 4310,
+            server_banner: None,
+            pairing_pin: String::new(),
+            target_fps: 60,
+            sessions: Vec::new(),
+            pending_perms: Vec::new(),
+            harnesses: Vec::new(),
+            sys: SysSnapshot::default(),
+            burn: BurnSnapshot::default(),
+            feed: Vec::new(),
+            chat: Vec::new(),
+            toasts: Vec::new(),
+            whiteboard_text: String::new(),
+            vault_query: String::new(),
+            vault_results: Vec::new(),
+            compose_draft: String::new(),
+            chat_draft: String::new(),
+            new_harness_id: String::new(),
+            new_harness_label: String::new(),
+            new_harness_path: String::new(),
+            pending_actions: Vec::new(),
+            next_toast_id: 1,
+        }
+    }
+
     pub fn with_demo_seed(layout: OfficeLayout, backdrop: BackdropKind, night: bool) -> Self {
         Self {
             view_mode: ViewMode::Mode3D,
@@ -237,10 +311,12 @@ impl UiState {
                     id: "sess-claude-1".to_owned(),
                     agent: "claude".to_owned(),
                     project: "agents-station".to_owned(),
-                    status: "working".to_owned(),
+                    status: "work".to_owned(),
                     model: "claude-opus-4-6".to_owned(),
                     last_prompt: "Build native Rust HUD & Harness Dock".to_owned(),
                     tool: Some("Edit crates/station-ui/src/hud.rs".to_owned()),
+                    tool_kind: Some("edit".to_owned()),
+                    desk: 0,
                     cost_usd: 1.42,
                     tokens: 84_200,
                     pinned: true,
@@ -249,10 +325,12 @@ impl UiState {
                     id: "sess-codex-2".to_owned(),
                     agent: "codex".to_owned(),
                     project: "station-core".to_owned(),
-                    status: "waiting".to_owned(),
+                    status: "wait".to_owned(),
                     model: "gpt-5.3-codex".to_owned(),
                     last_prompt: "Verify OTLP /v1/metrics parity".to_owned(),
                     tool: Some("cargo test -p station-core".to_owned()),
+                    tool_kind: Some("bash".to_owned()),
+                    desk: 1,
                     cost_usd: 0.68,
                     tokens: 41_900,
                     pinned: false,
@@ -261,10 +339,12 @@ impl UiState {
                     id: "sess-agy-3".to_owned(),
                     agent: "antigravity".to_owned(),
                     project: "station-3d".to_owned(),
-                    status: "working".to_owned(),
+                    status: "work".to_owned(),
                     model: "gemini-3-pro".to_owned(),
                     last_prompt: "Optimize 44-desk HQ VRAM budget".to_owned(),
                     tool: Some("Inspect WorldPalette".to_owned()),
+                    tool_kind: Some("read".to_owned()),
+                    desk: 2,
                     cost_usd: 0.34,
                     tokens: 52_100,
                     pinned: false,
@@ -273,10 +353,12 @@ impl UiState {
                     id: "sess-oc-4".to_owned(),
                     agent: "opencode".to_owned(),
                     project: "station-launcher".to_owned(),
-                    status: "idle".to_owned(),
+                    status: "rest".to_owned(),
                     model: "claude-sonnet-4-6".to_owned(),
                     last_prompt: "Win32 GUI harness detection".to_owned(),
                     tool: None,
+                    tool_kind: None,
+                    desk: 3,
                     cost_usd: 0.19,
                     tokens: 18_400,
                     pinned: false,
@@ -437,12 +519,16 @@ impl UiState {
     }
 
     pub fn working_count(&self) -> usize {
-        self.sessions.iter().filter(|s| s.status == "working").count()
+        self.sessions.iter().filter(|s| s.status == "work").count()
     }
 
     pub fn waiting_count(&self) -> usize {
-        self.sessions.iter().filter(|s| s.status == "waiting").count()
+        self.sessions.iter().filter(|s| s.status == "wait").count()
             + self.pending_perms.len()
+    }
+
+    pub fn resting_count(&self) -> usize {
+        self.sessions.iter().filter(|s| s.status == "rest").count()
     }
 }
 
@@ -467,5 +553,75 @@ mod tests {
         assert_eq!(st.toasts.len(), 1);
         st.tick_toasts(6.0);
         assert!(st.toasts.is_empty());
+    }
+
+    #[test]
+    fn new_live_starts_empty_and_counts_work_wait_rest_accurately() {
+        let mut st = UiState::new_live(OfficeLayout::Pro, BackdropKind::City, false);
+        assert!(st.sessions.is_empty(), "live mode must start with 0 fake sessions");
+        assert!(st.pending_perms.is_empty(), "live mode must start with 0 fake perms");
+        assert!(st.feed.is_empty(), "live mode must start with 0 fake feed entries");
+        assert!(st.chat.is_empty(), "live mode must start with 0 fake chat messages");
+        assert_eq!(st.working_count(), 0);
+        assert_eq!(st.waiting_count(), 0);
+        assert_eq!(st.resting_count(), 0);
+
+        st.sessions = vec![
+            SessionCard {
+                id: "s-work".to_owned(),
+                agent: "claude".to_owned(),
+                project: "proj".to_owned(),
+                status: "work".to_owned(),
+                model: "opus".to_owned(),
+                last_prompt: "code".to_owned(),
+                tool: Some("Edit".to_owned()),
+                tool_kind: Some("edit".to_owned()),
+                desk: 0,
+                cost_usd: 0.1,
+                tokens: 100,
+                pinned: false,
+            },
+            SessionCard {
+                id: "s-wait".to_owned(),
+                agent: "codex".to_owned(),
+                project: "proj".to_owned(),
+                status: "wait".to_owned(),
+                model: "gpt".to_owned(),
+                last_prompt: "approve".to_owned(),
+                tool: Some("Bash".to_owned()),
+                tool_kind: Some("bash".to_owned()),
+                desk: 1,
+                cost_usd: 0.0,
+                tokens: 50,
+                pinned: false,
+            },
+            SessionCard {
+                id: "s-rest".to_owned(),
+                agent: "opencode".to_owned(),
+                project: "proj".to_owned(),
+                status: "rest".to_owned(),
+                model: "sonnet".to_owned(),
+                last_prompt: "done".to_owned(),
+                tool: None,
+                tool_kind: None,
+                desk: 2,
+                cost_usd: 0.0,
+                tokens: 20,
+                pinned: false,
+            },
+        ];
+        assert_eq!(st.working_count(), 1);
+        assert_eq!(st.waiting_count(), 1);
+        assert_eq!(st.resting_count(), 1);
+
+        let demo = UiState::with_demo_seed(OfficeLayout::Pro, BackdropKind::City, false);
+        assert_eq!(demo.working_count(), 2);
+        assert_eq!(demo.waiting_count(), 2);
+        assert_eq!(demo.resting_count(), 1);
+
+        assert_eq!(GpuPrefUi::from_pref_str("integrated"), GpuPrefUi::Integrated);
+        assert_eq!(GpuPrefUi::Discrete.as_pref_str(), "discrete");
+        st.push_action(UiAction::SetGpuPref(GpuPrefUi::Discrete));
+        assert_eq!(st.drain_actions().len(), 1);
     }
 }
