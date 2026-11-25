@@ -17,13 +17,16 @@ pub mod replay;
 pub mod rooms;
 
 use bevy::prelude::*;
+pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
+pub use chibi::ChibiLook;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
-use station_canvas2d::FontEngine;
+use station_canvas2d::{BrandRegistry, FontEngine};
 use std::path::PathBuf;
 
 pub struct OfficeWorldPlugin {
     pub layout: OfficeLayout,
+    pub backdrop: BackdropKind,
     pub assets_dir: PathBuf,
     pub night: bool,
 }
@@ -31,11 +34,16 @@ pub struct OfficeWorldPlugin {
 impl Plugin for OfficeWorldPlugin {
     fn build(&self, app: &mut App) {
         let layout = self.layout;
+        let backdrop = self.backdrop;
         let assets_dir = self.assets_dir.clone();
         let night = self.night;
 
         app.insert_resource(layout)
+            .insert_resource(backdrop)
             .insert_resource(lights::LightingState { night })
+            .insert_resource(life::OfficeLifeState::default())
+            .insert_resource(replay::ReplayState::default())
+            .insert_resource(audio::SfxEngine::new(true))
             .insert_resource(interact::PlaceCardState::default())
             .add_event::<interact::PropActivated>()
             .add_systems(
@@ -43,10 +51,13 @@ impl Plugin for OfficeWorldPlugin {
                 move |mut commands: Commands,
                       mut meshes: ResMut<Assets<Mesh>>,
                       mut materials: ResMut<Assets<StandardMaterial>>,
-                      mut images: ResMut<Assets<Image>>| {
+                      mut images: ResMut<Assets<Image>>,
+                      life_state: Res<life::OfficeLifeState>| {
                     let spec = LayoutSpec::for_layout(layout);
                     let mut pal = WorldPalette::new(&mut meshes);
                     let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+                    let mut brands = BrandRegistry::new(assets_dir.clone());
+                    let mut backdrop_assets = BackdropAssets::default();
 
                     lights::spawn_office_lights(&mut commands, &spec, night);
                     camera::spawn_office_camera(&mut commands, &spec);
@@ -83,15 +94,50 @@ impl Plugin for OfficeWorldPlugin {
                         &mut fonts,
                         &spec,
                     );
+                    people::spawn_office_cast(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &spec,
+                        ChibiLook::Pixar,
+                    );
+                    life::spawn_life_elements(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &mut images,
+                        &mut fonts,
+                        &spec,
+                        &life_state,
+                    );
+                    backdrops::spawn_backdrop(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &mut images,
+                        &mut backdrop_assets,
+                        &mut brands,
+                        &mut fonts,
+                        &spec,
+                        backdrop,
+                    );
+                    brands.clear();
                     interact::spawn_hover_ring(&mut commands, &mut pal, &mut materials);
 
                     commands.insert_resource(scr_mats);
+                    commands.insert_resource(backdrop_assets);
                     commands.insert_resource(pal);
                 },
             )
             .add_systems(
                 Update,
-                (camera::camera_control_system, props::animate_props_system),
+                (
+                    camera::camera_control_system,
+                    props::animate_props_system,
+                    people::animate_chibis_system,
+                    backdrops::animate_backdrop_traffic_system,
+                    life::update_rain_system,
+                ),
             );
     }
 }

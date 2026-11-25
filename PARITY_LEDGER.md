@@ -153,94 +153,94 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 
 ## P4 — People, Backdrops, Life, Demo, Replay & Audio (88 files)
 
-- [ ] src/office/audio/sfx.js -> (pending)
-- [ ] src/office/demo/demo-log.js -> (pending)
-- [ ] src/office/demo/demo.js -> (pending)
-- [ ] src/office/life/altar.js -> (pending)
-- [ ] src/office/life/day-swaps.js -> (pending)
-- [ ] src/office/life/drill.js -> (pending)
-- [ ] src/office/life/incidents.js -> (pending)
-- [ ] src/office/life/lift-service.js -> (pending)
-- [ ] src/office/life/nap.js -> (pending)
-- [ ] src/office/life/photostrips.js -> (pending)
-- [ ] src/office/life/post.js -> (pending)
-- [ ] src/office/life/quota.js -> (pending)
-- [ ] src/office/life/rain.js -> (pending)
-- [ ] src/office/life/seasons.js -> (pending)
-- [ ] src/office/life/tests.js -> (pending)
-- [ ] src/office/life/trophies.js -> (pending)
-- [ ] src/office/life/weather.js -> (pending)
-- [ ] src/office/life/your-turn.js -> (pending)
-- [ ] src/office/people/accountant.js -> (pending)
-- [ ] src/office/people/bedding.js -> (pending)
-- [ ] src/office/people/billiards.js -> (pending)
-- [ ] src/office/people/breaks.js -> (pending)
-- [ ] src/office/people/chibi-rig.js -> (pending)
-- [ ] src/office/people/comnha.js -> (pending)
-- [ ] src/office/people/comtrua.js -> (pending)
-- [ ] src/office/people/director.js -> (pending)
-- [ ] src/office/people/duty.js -> (pending)
-- [ ] src/office/people/errands.js -> (pending)
-- [ ] src/office/people/evswap.js -> (pending)
-- [ ] src/office/people/farewell.js -> (pending)
-- [ ] src/office/people/foosball.js -> (pending)
-- [ ] src/office/people/gaming.js -> (pending)
-- [ ] src/office/people/gatherings.js -> (pending)
-- [ ] src/office/people/guard.js -> (pending)
-- [ ] src/office/people/hr.js -> (pending)
-- [ ] src/office/people/interns.js -> (pending)
-- [ ] src/office/people/karaoke-songs.js -> (pending)
-- [ ] src/office/people/karaoke.js -> (pending)
-- [ ] src/office/people/look.js -> (pending)
-- [ ] src/office/people/navigation.js -> (pending)
-- [ ] src/office/people/nhau.js -> (pending)
-- [ ] src/office/people/outings.js -> (pending)
-- [ ] src/office/people/payday.js -> (pending)
-- [ ] src/office/people/photobooth.js -> (pending)
-- [ ] src/office/people/pickle.js -> (pending)
-- [ ] src/office/people/rounds.js -> (pending)
-- [ ] src/office/people/staff.js -> (pending)
-- [ ] src/office/people/team-lines.js -> (pending)
-- [ ] src/office/people/teatime.js -> (pending)
-- [ ] src/office/people/workers.js -> (pending)
-- [ ] src/office/replay/replay.js -> (pending)
-- [ ] src/office/replay/timeline.js -> (pending)
-- [ ] src/office/world/backdrops/beach.js -> (pending)
-- [ ] src/office/world/backdrops/city.js -> (pending)
-- [ ] src/office/world/backdrops/countryside.js -> (pending)
-- [ ] src/office/world/backdrops/eat-com.js -> (pending)
-- [ ] src/office/world/backdrops/index.js -> (pending)
-- [ ] src/office/world/backdrops/shared.js -> (pending)
-- [ ] src/office/world/backdrops/shop-cong.js -> (pending)
-- [ ] src/office/world/backdrops/shop-dmx.js -> (pending)
-- [ ] src/office/world/backdrops/shop-highlands.js -> (pending)
-- [ ] src/office/world/backdrops/shop-katinat.js -> (pending)
-- [ ] src/office/world/backdrops/shop-longchau.js -> (pending)
-- [ ] src/office/world/backdrops/shop-mixue.js -> (pending)
-- [ ] src/office/world/backdrops/shop-paint.js -> (pending)
-- [ ] src/office/world/backdrops/shop-phuclong.js -> (pending)
-- [ ] src/office/world/backdrops/shop-tgdd.js -> (pending)
-- [ ] src/office/world/backdrops/shops.js -> (pending)
-- [ ] src/office/world/backdrops/street-atm.js -> (pending)
-- [ ] src/office/world/backdrops/street-corner.js -> (pending)
-- [ ] src/office/world/backdrops/street-csgt.js -> (pending)
-- [ ] src/office/world/backdrops/street-ev.js -> (pending)
-- [ ] src/office/world/backdrops/street-folk.js -> (pending)
-- [ ] src/office/world/backdrops/street-life.js -> (pending)
-- [ ] src/office/world/backdrops/street-lunar.js -> (pending)
-- [ ] src/office/world/backdrops/street-morning.js -> (pending)
-- [ ] src/office/world/backdrops/street-nhau.js -> (pending)
-- [ ] src/office/world/backdrops/street-park.js -> (pending)
-- [ ] src/office/world/backdrops/street-photo.js -> (pending)
-- [ ] src/office/world/backdrops/street-pickle.js -> (pending)
-- [ ] src/office/world/backdrops/street-repair.js -> (pending)
-- [ ] src/office/world/backdrops/street-riders.js -> (pending)
-- [ ] src/office/world/backdrops/street-shade.js -> (pending)
-- [ ] src/office/world/backdrops/street-signals.js -> (pending)
-- [ ] src/office/world/backdrops/street-siren.js -> (pending)
-- [ ] src/office/world/backdrops/street-spots.js -> (pending)
-- [ ] src/office/world/backdrops/street-wedding.js -> (pending)
-- [ ] src/office/world/backdrops/street-wires.js -> (pending)
+- [x] src/office/audio/sfx.js -> `crates/station-3d/src/audio.rs` (all 27 SFX waveforms + cooldown tested)
+- [x] src/office/demo/demo-log.js -> `crates/station-3d/src/demo.rs::build_demo_log`
+- [x] src/office/demo/demo.js -> `crates/station-3d/src/demo.rs::build_demo_sessions`
+- [x] src/office/life/altar.js -> `crates/station-3d/src/life.rs::spawn_life_elements` (verified `g4-city.png`)
+- [x] src/office/life/day-swaps.js -> `crates/station-core/src/shared/workdays.rs` + `crates/station-3d/src/life.rs`
+- [x] src/office/life/drill.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [x] src/office/life/incidents.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [x] src/office/life/lift-service.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [x] src/office/life/nap.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [x] src/office/life/photostrips.js -> `crates/station-3d/src/life.rs` + `station-canvas2d/src/boards_and_social.rs`
+- [x] src/office/life/post.js -> `crates/station-3d/src/life.rs`
+- [x] src/office/life/quota.js -> `crates/station-3d/src/life.rs`
+- [x] src/office/life/rain.js -> `crates/station-3d/src/life.rs::update_rain_system`
+- [x] src/office/life/seasons.js -> `crates/station-3d/src/life.rs::SeasonTheme`
+- [x] src/office/life/tests.js -> `crates/station-core/src/state/testrun.rs` + `crates/station-3d/src/life.rs`
+- [x] src/office/life/trophies.js -> `crates/station-3d/src/life.rs` (trophy shelf verified)
+- [x] src/office/life/weather.js -> `crates/station-3d/src/life.rs` (8 VN cities + Open-Meteo tested)
+- [x] src/office/life/your-turn.js -> `crates/station-3d/src/audio.rs` + `crates/station-3d/src/life.rs`
+- [x] src/office/people/accountant.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/bedding.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/billiards.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/breaks.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/chibi-rig.js -> `crates/station-3d/src/chibi.rs` (`Toy` + `Pixar` looks verified)
+- [x] src/office/people/comnha.js -> `crates/station-core/src/shared/comnha.rs` + `crates/station-3d/src/people.rs`
+- [x] src/office/people/comtrua.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/director.js -> `crates/station-3d/src/people.rs` (verified in walnut office)
+- [x] src/office/people/duty.js -> `crates/station-core/src/shared/duty.rs` + `crates/station-3d/src/people.rs`
+- [x] src/office/people/errands.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/evswap.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/farewell.js -> `crates/station-core/src/state/tenure.rs` + `crates/station-3d/src/people.rs`
+- [x] src/office/people/foosball.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/gaming.js -> `crates/station-3d/src/people.rs` (verified on lounge sofa)
+- [x] src/office/people/gatherings.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/guard.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/hr.js -> `crates/station-3d/src/people.rs` (verified patrolling corridor)
+- [x] src/office/people/interns.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/karaoke-songs.js -> `crates/station-3d/src/people.rs::KARAOKE_SONGS`
+- [x] src/office/people/karaoke.js -> `crates/station-3d/src/people.rs` (verified inside KTV booth)
+- [x] src/office/people/look.js -> `crates/station-3d/src/chibi.rs::ChibiLook`
+- [x] src/office/people/navigation.js -> `crates/station-3d/src/people.rs::PatrolPath`
+- [x] src/office/people/nhau.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/outings.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/payday.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/photobooth.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/pickle.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/rounds.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/staff.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/team-lines.js -> `crates/station-3d/src/people.rs::TEAM_CHAT_LINES`
+- [x] src/office/people/teatime.js -> `crates/station-3d/src/people.rs`
+- [x] src/office/people/workers.js -> `crates/station-3d/src/people.rs::spawn_office_cast`
+- [x] src/office/replay/replay.js -> `crates/station-3d/src/replay.rs::ReplayState`
+- [x] src/office/replay/timeline.js -> `crates/station-3d/src/replay.rs` + `station-core/src/shared/timeline.rs`
+- [x] src/office/world/backdrops/beach.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-beach.png`)
+- [x] src/office/world/backdrops/city.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-city.png`)
+- [x] src/office/world/backdrops/countryside.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-country.png`)
+- [x] src/office/world/backdrops/eat-com.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
+- [x] src/office/world/backdrops/index.js -> `crates/station-3d/src/backdrops.rs::BackdropKind` (true unload tested)
+- [x] src/office/world/backdrops/shared.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/shop-cong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-dmx.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-highlands.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-katinat.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-longchau.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-mixue.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-paint.js -> `crates/station-canvas2d/src/street_surfaces.rs`
+- [x] src/office/world/backdrops/shop-phuclong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shop-tgdd.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/shops.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
+- [x] src/office/world/backdrops/street-atm.js -> `crates/station-3d/src/backdrops.rs` + `draw_atm_atlas`
+- [x] src/office/world/backdrops/street-corner.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-csgt.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-ev.js -> `crates/station-3d/src/backdrops.rs` + `draw_ev_cabinet_atlas`
+- [x] src/office/world/backdrops/street-folk.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-life.js -> `crates/station-3d/src/backdrops.rs::animate_backdrop_traffic_system`
+- [x] src/office/world/backdrops/street-lunar.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-morning.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-nhau.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-park.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-photo.js -> `crates/station-3d/src/backdrops.rs` + `draw_photo_studio_atlas`
+- [x] src/office/world/backdrops/street-pickle.js -> `crates/station-3d/src/backdrops.rs` + `draw_pickleball_atlas`
+- [x] src/office/world/backdrops/street-repair.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-riders.js -> `crates/station-3d/src/backdrops.rs::StreetVehicle`
+- [x] src/office/world/backdrops/street-shade.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-signals.js -> `crates/station-3d/src/backdrops.rs` + `draw_traffic_countdown`
+- [x] src/office/world/backdrops/street-siren.js -> `crates/station-3d/src/audio.rs` + `backdrops.rs`
+- [x] src/office/world/backdrops/street-spots.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-wedding.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/world/backdrops/street-wires.js -> `crates/station-3d/src/backdrops.rs`
 
 ## P5 — UI, Panel, Components, App, Styles & i18n (240 files)
 

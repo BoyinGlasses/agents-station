@@ -68,6 +68,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         Some("cozy") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Cozy,
+                backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: false,
             });
@@ -75,6 +76,23 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         Some("hq") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Hq,
+                backdrop: station_3d::BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            });
+        }
+        Some("pro-country") => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::Countryside,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            });
+        }
+        Some("pro-beach") => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::Beach,
                 assets_dir: assets_dir.clone(),
                 night: false,
             });
@@ -82,6 +100,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         Some("pro-night") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: true,
             });
@@ -89,6 +108,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         _ => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: false,
             });
