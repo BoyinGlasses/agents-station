@@ -95,61 +95,61 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 
 ## P3 — 3D World Core, Layouts, Furniture & Props (55 files)
 
-- [ ] src/office/core/env.js -> (pending)
-- [ ] src/office/core/loop.js -> (pending)
-- [ ] src/office/core/optimize.js -> (pending)
-- [ ] src/office/core/state.js -> (pending)
-- [ ] src/office/core/world-boot.js -> (pending)
-- [ ] src/office/interact/first-person.js -> (pending)
-- [ ] src/office/interact/place-cards.js -> (pending)
-- [ ] src/office/interact/place-chips.js -> (pending)
-- [ ] src/office/interact/props.js -> (pending)
-- [ ] src/office/interact/rings.js -> (pending)
-- [ ] src/office/main.js -> (pending)
-- [ ] src/office/net/live.js -> (pending)
-- [ ] src/office/scene/blocks.js -> (pending)
-- [ ] src/office/scene/lights.js -> (pending)
-- [ ] src/office/scene/quality.js -> (pending)
-- [ ] src/office/scene/renderer.js -> (pending)
-- [ ] src/office/world/cozy-room.js -> (pending)
-- [ ] src/office/world/desks.js -> (pending)
-- [ ] src/office/world/entrance.js -> (pending)
-- [ ] src/office/world/furniture/board.js -> (pending)
-- [ ] src/office/world/furniture/coffee.js -> (pending)
-- [ ] src/office/world/furniture/meeting.js -> (pending)
-- [ ] src/office/world/furniture/plants-lamps.js -> (pending)
-- [ ] src/office/world/furniture/rocket.js -> (pending)
-- [ ] src/office/world/furniture/room-pieces.js -> (pending)
-- [ ] src/office/world/furniture/server-racks.js -> (pending)
-- [ ] src/office/world/layout.js -> (pending)
-- [ ] src/office/world/pro/floor.js -> (pending)
-- [ ] src/office/world/pro/pieces.js -> (pending)
-- [ ] src/office/world/pro/wing.js -> (pending)
-- [ ] src/office/world/props/aquarium.js -> (pending)
-- [ ] src/office/world/props/arcade.js -> (pending)
-- [ ] src/office/world/props/billiards.js -> (pending)
-- [ ] src/office/world/props/bins.js -> (pending)
-- [ ] src/office/world/props/cat.js -> (pending)
-- [ ] src/office/world/props/cups.js -> (pending)
-- [ ] src/office/world/props/dev-servers.js -> (pending)
-- [ ] src/office/world/props/duty-board.js -> (pending)
-- [ ] src/office/world/props/game-tv.js -> (pending)
-- [ ] src/office/world/props/karaoke.js -> (pending)
-- [ ] src/office/world/props/microwave.js -> (pending)
-- [ ] src/office/world/props/neon.js -> (pending)
-- [ ] src/office/world/props/printer.js -> (pending)
-- [ ] src/office/world/props/shredder.js -> (pending)
-- [ ] src/office/world/props/string-lights.js -> (pending)
-- [ ] src/office/world/props/switches.js -> (pending)
-- [ ] src/office/world/props/trinkets.js -> (pending)
-- [ ] src/office/world/props/tv-games.js -> (pending)
-- [ ] src/office/world/props/tv.js -> (pending)
-- [ ] src/office/world/props/update.js -> (pending)
-- [ ] src/office/world/props/vacuum.js -> (pending)
-- [ ] src/office/world/room-update.js -> (pending)
-- [ ] src/office/world/screens.js -> (pending)
-- [ ] src/office/world/terrace.js -> (pending)
-- [ ] src/office/world/windows.js -> (pending)
+- [x] src/office/core/env.js -> `crates/station-3d/src/layout.rs::OfficeLayout` (tested + visual)
+- [x] src/office/core/loop.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (tested + visual)
+- [x] src/office/core/optimize.js -> `crates/station-3d/src/palette.rs::WorldPalette` (shared meshes/mats, 168.45 MB HQ RAM)
+- [x] src/office/core/state.js -> `crates/station-3d/src/{lights,interact}.rs` (tested)
+- [x] src/office/core/world-boot.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (verified Cozy/Pro/HQ PNGs)
+- [x] src/office/interact/first-person.js -> `crates/station-3d/src/camera.rs::CameraRig` (F-key perspective + WASD)
+- [x] src/office/interact/place-cards.js -> `crates/station-3d/src/interact.rs::PlaceCardState`
+- [x] src/office/interact/place-chips.js -> `crates/station-3d/src/interact.rs::InteractiveProp`
+- [x] src/office/interact/props.js -> `crates/station-3d/src/interact.rs::PropActivated`
+- [x] src/office/interact/rings.js -> `crates/station-3d/src/interact.rs::HoverRing`
+- [x] src/office/main.js -> `crates/station-app/src/main.rs` + `crates/station-3d/src/lib.rs`
+- [x] src/office/net/live.js -> `crates/station-core/src/http/sse.rs` + `crates/station-core/src/state/sessions.rs`
+- [x] src/office/scene/blocks.js -> `crates/station-3d/src/palette.rs` (shared unit primitives & material dedupe)
+- [x] src/office/scene/lights.js -> `crates/station-3d/src/lights.rs` (sun + room lamps + day/night)
+- [x] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` (bounded shadows, Msaa::Off, MemoryHints)
+- [x] src/office/scene/renderer.js -> `crates/station-3d/src/camera.rs` + `crates/station-app/src/main.rs`
+- [x] src/office/world/cozy-room.js -> `crates/station-3d/src/rooms.rs::spawn_office_shell` (verified `g3-cozy.png`)
+- [x] src/office/world/desks.js -> `crates/station-3d/src/desks.rs::spawn_desks` (9/12/44 desks verified)
+- [x] src/office/world/entrance.js -> `crates/station-3d/src/entrance.rs::spawn_entrance` (door/lift/stairs)
+- [x] src/office/world/furniture/board.js -> `crates/station-3d/src/furniture.rs` (whiteboard + stickies)
+- [x] src/office/world/furniture/coffee.js -> `crates/station-3d/src/furniture.rs` (coffee corner + donuts)
+- [x] src/office/world/furniture/meeting.js -> `crates/station-3d/src/furniture.rs` (round & glass-room meeting tables)
+- [x] src/office/world/furniture/plants-lamps.js -> `crates/station-3d/src/rooms.rs::spawn_pot_plant` + `desks.rs`
+- [x] src/office/world/furniture/rocket.js -> `crates/station-3d/src/furniture.rs` (rocket sculpture)
+- [x] src/office/world/furniture/room-pieces.js -> `crates/station-3d/src/furniture.rs` (sofa, bookshelf, globe)
+- [x] src/office/world/furniture/server-racks.js -> `crates/station-3d/src/furniture.rs` (3 racks, LEDs, spinning fans)
+- [x] src/office/world/layout.js -> `crates/station-3d/src/layout.rs::LayoutSpec` (unit tested)
+- [x] src/office/world/pro/floor.js -> `crates/station-3d/src/rooms.rs` (verified `g3-pro.png`)
+- [x] src/office/world/pro/pieces.js -> `crates/station-3d/src/rooms.rs` (glass walls, low walls, floor zones)
+- [x] src/office/world/pro/wing.js -> `crates/station-3d/src/rooms.rs` (verified `g3-hq.png`, 44 desks)
+- [x] src/office/world/props/aquarium.js -> `crates/station-3d/src/props.rs` (animated fish)
+- [x] src/office/world/props/arcade.js -> `crates/station-3d/src/props.rs` (invaders + marquee)
+- [x] src/office/world/props/billiards.js -> `crates/station-3d/src/props.rs` (pool table + balls)
+- [x] src/office/world/props/bins.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/cat.js -> `crates/station-3d/src/props.rs` (animated office tabby)
+- [x] src/office/world/props/cups.js -> `crates/station-3d/src/props.rs` (pantry sink cups)
+- [x] src/office/world/props/dev-servers.js -> `crates/station-3d/src/props.rs` (mini server + :4310 badge)
+- [x] src/office/world/props/duty-board.js -> `crates/station-3d/src/props.rs` (`TRỰC NHẬT` board)
+- [x] src/office/world/props/game-tv.js -> `crates/station-3d/src/props.rs` (55" TV + PS5 + controllers)
+- [x] src/office/world/props/karaoke.js -> `crates/station-3d/src/props.rs` (karaoke booth + neon band + QR)
+- [x] src/office/world/props/microwave.js -> `crates/station-3d/src/props.rs` (digital timer)
+- [x] src/office/world/props/neon.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/printer.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/shredder.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/string-lights.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/switches.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/trinkets.js -> `crates/station-3d/src/props.rs`
+- [x] src/office/world/props/tv-games.js -> `crates/station-3d/src/props.rs` + `station-canvas2d/src/office_surfaces.rs`
+- [x] src/office/world/props/tv.js -> `crates/station-3d/src/props.rs` (live stats wall TV)
+- [x] src/office/world/props/update.js -> `crates/station-3d/src/props.rs::animate_props_system`
+- [x] src/office/world/props/vacuum.js -> `crates/station-3d/src/props.rs` (patrolling robot vacuum)
+- [x] src/office/world/room-update.js -> `crates/station-3d/src/lights.rs`
+- [x] src/office/world/screens.js -> `crates/station-3d/src/desks.rs::ScreenMaterials`
+- [x] src/office/world/terrace.js -> `crates/station-3d/src/rooms.rs::spawn_terrace`
+- [x] src/office/world/windows.js -> `crates/station-3d/src/rooms.rs::spawn_wall_window`
 
 ## P4 — People, Backdrops, Life, Demo, Replay & Audio (88 files)
 

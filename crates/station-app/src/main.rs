@@ -58,11 +58,44 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     .insert_resource(PointLightShadowMap { size: 256 })
     .add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
-    })
-    .add_plugins(station_3d::SmokeScenePlugin)
-    .add_plugins(station_ui::SmokeHudPlugin {
-        assets_dir: resolve_assets_dir(),
     });
+
+    let assets_dir = resolve_assets_dir();
+    match cli.capture_scene.as_deref() {
+        Some("smoke") => {
+            app.add_plugins(station_3d::SmokeScenePlugin);
+        }
+        Some("cozy") => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Cozy,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            });
+        }
+        Some("hq") => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Hq,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            });
+        }
+        Some("pro-night") => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                assets_dir: assets_dir.clone(),
+                night: true,
+            });
+        }
+        _ => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            });
+        }
+    }
+
+    app.add_plugins(station_ui::SmokeHudPlugin { assets_dir });
 
     if let Some(scene) = &cli.capture_scene {
         let out_path = cli
