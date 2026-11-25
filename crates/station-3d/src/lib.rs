@@ -18,7 +18,7 @@ pub mod rooms;
 
 use bevy::prelude::*;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
-pub use camera::{Lite2dCamera, UiInputCapture};
+pub use camera::{CameraControlSet, Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
@@ -95,12 +95,17 @@ fn register_office_runtime(
         .add_systems(
             Update,
             (
-                camera::camera_control_system,
                 props::animate_props_system,
                 people::animate_chibis_system,
                 backdrops::animate_backdrop_traffic_system,
                 life::update_rain_system,
             ),
+        )
+        .add_systems(
+            PostUpdate,
+            camera::camera_control_system
+                .in_set(camera::CameraControlSet)
+                .before(bevy::transform::TransformSystem::TransformPropagate),
         );
 }
 

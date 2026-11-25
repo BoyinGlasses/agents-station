@@ -7,6 +7,11 @@ use bevy::render::camera::ScalingMode;
 #[derive(Component)]
 pub struct MainOfficeCamera;
 
+/// System set for `camera_control_system` in `PostUpdate`, ordered before
+/// `TransformSystem::TransformPropagate` and after `egui`'s `EndPass` when `station-ui` is loaded.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CameraControlSet;
+
 /// Marker for the bare 2D Lite camera (never tagged `WorldEntity` so unloading 3D never strands a black screen).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Lite2dCamera;
