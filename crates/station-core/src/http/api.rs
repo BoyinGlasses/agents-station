@@ -2565,7 +2565,14 @@ pub async fn post_ag_ai(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let res = state.ag_accounts.lock().unwrap_or_else(|e| e.into_inner()).mutate(&action, &body);
+    let ag = Arc::clone(&state.ag_accounts);
+    let res = tokio::task::spawn_blocking(move || {
+        ag.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mutate(&action, &body)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(res))
 }
 
@@ -4735,6 +4742,40 @@ mod tests {
         assert_eq!(body["ok"], true);
         assert_eq!(body["name"], "side");
         assert!(dir.path().join(".claude-side").is_dir());
+
+        // Switching to an unsnapshotted slot fails closed with noCopy
+        let sw_empty = Request::builder()
+            .method("POST")
+            .uri("/api/accounts/switch")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "name": "side" }).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(sw_empty).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let sw_empty_body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(sw_empty_body["ok"], false);
+        assert_eq!(sw_empty_body["code"], "noCopy");
+
+        // Save side credentials, switch back to main, then switch to side cleanly
+        let save_side = Request::builder()
+            .method("POST")
+            .uri("/api/accounts/save")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "name": "side", "label": "Side" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(save_side).await.unwrap().status(), StatusCode::OK);
+
+        let sw_main = Request::builder()
+            .method("POST")
+            .uri("/api/accounts/switch")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "name": "" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(sw_main).await.unwrap().status(), StatusCode::OK);
 
         let sw = Request::builder()
             .method("POST")

@@ -73,7 +73,7 @@ pub struct AppState {
     pub rewriter: Arc<Mutex<Rewriter>>,
     pub claude_accounts: Mutex<ClaudeAccounts>,
     pub codex_accounts: Mutex<CodexAccounts>,
-    pub ag_accounts: Mutex<AntigravityAccounts>,
+    pub ag_accounts: Arc<Mutex<AntigravityAccounts>>,
     pub claude_version: Arc<Mutex<ClaudeVersionWatcher>>,
     pub images: Mutex<ImageStore>,
     pub git: Arc<Mutex<GitTracker>>,
@@ -113,7 +113,7 @@ impl AppState {
         let rewriter = Arc::new(Mutex::new(Rewriter::default()));
         let claude_accounts = ClaudeAccounts::load(&data_dir, &claude_dir);
         let codex_accounts = CodexAccounts::load(&data_dir);
-        let ag_accounts = AntigravityAccounts::load(&data_dir);
+        let ag_accounts = Arc::new(Mutex::new(AntigravityAccounts::load(&data_dir)));
         let claude_version = Arc::new(Mutex::new(ClaudeVersionWatcher::load(&data_dir, home_dir())));
         let images = ImageStore::load(&data_dir);
         let git = Arc::new(Mutex::new(GitTracker::new()));
@@ -145,7 +145,7 @@ impl AppState {
             rewriter,
             claude_accounts: Mutex::new(claude_accounts),
             codex_accounts: Mutex::new(codex_accounts),
-            ag_accounts: Mutex::new(ag_accounts),
+            ag_accounts,
             claude_version,
             images: Mutex::new(images),
             git,
