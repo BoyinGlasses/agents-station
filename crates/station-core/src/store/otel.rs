@@ -735,6 +735,7 @@ impl OtelStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn ingests_oracle_otel_fixtures_and_never_persists_secrets_or_prompts() {
