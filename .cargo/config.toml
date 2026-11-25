@@ -1,0 +1,3 @@
+[build]
+target-dir = "D:/mystation/cargo-target"
+jobs = 2
