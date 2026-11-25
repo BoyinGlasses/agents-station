@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Default)]
 pub struct HookArgs {
@@ -90,6 +95,166 @@ pub async fn run_hook_client(
     }
 
     out
+}
+
+fn build_status_hook_body(doc: &serde_json::Value) -> serde_json::Value {
+    let mut out = serde_json::Map::new();
+    for key in ["session_id", "rate_limits", "context_window", "cost"] {
+        if let Some(v) = doc.get(key)
+            && !v.is_null()
+        {
+            out.insert(key.to_owned(), v.clone());
+        }
+    }
+    if let Some(pc) = doc.get("prompt_cache").and_then(serde_json::Value::as_object) {
+        let mut cache = serde_json::Map::new();
+        for key in [
+            "warm",
+            "caching_observed",
+            "ttl",
+            "expires_at",
+            "recache_tokens_if_cold",
+        ] {
+            if let Some(v) = pc.get(key) {
+                cache.insert(key.to_owned(), v.clone());
+            }
+        }
+        out.insert("prompt_cache".to_owned(), serde_json::Value::Object(cache));
+    }
+    serde_json::Value::Object(out)
+}
+
+fn format_fallback_status_line(doc: &serde_json::Value) -> String {
+    let pct = |v: Option<&serde_json::Value>| -> Option<String> {
+        v.and_then(serde_json::Value::as_f64)
+            .map(|n| format!("{}%", n.round() as i64))
+    };
+    let model = doc
+        .get("model")
+        .and_then(|m| m.get("display_name"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Claude");
+    let mut parts = vec![model.to_owned()];
+    if let Some(ctx) = pct(doc.get("context_window").and_then(|c| c.get("used_percentage"))) {
+        parts.push(format!("ctx {ctx}"));
+    }
+    if let Some(five) = pct(doc
+        .get("rate_limits")
+        .and_then(|r| r.get("five_hour"))
+        .and_then(|f| f.get("used_percentage")))
+    {
+        parts.push(format!("5h {five}"));
+    }
+    if let Some(seven) = pct(doc
+        .get("rate_limits")
+        .and_then(|r| r.get("seven_day"))
+        .and_then(|s| s.get("used_percentage")))
+    {
+        parts.push(format!("7d {seven}"));
+    }
+    format!("{}\n", parts.join(" · "))
+}
+
+async fn run_chained_status_cmd(cmd: &str, stdin_bytes: &[u8]) -> String {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = tokio::process::Command::new("cmd");
+        c.args(["/C", cmd]);
+        c.creation_flags(CREATE_NO_WINDOW);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = tokio::process::Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let Ok(mut child) = command.spawn() else {
+        return String::new();
+    };
+    let mut stdin = child.stdin.take();
+    let mut stdout = child.stdout.take();
+    let input = stdin_bytes.to_vec();
+
+    let run = async {
+        let write_fut = async {
+            if let Some(mut s) = stdin.take() {
+                let _ = s.write_all(&input).await;
+                let _ = s.shutdown().await;
+            }
+        };
+        let read_fut = async {
+            let mut buf = Vec::new();
+            if let Some(mut o) = stdout.take() {
+                let _ = o.read_to_end(&mut buf).await;
+            }
+            buf
+        };
+        let (_, buf) = tokio::join!(write_fut, read_fut);
+        let _ = child.wait().await;
+        String::from_utf8_lossy(&buf).into_owned()
+    };
+
+    match tokio::time::timeout(Duration::from_millis(3_000), run).await {
+        Ok(out) => out,
+        Err(_) => {
+            let _ = child.kill().await;
+            String::new()
+        }
+    }
+}
+
+/// Claude Code `statusLine` command handler: POSTs status metrics to local
+/// `127.0.0.1:{port}/hook/status` (400ms cap) while concurrently chaining any
+/// previously installed command saved in `statusline-prev.json`.
+pub async fn run_status_line(port: u16, data_dir: &Path, stdin_bytes: &[u8]) -> String {
+    let doc = serde_json::from_slice::<serde_json::Value>(stdin_bytes)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let body = serde_json::to_vec(&build_status_hook_body(&doc)).unwrap_or_default();
+    let url = format!("http://127.0.0.1:{port}/hook/status");
+    let host_header = format!("127.0.0.1:{port}");
+
+    let forward = async {
+        if let Ok(client) = reqwest::Client::builder()
+            .timeout(Duration::from_millis(400))
+            .build()
+        {
+            let _ = client
+                .post(&url)
+                .header("Host", &host_header)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await;
+        }
+    };
+
+    let prev_cmd = std::fs::read_to_string(data_dir.join("statusline-prev.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("command").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .filter(|s| !s.trim().is_empty());
+
+    let chained = async {
+        match prev_cmd.as_deref() {
+            Some(cmd) => run_chained_status_cmd(cmd, stdin_bytes).await,
+            None => String::new(),
+        }
+    };
+
+    let (_, prev_out) = tokio::join!(forward, chained);
+    if !prev_out.trim().is_empty() {
+        prev_out
+    } else {
+        format_fallback_status_line(&doc)
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +396,82 @@ mod tests {
         assert_eq!(body["session_id"], "s-9");
         assert_eq!(body["agent"], "codex");
         assert_eq!(body["hook_event_name"], "PreToolUse");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_status_line_chains_prev_command_and_posts_hook_status() {
+        let captured = Arc::new(Mutex::new(None::<(String, serde_json::Value)>));
+        let cap_clone = captured.clone();
+
+        let app = Router::new().route(
+            "/hook/status",
+            post(move |headers: HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| {
+                let cap = cap_clone.clone();
+                async move {
+                    let host = headers
+                        .get("host")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    *cap.lock().unwrap() = Some((host, body));
+                    "{}"
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("statusline-prev.json"),
+            r#"{"type":"command","command":"echo CHAINED_STATUS_OK"}"#,
+        )
+        .unwrap();
+
+        let payload = serde_json::json!({
+            "session_id": "s-status-1",
+            "model": { "display_name": "Claude Opus" },
+            "context_window": { "used_percentage": 42.4, "total_input_tokens": 12000 },
+            "rate_limits": {
+                "five_hour": { "used_percentage": 18.2 },
+                "seven_day": { "used_percentage": 7.0 }
+            },
+            "cost": { "total_cost_usd": 1.25 },
+            "prompt_cache": { "warm": true, "ttl": 300, "extra_ignored": "nope" }
+        })
+        .to_string();
+
+        let out = run_status_line(addr.port(), dir.path(), payload.as_bytes()).await;
+        assert!(
+            out.contains("CHAINED_STATUS_OK"),
+            "expected chained stdout, got {out:?}"
+        );
+
+        let (host, body) = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("/hook/status should have received POST");
+        assert_eq!(host, format!("127.0.0.1:{}", addr.port()));
+        assert_eq!(body["session_id"], "s-status-1");
+        assert_eq!(body["context_window"]["used_percentage"], 42.4);
+        assert_eq!(body["cost"]["total_cost_usd"], 1.25);
+        assert_eq!(body["prompt_cache"]["warm"], true);
+        assert!(body["prompt_cache"].get("extra_ignored").is_none());
+
+        // Without statusline-prev.json, prints formatted fallback line.
+        std::fs::remove_file(dir.path().join("statusline-prev.json")).unwrap();
+        let fallback = run_status_line(addr.port(), dir.path(), payload.as_bytes()).await;
+        assert!(fallback.contains("Claude Opus"), "fallback={fallback:?}");
+        assert!(fallback.contains("42%"), "fallback={fallback:?}");
+        assert!(fallback.contains("18%"), "fallback={fallback:?}");
+        assert!(fallback.contains("7%"), "fallback={fallback:?}");
+
         server.abort();
     }
 }
