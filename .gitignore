@@ -1,0 +1,10 @@
+/target/
+/data/
+/artifacts/
+**/*.rs.bk
+*.pdb
+*.tmp
+.DS_Store
+Thumbs.db
+.env
+.env.*
