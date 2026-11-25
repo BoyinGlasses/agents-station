@@ -3,15 +3,22 @@ use crate::tray::{TrayState, notify_parent_hold_alert, notify_parent_in_tray};
 use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::render::camera::ScalingMode;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::window::PrimaryWindow;
+use chrono::{Local, TimeZone};
 use serde_json::{Value, json};
-use station_3d::{BackdropAssets, BackdropEntity, WorldEntity, WorldPalette};
+use station_3d::{BackdropAssets, BackdropEntity, SfxKind, WorldEntity, WorldPalette};
 use station_canvas2d::BrandRegistry;
 use station_core::http::{AppState, HarnessApi, start_http_server};
-use station_core::state::sessions::PermDecision;
+use station_core::state::sessions::{PermDecision, now_ms};
 use station_launcher::focus_launch::{Win32WindowLauncher, WindowLauncher};
 use station_launcher::{HarnessService, HarnessStatus, LaunchOutcome};
-use station_ui::state::{FeedEntry, HarnessDockItem, PendingPermCard, SessionCard, UiAction};
-use station_ui::{I18nStore, UiState, ViewMode};
+use station_ui::state::{
+    BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, SessionCard,
+    SysSnapshot, UiAction, normalize_status,
+};
+use station_ui::{ActiveDrawer, I18nStore, UiState, ViewMode};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -24,6 +31,7 @@ const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
 const REMOTE_ACTION_QUEUE_CAP: usize = 64;
 const TOAST_QUEUE_CAP: usize = 32;
 const HARNESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const TELEMETRY_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Marks a Bevy GUI app running as the ephemeral `--gui-worker` child of `TrayDaemon`.
 #[derive(Resource, Debug, Clone, Copy, Default)]
@@ -186,6 +194,13 @@ struct RemoteSnapshot {
     pending_perms: Vec<PendingPermCard>,
     feed: Vec<FeedEntry>,
     harnesses: Vec<HarnessDockItem>,
+    pairing_pin: Option<String>,
+    sys: Option<SysSnapshot>,
+    burn: Option<BurnSnapshot>,
+    has_chat: bool,
+    chat: Vec<ChatMessage>,
+    has_vault: bool,
+    vault_results: Vec<(String, String)>,
 }
 
 /// Byte-buffered SSE line decoder that preserves multi-byte UTF-8 sequences split across
@@ -244,6 +259,7 @@ enum BridgeBackend {
         app_state: Arc<AppState>,
         harnesses: Arc<HarnessService<Win32WindowLauncher>>,
         harness_poller: HarnessPoller,
+        runtime_handle: Option<tokio::runtime::Handle>,
         _shutdown: Option<watch::Sender<bool>>,
     },
     AttachedHttp {
@@ -326,12 +342,24 @@ pub fn post_presence_unfocused_sync(port: u16) -> bool {
     resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200")
 }
 
+fn format_hhmm_ms(ms: u64) -> String {
+    if ms == 0 {
+        return Local::now().format("%H:%M").to_string();
+    }
+    Local
+        .timestamp_millis_opt(ms as i64)
+        .single()
+        .map(|dt| dt.format("%H:%M").to_string())
+        .unwrap_or_else(|| format!("{}", (ms / 1000) % 86400))
+}
+
 fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
     let Some(arr) = val.get("sessions").and_then(Value::as_array) else {
         return Vec::new();
     };
     arr.iter()
-        .filter_map(|s| {
+        .enumerate()
+        .filter_map(|(idx, s)| {
             let id = s.get("id").and_then(Value::as_str)?.to_owned();
             let agent = s
                 .get("agent")
@@ -343,11 +371,10 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
                 .and_then(Value::as_str)
                 .unwrap_or(&agent)
                 .to_owned();
-            let status = s
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("idle")
-                .to_owned();
+            let status = normalize_status(
+                s.get("status").and_then(Value::as_str).unwrap_or("rest"),
+            )
+            .to_owned();
             let model = s
                 .get("model")
                 .and_then(Value::as_str)
@@ -363,7 +390,25 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
                 .and_then(|l| l.get("label"))
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            let tool_kind = s
+                .get("last")
+                .and_then(|l| l.get("type"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let desk = s
+                .get("desk")
+                .and_then(Value::as_u64)
+                .map(|d| d as usize)
+                .unwrap_or(idx);
+            let cost_usd = s.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0);
+            let in_tok = s.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let out_tok = s.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
             let tool_calls = s.get("tool_calls").and_then(Value::as_u64).unwrap_or(0);
+            let tokens = if in_tok + out_tok > 0 {
+                in_tok + out_tok
+            } else {
+                tool_calls * 420
+            };
             Some(SessionCard {
                 id,
                 agent,
@@ -372,8 +417,10 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
                 model,
                 last_prompt,
                 tool,
-                cost_usd: 0.0,
-                tokens: tool_calls * 420,
+                tool_kind,
+                desk,
+                cost_usd,
+                tokens,
                 pinned: false,
             })
         })
@@ -483,11 +530,179 @@ fn apply_snapshot_to_remote(snap_lock: &Arc<Mutex<RemoteSnapshot>>, val: &Value)
     let sessions = parse_sessions_from_json(val);
     let pending_perms = parse_perms_from_json(val);
     let feed = parse_feed_from_json(val);
+    let pin = val
+        .get("pin")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
     snap.has_snapshot = true;
     snap.sessions = sessions;
     snap.pending_perms = pending_perms;
     snap.feed = feed;
+    if let Some(p) = pin {
+        snap.pairing_pin = Some(p);
+    }
+}
+
+fn parse_chat_from_json(val: &Value) -> Vec<ChatMessage> {
+    let Some(arr) = val.get("msgs").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter_map(|m| {
+            let text = m.get("text").and_then(Value::as_str).unwrap_or("");
+            if text.is_empty() {
+                return None;
+            }
+            let sender = m
+                .get("name")
+                .and_then(Value::as_str)
+                .or_else(|| m.get("from").and_then(Value::as_str))
+                .unwrap_or("Office")
+                .to_owned();
+            let role = m
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("chat")
+                .to_owned();
+            let ts = format_hhmm_ms(m.get("at").and_then(Value::as_u64).unwrap_or(0));
+            Some(ChatMessage {
+                sender,
+                role,
+                text: text.to_owned(),
+                ts,
+            })
+        })
+        .collect()
+}
+
+fn parse_sys_from_json(val: &Value) -> SysSnapshot {
+    let gb = 1024.0 * 1024.0 * 1024.0;
+    let mem_used_gb = val
+        .pointer("/mem/used")
+        .and_then(Value::as_u64)
+        .map(|b| (b as f64 / gb) as f32)
+        .unwrap_or(0.0);
+    let mem_total_gb = val
+        .pointer("/mem/total")
+        .and_then(Value::as_u64)
+        .map(|b| (b as f64 / gb) as f32)
+        .unwrap_or(0.0);
+    let disk_total = val.pointer("/disk/total").and_then(Value::as_u64).unwrap_or(0);
+    let disk_used = val.pointer("/disk/used").and_then(Value::as_u64).unwrap_or(0);
+    let disk_pct = if disk_total > 0 {
+        ((disk_used as f64 / disk_total as f64) * 100.0) as f32
+    } else {
+        0.0
+    };
+    let cpu_pct = val
+        .pointer("/cpu/pct")
+        .or_else(|| val.pointer("/cpu/used"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    let mut ports = Vec::new();
+    if let Some(arr) = val.get("devServers").and_then(Value::as_array) {
+        for srv in arr {
+            let label = srv
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or("dev")
+                .to_owned();
+            if let Some(ps) = srv.get("ports").and_then(Value::as_array) {
+                for p in ps {
+                    if let Some(port) = p.as_u64().and_then(|v| u16::try_from(v).ok()) {
+                        ports.push((port, label.clone()));
+                    }
+                }
+            }
+        }
+    }
+    SysSnapshot {
+        cpu_pct,
+        mem_used_gb,
+        mem_total_gb,
+        disk_pct,
+        ports,
+        private_mb: current_process_private_mb(),
+    }
+}
+
+fn parse_burn_from_json(today_val: &Value, month_val: Option<&Value>) -> BurnSnapshot {
+    let today_usd = today_val
+        .pointer("/total/usd")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let month_usd = month_val
+        .and_then(|v| v.pointer("/total/usd").and_then(Value::as_f64))
+        .unwrap_or(today_usd);
+    let input_tokens = today_val
+        .pointer("/total/tok/in")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as u64;
+    let output_tokens = today_val
+        .pointer("/total/tok/out")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as u64;
+    let cache_read_tokens = today_val
+        .pointer("/total/tok/cacheRead")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as u64;
+    let per_model = today_val
+        .pointer("/by/model")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|row| {
+                    let name = row.get("name").and_then(Value::as_str)?.to_owned();
+                    let usd = row.get("usd").and_then(Value::as_f64).unwrap_or(0.0);
+                    Some((name, usd))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    BurnSnapshot {
+        today_usd,
+        month_usd,
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        per_model,
+    }
+}
+
+fn parse_vault_from_json(val: &Value) -> Vec<(String, String)> {
+    let Some(arr) = val.get("items").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .take(30)
+        .filter_map(|e| {
+            let title = e
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| e.get("sid").and_then(Value::as_str))?
+                .to_owned();
+            let body = e
+                .get("first")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| e.get("cwd").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_owned();
+            Some((title, body))
+        })
+        .collect()
+}
+
+fn current_process_private_mb() -> f32 {
+    0.0
 }
 
 fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
@@ -497,9 +712,27 @@ fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
     if snap.has_snapshot {
         ui.sessions = snap.sessions.clone();
         ui.pending_perms = snap.pending_perms.clone();
-        if !snap.feed.is_empty() {
-            ui.feed = snap.feed.clone();
+        ui.feed = snap.feed.clone();
+        if let Some(sel) = ui.selected_session.as_deref()
+            && !ui.sessions.iter().any(|s| s.id == sel)
+        {
+            ui.selected_session = None;
         }
+    }
+    if let Some(pin) = &snap.pairing_pin {
+        ui.pairing_pin = pin.clone();
+    }
+    if let Some(sys) = &snap.sys {
+        ui.sys = sys.clone();
+    }
+    if let Some(burn) = &snap.burn {
+        ui.burn = burn.clone();
+    }
+    if snap.has_chat {
+        ui.chat = snap.chat.clone();
+    }
+    if snap.has_vault {
+        ui.vault_results = snap.vault_results.clone();
     }
 }
 
@@ -540,6 +773,52 @@ async fn fetch_remote_harnesses(
         let harnesses = parse_harnesses_from_json(&val);
         let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
         snap.harnesses = harnesses;
+    }
+}
+
+async fn fetch_remote_telemetry(
+    client: &reqwest::Client,
+    base_url: &str,
+    host_header: &str,
+    snap_lock: &Arc<Mutex<RemoteSnapshot>>,
+) {
+    let get_json = |path: &str| {
+        let url = format!("{base_url}{path}");
+        async move {
+            let resp = client
+                .get(url)
+                .header("host", host_header)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                .ok()?;
+            if !resp.status().is_success() {
+                return None;
+            }
+            resp.json::<Value>().await.ok()
+        }
+    };
+
+    let sys_v = get_json("/api/sys").await;
+    let burn_today = get_json("/api/burn?range=today").await;
+    let burn_30d = get_json("/api/burn?range=30d").await;
+    let chat_v = get_json("/api/chat").await;
+    let vault_v = get_json("/api/vault?limit=30").await;
+
+    let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(v) = sys_v {
+        snap.sys = Some(parse_sys_from_json(&v));
+    }
+    if let Some(today) = burn_today {
+        snap.burn = Some(parse_burn_from_json(&today, burn_30d.as_ref()));
+    }
+    if let Some(v) = chat_v {
+        snap.chat = parse_chat_from_json(&v);
+        snap.has_chat = true;
+    }
+    if let Some(v) = vault_v {
+        snap.vault_results = parse_vault_from_json(&v);
+        snap.has_vault = true;
     }
 }
 
@@ -647,7 +926,7 @@ fn spawn_attached_sse_client(
                     }
                 });
 
-                // Periodic 1 Hz harness refresh alongside live SSE stream.
+                // Periodic 1 Hz harness refresh + 3 Hz telemetry (sys/burn/chat/vault) alongside live SSE stream.
                 let client_h = client.clone();
                 let base_h = base_url.clone();
                 let host_h = host_header.clone();
@@ -656,10 +935,15 @@ fn spawn_attached_sse_client(
                 tokio::spawn(async move {
                     let mut tick = tokio::time::interval(HARNESS_POLL_INTERVAL);
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    let mut tele_tick = tokio::time::interval(TELEMETRY_POLL_INTERVAL);
+                    tele_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
                         tokio::select! {
                             _ = tick.tick() => {
                                 fetch_remote_harnesses(&client_h, &base_h, &host_h, &snap_h).await;
+                            }
+                            _ = tele_tick.tick() => {
+                                fetch_remote_telemetry(&client_h, &base_h, &host_h, &snap_h).await;
                             }
                             changed = rx_h.changed() => {
                                 if changed.is_err() || *rx_h.borrow() {
@@ -750,9 +1034,12 @@ fn spawn_attached_sse_client(
 #[derive(Resource)]
 pub struct LiveServerBridge {
     backend: BridgeBackend,
+    pub data_dir: PathBuf,
     pub assets_dir: PathBuf,
     port: u16,
     sync_timer: Timer,
+    sys_sync_timer: Timer,
+    sys_synced_once: bool,
     banner_pushed: bool,
     seen_perm_ids: HashSet<String>,
     last_window_focused: Option<bool>,
@@ -787,9 +1074,12 @@ impl LiveServerBridge {
                     action_tx,
                     _shutdown: shutdown,
                 },
+                data_dir,
                 assets_dir,
                 port,
                 sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+                sys_synced_once: false,
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
                 last_window_focused: None,
@@ -807,7 +1097,7 @@ impl LiveServerBridge {
         ));
         let harness_api: Arc<dyn HarnessApi> = harnesses.clone();
 
-        let app_state = match AppState::new(data_dir, Some(harness_api)) {
+        let app_state = match AppState::new(data_dir.clone(), Some(harness_api)) {
             Ok(st) => Arc::new(st),
             Err(err) => {
                 let harness_poller = HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
@@ -817,9 +1107,12 @@ impl LiveServerBridge {
                         harnesses,
                         harness_poller,
                     },
+                    data_dir,
                     assets_dir,
                     port,
                     sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+                    sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+                    sys_synced_once: false,
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
                     last_window_focused: None,
@@ -836,11 +1129,15 @@ impl LiveServerBridge {
                     app_state,
                     harnesses,
                     harness_poller,
+                    runtime_handle: None,
                     _shutdown: None,
                 },
+                data_dir,
                 assets_dir,
                 port,
                 sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+                sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+                sys_synced_once: false,
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
                 last_window_focused: None,
@@ -852,7 +1149,8 @@ impl LiveServerBridge {
         let state_bg = app_state.clone();
         let host_bg = host.clone();
         let (tx, rx) = watch::channel(false);
-        let (bind_tx, bind_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
+        let (bind_tx, bind_rx) =
+            std::sync::mpsc::sync_channel::<Result<tokio::runtime::Handle, String>>(1);
 
         let spawned = std::thread::Builder::new()
             .name("station-http".to_owned())
@@ -868,10 +1166,11 @@ impl LiveServerBridge {
                         return;
                     }
                 };
+                let rt_handle = rt.handle().clone();
                 rt.block_on(async move {
                     match start_http_server(state_bg.clone(), &host_bg, port).await {
                         Ok(handle) => {
-                            let _ = bind_tx.send(Ok(()));
+                            let _ = bind_tx.send(Ok(rt_handle));
                             let mut rx = rx;
                             while !*rx.borrow() {
                                 if rx.changed().await.is_err() {
@@ -896,7 +1195,7 @@ impl LiveServerBridge {
         };
 
         match bind_res {
-            Ok(()) => {
+            Ok(rt_handle) => {
                 let harness_poller =
                     HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
                 Self {
@@ -904,11 +1203,15 @@ impl LiveServerBridge {
                         app_state,
                         harnesses,
                         harness_poller,
+                        runtime_handle: Some(rt_handle),
                         _shutdown: Some(tx),
                     },
+                    data_dir,
                     assets_dir,
                     port,
                     sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+                    sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+                    sys_synced_once: false,
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
                     last_window_focused: None,
@@ -934,9 +1237,12 @@ impl LiveServerBridge {
                             action_tx,
                             _shutdown: shutdown,
                         },
+                        data_dir,
                         assets_dir,
                         port,
                         sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
+                        sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+                        sys_synced_once: false,
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
                         last_window_focused: None,
@@ -954,9 +1260,12 @@ impl LiveServerBridge {
                             harnesses,
                             harness_poller,
                         },
+                        data_dir,
                         assets_dir,
                         port,
                         sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+                        sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+                        sys_synced_once: false,
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
                         last_window_focused: None,
@@ -1067,8 +1376,17 @@ impl Plugin for LiveServerBridgePlugin {
             self.start_http,
             true,
         );
-        app.insert_resource(bridge)
-            .add_systems(Update, (sync_live_state_to_ui, process_ui_actions));
+        app.insert_resource(bridge).add_systems(
+            Update,
+            (
+                sync_live_state_to_ui,
+                process_ui_actions,
+                sync_live_sessions_to_3d,
+                handle_picking_events,
+                step_replay_system,
+            )
+                .chain(),
+        );
     }
 }
 
@@ -1084,6 +1402,179 @@ fn parse_ui_perm_decision(decision: &str) -> Option<PermDecision> {
     }
 }
 
+fn sync_office_chat_to_ui(office: &station_core::state::sessions::OfficeState, ui: &mut UiState) {
+    ui.chat = office
+        .chat
+        .msgs
+        .iter()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .filter(|m| !m.text.is_empty())
+        .map(|m| ChatMessage {
+            sender: m
+                .name
+                .clone()
+                .or_else(|| m.from.clone())
+                .unwrap_or_else(|| "Office".to_owned()),
+            role: m.kind.clone(),
+            text: m.text.clone(),
+            ts: format_hhmm_ms(m.at),
+        })
+        .collect();
+}
+
+fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
+    if let Ok(office) = app_state.office.lock() {
+        let mut sessions: Vec<SessionCard> = office
+            .sessions
+            .values()
+            .map(|s| {
+                let tok = s.input_tokens.saturating_add(s.output_tokens);
+                SessionCard {
+                    id: s.id.clone(),
+                    agent: s.agent.clone(),
+                    project: s.name.clone(),
+                    status: normalize_status(&s.status).to_owned(),
+                    model: s.model.clone().unwrap_or_else(|| "default".to_owned()),
+                    last_prompt: s.last_prompt.clone().unwrap_or_default(),
+                    tool: s.last.as_ref().map(|t| t.label.clone()),
+                    tool_kind: s.last.as_ref().map(|t| t.kind.clone()),
+                    desk: s.desk,
+                    cost_usd: s.cost_usd,
+                    tokens: if tok > 0 { tok } else { s.tool_calls * 420 },
+                    pinned: office.pins.contains_key(&s.id),
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| a.desk.cmp(&b.desk).then_with(|| a.id.cmp(&b.id)));
+        ui.sessions = sessions;
+        if let Some(sel) = ui.selected_session.as_deref()
+            && !ui.sessions.iter().any(|s| s.id == sel)
+        {
+            ui.selected_session = None;
+        }
+
+        ui.pending_perms = office
+            .pending_perms
+            .values()
+            .map(|p| PendingPermCard {
+                id: p.id.clone(),
+                session_id: p.sess.clone(),
+                agent: p.name.clone(),
+                tool: p.tool_type.clone(),
+                summary: p.detail.clone(),
+                kind: p.kind.clone(),
+            })
+            .collect();
+
+        ui.feed = office
+            .feed
+            .iter()
+            .rev()
+            .take(12)
+            .map(|f| FeedEntry {
+                ts_label: format_hhmm_ms(f.ts),
+                agent: f.name.clone(),
+                message: f.label.clone(),
+                level: if f.kind == "error" || f.kind == "fail" {
+                    "err".to_owned()
+                } else if f.kind == "wait" {
+                    "warn".to_owned()
+                } else {
+                    "info".to_owned()
+                },
+            })
+            .collect();
+
+        sync_office_chat_to_ui(&office, ui);
+    }
+}
+
+fn sync_in_process_telemetry(app_state: &AppState, ui: &mut UiState, refresh_sys: bool) {
+    ui.pairing_pin = app_state.auth.current_pin();
+
+    let now = now_ms();
+    if let Ok(otel) = app_state.otel.lock() {
+        let today = otel.burn_summary("today", now);
+        let month = otel.burn_summary("30d", now);
+        let per_model = today
+            .by
+            .get("model")
+            .map(|rows| rows.iter().map(|r| (r.name.clone(), r.usd)).collect())
+            .unwrap_or_default();
+        ui.burn = BurnSnapshot {
+            today_usd: today.total.row.usd,
+            month_usd: month.total.row.usd,
+            input_tokens: today.total.row.tok.input as u64,
+            output_tokens: today.total.row.tok.out as u64,
+            cache_read_tokens: today.total.row.tok.cache_read as u64,
+            per_model,
+        };
+    }
+
+    if let Ok(vault) = app_state.vault.lock() {
+        ui.vault_results = vault
+            .search(&ui.vault_query, 30)
+            .into_iter()
+            .map(|e| {
+                let title = if e.title.is_empty() {
+                    e.sid.clone()
+                } else {
+                    e.title.clone()
+                };
+                let body = if !e.first.is_empty() {
+                    e.first.clone()
+                } else {
+                    e.cwd.clone()
+                };
+                (title, body)
+            })
+            .collect();
+    }
+
+    if refresh_sys {
+        let snap = app_state.sys.snapshot();
+        let gb = 1024.0 * 1024.0 * 1024.0;
+        let disk_pct = if snap.disk.total > 0 {
+            ((snap.disk.used as f64 / snap.disk.total as f64) * 100.0) as f32
+        } else {
+            0.0
+        };
+        let cpu_pct = snap
+            .cpu
+            .get("pct")
+            .or_else(|| snap.cpu.get("used"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0) as f32;
+        let mut ports = Vec::new();
+        for srv in &snap.dev_servers {
+            for &p in &srv.ports {
+                ports.push((p, srv.label.clone()));
+            }
+        }
+        let my_pid = std::process::id();
+        let private_mb = app_state
+            .sys
+            .platform()
+            .processes()
+            .procs
+            .get(&my_pid)
+            .map(|p| (p.mem as f64 / (1024.0 * 1024.0)) as f32)
+            .unwrap_or(ui.sys.private_mb);
+        ui.sys = SysSnapshot {
+            cpu_pct,
+            mem_used_gb: (snap.mem.used as f64 / gb) as f32,
+            mem_total_gb: (snap.mem.total as f64 / gb) as f32,
+            disk_pct,
+            ports,
+            private_mb,
+        };
+    }
+}
+
 fn sync_live_state_to_ui(
     time: Res<Time>,
     mut bridge: ResMut<LiveServerBridge>,
@@ -1091,6 +1582,8 @@ fn sync_live_state_to_ui(
     windows: Query<&Window>,
     mut tray: Option<ResMut<TrayState>>,
 ) {
+    ui.clock_label = Local::now().format("%H:%M").to_string();
+
     if !bridge.banner_pushed {
         if let Some(err) = bridge.bind_error_message() {
             ui.server_banner = Some(err.to_owned());
@@ -1111,7 +1604,14 @@ fn sync_live_state_to_ui(
                 ui.harnesses = items;
             }
         }
-        BridgeBackend::AttachedHttp { .. } => {}
+        BridgeBackend::AttachedHttp { snapshot, .. } => {
+            if let Ok(snap) = snapshot.try_lock()
+                && !snap.harnesses.is_empty()
+                && ui.harnesses.is_empty()
+            {
+                ui.harnesses = snap.harnesses.clone();
+            }
+        }
     }
 
     let has_window = windows.iter().next().is_some();
@@ -1144,73 +1644,32 @@ fn sync_live_state_to_ui(
         }
     }
 
+    bridge.sys_sync_timer.tick(time.delta());
     bridge.sync_timer.tick(time.delta());
     if !bridge.sync_timer.just_finished() {
         return;
     }
 
+    let refresh_sys = !bridge.sys_synced_once || bridge.sys_sync_timer.just_finished();
     let mut synced_live_perms = false;
     match &bridge.backend {
         BridgeBackend::AttachedHttp { snapshot, .. } => {
             let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            synced_live_perms = snap.has_snapshot;
-            apply_remote_snapshot_to_ui(&snap, &mut ui);
+            if !ui.demo_running {
+                synced_live_perms = snap.has_snapshot;
+                apply_remote_snapshot_to_ui(&snap, &mut ui);
+            } else if let Some(pin) = &snap.pairing_pin {
+                ui.pairing_pin = pin.clone();
+            }
         }
         BridgeBackend::InProcess { app_state, .. } => {
-            if let Ok(office) = app_state.office.lock() {
-                if !office.sessions.is_empty() {
-                    ui.sessions = office
-                        .sessions
-                        .values()
-                        .map(|s| SessionCard {
-                            id: s.id.clone(),
-                            agent: s.agent.clone(),
-                            project: s.name.clone(),
-                            status: s.status.clone(),
-                            model: s.model.clone().unwrap_or_else(|| "default".to_owned()),
-                            last_prompt: s.last_prompt.clone().unwrap_or_default(),
-                            tool: s.last.as_ref().map(|t| t.label.clone()),
-                            cost_usd: 0.0,
-                            tokens: s.tool_calls * 420,
-                            pinned: office.pins.contains_key(&s.id),
-                        })
-                        .collect();
-                }
-                if !office.pending_perms.is_empty() {
-                    synced_live_perms = true;
-                    ui.pending_perms = office
-                        .pending_perms
-                        .values()
-                        .map(|p| PendingPermCard {
-                            id: p.id.clone(),
-                            session_id: p.sess.clone(),
-                            agent: p.name.clone(),
-                            tool: p.tool_type.clone(),
-                            summary: p.detail.clone(),
-                            kind: p.kind.clone(),
-                        })
-                        .collect();
-                } else if !bridge.seen_perm_ids.is_empty() {
-                    synced_live_perms = true;
-                    ui.pending_perms.clear();
-                }
-                if !office.feed.is_empty() {
-                    ui.feed = office
-                        .feed
-                        .iter()
-                        .take(12)
-                        .map(|f| FeedEntry {
-                            ts_label: format!("{}", (f.ts / 1000) % 86400),
-                            agent: f.name.clone(),
-                            message: f.label.clone(),
-                            level: if f.kind == "error" {
-                                "err".to_owned()
-                            } else {
-                                "info".to_owned()
-                            },
-                        })
-                        .collect();
-                }
+            if !ui.demo_running {
+                synced_live_perms = true;
+                sync_office_core_to_ui(app_state, &mut ui);
+            }
+            sync_in_process_telemetry(app_state, &mut ui, refresh_sys);
+            if refresh_sys {
+                bridge.sys_synced_once = true;
             }
         }
         BridgeBackend::BindError { .. } => {}
@@ -1228,6 +1687,102 @@ fn sync_live_state_to_ui(
             }
         }
         bridge.seen_perm_ids.retain(|id| current_ids.contains(id));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_live_sessions_to_3d(
+    mut commands: Commands,
+    ui: Res<UiState>,
+    pal: Option<ResMut<WorldPalette>>,
+    materials: Option<ResMut<Assets<StandardMaterial>>>,
+    screen_mats: Option<Res<station_3d::desks::ScreenMaterials>>,
+    layout: Option<Res<station_3d::OfficeLayout>>,
+    preview_q: Query<Entity, With<station_3d::people::PreviewCastWorker>>,
+    mut workers_q: Query<(
+        Entity,
+        &mut station_3d::people::LiveSessionWorker,
+        &mut station_3d::chibi::ChibiWorker,
+        Option<&Children>,
+    )>,
+    mut halo_q: Query<
+        &mut MeshMaterial3d<StandardMaterial>,
+        (
+            With<station_3d::chibi::StatusHalo>,
+            Without<station_3d::desks::DeskScreen>,
+        ),
+    >,
+    mut screens_q: Query<
+        (
+            &station_3d::desks::DeskScreen,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        Without<station_3d::chibi::StatusHalo>,
+    >,
+) {
+    let (Some(mut pal), Some(mut mats), Some(scr_mats)) = (pal, materials, screen_mats) else {
+        return;
+    };
+    let lay = layout.map(|l| *l).unwrap_or(ui.layout);
+    let specs: Vec<station_3d::LiveWorkerSpec> = ui
+        .sessions
+        .iter()
+        .map(|s| station_3d::LiveWorkerSpec {
+            session_id: s.id.clone(),
+            agent: s.agent.clone(),
+            name: s.project.clone(),
+            status: s.status.clone(),
+            desk_hint: s.desk,
+            tool_kind: s.tool_kind.clone(),
+            tool_label: s.tool.clone(),
+        })
+        .collect();
+    station_3d::people::sync_live_workers_and_screens(
+        &mut commands,
+        &mut pal,
+        &mut mats,
+        &scr_mats,
+        lay,
+        ui.chibi_look,
+        &specs,
+        &preview_q,
+        &mut workers_q,
+        &mut halo_q,
+        &mut screens_q,
+    );
+}
+
+fn handle_picking_events(
+    mut ui: ResMut<UiState>,
+    mut worker_ev: EventReader<station_3d::WorkerSelected>,
+    mut prop_ev: EventReader<station_3d::interact::PropActivated>,
+) {
+    for ev in worker_ev.read() {
+        ui.selected_session = Some(ev.session_id.clone());
+        ui.active_drawer = ActiveDrawer::Session;
+    }
+    for ev in prop_ev.read() {
+        match ev.id {
+            "whiteboard" => ui.active_drawer = ActiveDrawer::Whiteboard,
+            "tv" | "dev-servers" => ui.active_drawer = ActiveDrawer::System,
+            _ => ui.push_toast(ev.place.to_uppercase(), ev.label),
+        }
+    }
+}
+
+fn step_replay_system(
+    time: Res<Time>,
+    mut ui: ResMut<UiState>,
+    mut replay: Option<ResMut<station_3d::replay::ReplayState>>,
+) {
+    let Some(rep) = replay.as_deref_mut() else {
+        return;
+    };
+    if rep.active && rep.playing {
+        rep.step(time.delta_secs());
+        if !rep.playing {
+            ui.replay_playing = false;
+        }
     }
 }
 
@@ -1253,6 +1808,139 @@ struct TrayActionParams<'w, 's> {
     windows: Query<'w, 's, &'static mut Window>,
     fps: Option<ResMut<'w, AdaptiveFpsState>>,
     tray: Option<ResMut<'w, TrayState>>,
+}
+
+#[derive(SystemParam)]
+struct AuxActionParams<'w, 's> {
+    sfx: Option<ResMut<'w, station_3d::audio::SfxEngine>>,
+    life: Option<ResMut<'w, station_3d::life::OfficeLifeState>>,
+    camera_rig: Option<ResMut<'w, station_3d::camera::CameraRig>>,
+    cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
+    replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
+    wb_q: Query<
+        'w,
+        's,
+        &'static MeshMaterial3d<StandardMaterial>,
+        With<station_3d::furniture::WhiteboardSurface>,
+    >,
+    primary_win_q: Query<'w, 's, Entity, With<PrimaryWindow>>,
+}
+
+fn persist_pref(bridge: &LiveServerBridge, key: &str, value: Value) {
+    match &bridge.backend {
+        BridgeBackend::InProcess { app_state, .. } => {
+            if let Ok(mut prefs) = app_state.prefs.lock() {
+                if key == "lang" {
+                    if let Some(code) = value.as_str() {
+                        let _ = prefs.set_lang(code);
+                    }
+                } else {
+                    let _ = prefs.set(key, Some(value));
+                }
+            }
+        }
+        BridgeBackend::AttachedHttp { action_tx, .. } => {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_owned(), value);
+            let _ = action_tx.try_send(RemoteActionCmd {
+                path: "/api/prefs",
+                body: Value::Object(map),
+                refresh: RefreshKind::None,
+                launch_toast_label: None,
+            });
+        }
+        BridgeBackend::BindError { .. } => {
+            let mut prefs = station_core::prefs::PrefsStore::load(&bridge.data_dir);
+            if key == "lang" {
+                if let Some(code) = value.as_str() {
+                    let _ = prefs.set_lang(code);
+                }
+            } else {
+                let _ = prefs.set(key, Some(value));
+            }
+        }
+    }
+}
+
+fn parse_whiteboard_todos(text: &str) -> Vec<Value> {
+    let mut todos = Vec::new();
+    for raw in text.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let body = trimmed
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim();
+        let done = body.starts_with("[x]") || body.starts_with("[X]");
+        let clean = body
+            .trim_start_matches("[x]")
+            .trim_start_matches("[X]")
+            .trim_start_matches("[ ]")
+            .trim();
+        if !clean.is_empty() {
+            todos.push(json!({ "text": clean, "done": done }));
+        }
+    }
+    todos
+}
+
+fn save_photostrip_png(
+    shot_path: &std::path::Path,
+    ui: &UiState,
+    shared_fonts: Option<&mut station_3d::SharedFontEngine>,
+    assets_dir: &std::path::Path,
+) -> bool {
+    use station_canvas2d::boards_and_social::{PhotostripInput, StripPerson, draw_photostrip};
+    use station_canvas2d::{FontEngine, hex};
+
+    if let Some(parent) = shot_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let people: Vec<StripPerson> = if ui.sessions.is_empty() {
+        vec![
+            StripPerson {
+                hair: hex("#3B2618"),
+                skin: hex("#F5D0B5"),
+                shirt: hex("#D97757"),
+            },
+            StripPerson {
+                hair: hex("#1E1E24"),
+                skin: hex("#EBC3A0"),
+                shirt: hex("#5F8FD8"),
+            },
+        ]
+    } else {
+        ui.sessions
+            .iter()
+            .take(4)
+            .enumerate()
+            .map(|(i, s)| {
+                let cfg = station_3d::chibi::ChibiConfig::for_agent(&s.agent, &s.project, i);
+                StripPerson {
+                    hair: hex(cfg.hair),
+                    skin: hex(cfg.skin),
+                    shirt: hex(cfg.shirt),
+                }
+            })
+            .collect()
+    };
+    let input = PhotostripInput {
+        tag: format!("Agents Station · {} live", ui.sessions.len()),
+        day: Local::now().format("%d/%m").to_string(),
+        seed: (now_ms() % 97) as usize,
+        people,
+    };
+    let surf = if let Some(sf) = shared_fonts {
+        draw_photostrip(&input, sf.get_or_init())
+    } else {
+        let mut fonts = FontEngine::from_assets_dir(assets_dir);
+        draw_photostrip(&input, &mut fonts)
+    };
+    image::RgbaImage::from_raw(surf.width, surf.height, surf.rgba)
+        .and_then(|img| img.save(shot_path).ok())
+        .is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1338,6 +2026,7 @@ fn process_ui_actions(
     bridge: Res<LiveServerBridge>,
     mut world_params: WorldActionParams,
     mut tray_params: TrayActionParams,
+    mut aux: AuxActionParams,
 ) {
     let has_world = !world_params.world_q.is_empty();
     let has_lite_cam = !world_params.lite_cam_q.is_empty();
@@ -1352,6 +2041,18 @@ fn process_ui_actions(
                     .iter()
                     .find(|h| h.id == id)
                     .map(|h| h.label.clone())
+                    .or_else(|| {
+                        if let BridgeBackend::AttachedHttp { snapshot, .. } = &bridge.backend {
+                            snapshot.lock().ok().and_then(|s| {
+                                s.harnesses
+                                    .iter()
+                                    .find(|h| h.id == id)
+                                    .map(|h| h.label.clone())
+                            })
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| id.clone());
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { action_tx, .. } => {
@@ -1503,14 +2204,7 @@ fn process_ui_actions(
             }
             UiAction::SetLang(code) => {
                 i18n.set_lang(&code);
-                if let BridgeBackend::AttachedHttp { action_tx, .. } = &bridge.backend {
-                    let _ = action_tx.try_send(RemoteActionCmd {
-                        path: "/api/prefs",
-                        body: json!({ "lang": code }),
-                        refresh: RefreshKind::None,
-                        launch_toast_label: None,
-                    });
-                }
+                persist_pref(&bridge, "lang", json!(code));
             }
             UiAction::DecidePermission { id, decision } => {
                 let Some(parsed) = parse_ui_perm_decision(&decision) else {
@@ -1530,7 +2224,12 @@ fn process_ui_actions(
                             office.resolve_hold(&id, parsed);
                         }
                     }
-                    BridgeBackend::BindError { .. } => {}
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast("Permission", "Server offline — cannot send decision");
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
                 }
                 ui.push_toast("Permission", format!("{id} -> {decision}"));
             }
@@ -1556,15 +2255,358 @@ fn process_ui_actions(
                     }
                 }
             }
-            UiAction::SetWeatherCity(_)
-            | UiAction::SetSound(_)
-            | UiAction::ToggleCameraFp
-            | UiAction::TriggerPhoto
-            | UiAction::ToggleDemo
-            | UiAction::ToggleReplay
-            | UiAction::SendPrompt { .. }
-            | UiAction::PostGroupChat(_)
-            | UiAction::SaveWhiteboard(_) => {}
+            UiAction::SetWeatherCity(city) => {
+                let trimmed = city.trim();
+                let (code, display) = station_3d::life::VN_WEATHER_CITIES
+                    .iter()
+                    .find(|(c, name, _, _)| {
+                        c.eq_ignore_ascii_case(trimmed) || name.eq_ignore_ascii_case(trimmed)
+                    })
+                    .map(|(c, name, _, _)| ((*c).to_owned(), (*name).to_owned()))
+                    .unwrap_or_else(|| (trimmed.to_owned(), trimmed.to_owned()));
+                ui.weather_city = display.clone();
+                if let Some(life) = aux.life.as_deref_mut() {
+                    life.weather_city = code.clone();
+                }
+                persist_pref(&bridge, "weatherCity", json!(code));
+                ui.push_toast("Weather", format!("City set to {display}"));
+            }
+            UiAction::SetSound(enabled) => {
+                ui.sound_on = enabled;
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.enabled = enabled;
+                    if enabled {
+                        sfx.play_sfx(SfxKind::Click);
+                    }
+                }
+                persist_pref(&bridge, "soundOn", json!(enabled));
+            }
+            UiAction::SetGpuPref(pref) => {
+                ui.gpu_pref = pref;
+                persist_pref(&bridge, "gpuPref", json!(pref.as_pref_str()));
+                ui.push_toast(
+                    "GPU Preference",
+                    format!("Saved {} (applies on next launch)", pref.label()),
+                );
+            }
+            UiAction::ToggleCameraFp => {
+                if let Some(rig) = aux.camera_rig.as_deref_mut() {
+                    rig.first_person = !rig.first_person;
+                    ui.first_person = rig.first_person;
+                    for mut proj in &mut aux.cam_q {
+                        if rig.first_person {
+                            *proj = Projection::Perspective(PerspectiveProjection {
+                                fov: 70.0_f32.to_radians(),
+                                near: 0.05,
+                                far: 240.0,
+                                ..default()
+                            });
+                        } else {
+                            *proj = Projection::Orthographic(OrthographicProjection {
+                                scaling_mode: ScalingMode::FixedVertical {
+                                    viewport_height: rig.viewport_height,
+                                },
+                                near: -80.0,
+                                far: 180.0,
+                                ..OrthographicProjection::default_3d()
+                            });
+                        }
+                    }
+                } else {
+                    ui.first_person = !ui.first_person;
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+            }
+            UiAction::TriggerPhoto => {
+                let shots_dir = bridge.data_dir.join("shots");
+                let _ = std::fs::create_dir_all(&shots_dir);
+                let fname = format!("shot-{}.png", now_ms());
+                let shot_path = shots_dir.join(&fname);
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Shutter);
+                }
+                if !aux.primary_win_q.is_empty() {
+                    commands
+                        .spawn(Screenshot::primary_window())
+                        .observe(save_to_disk(shot_path));
+                } else {
+                    let _ = save_photostrip_png(
+                        &shot_path,
+                        &ui,
+                        world_params.shared_fonts.as_deref_mut(),
+                        &bridge.assets_dir,
+                    );
+                }
+                ui.push_toast("Photo Booth", format!("Saved shots/{fname}"));
+            }
+            UiAction::ToggleDemo => {
+                ui.demo_running = !ui.demo_running;
+                if ui.demo_running {
+                    let demo = UiState::with_demo_seed(ui.layout, ui.backdrop, ui.night);
+                    ui.sessions = demo.sessions;
+                    ui.pending_perms = demo.pending_perms;
+                    ui.feed = demo.feed;
+                    ui.chat = demo.chat;
+                    ui.burn = demo.burn;
+                    ui.selected_session = demo.selected_session;
+                    if let Some(sfx) = aux.sfx.as_deref_mut() {
+                        sfx.play_sfx(SfxKind::Ding);
+                    }
+                    ui.push_toast("Demo Mode", "Office demo cast activated");
+                } else {
+                    ui.sessions.clear();
+                    ui.pending_perms.clear();
+                    ui.feed.clear();
+                    ui.selected_session = None;
+                    if let BridgeBackend::InProcess { app_state, .. } = &bridge.backend {
+                        sync_office_core_to_ui(app_state, &mut ui);
+                    } else if let BridgeBackend::AttachedHttp { snapshot, .. } = &bridge.backend {
+                        let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                        apply_remote_snapshot_to_ui(&snap, &mut ui);
+                    }
+                    ui.push_toast("Demo Mode", "Returned to live session state");
+                }
+            }
+            UiAction::ToggleReplay => {
+                ui.replay_playing = !ui.replay_playing;
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    if ui.replay_playing {
+                        if rep.events.is_empty() {
+                            let now = now_ms();
+                            let from = now.saturating_sub(86_400_000);
+                            let items = station_core::state::sessions::read_replay_range(
+                                &bridge.data_dir,
+                                from,
+                                now,
+                            );
+                            let events: Vec<station_3d::replay::ReplayEvent> = items
+                                .into_iter()
+                                .map(|it| station_3d::replay::ReplayEvent {
+                                    ts: it.t,
+                                    session_id: it
+                                        .m
+                                        .get("s")
+                                        .and_then(|s| s.get("id"))
+                                        .or_else(|| it.m.get("id"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    kind: it
+                                        .m
+                                        .get("k")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("ev")
+                                        .to_owned(),
+                                    summary: it
+                                        .m
+                                        .get("e")
+                                        .and_then(|e| e.get("label"))
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                })
+                                .collect();
+                            rep.load_events(events);
+                        }
+                        rep.active = true;
+                        rep.playing = true;
+                    } else {
+                        rep.playing = false;
+                        rep.active = false;
+                    }
+                }
+                let replay_msg = if ui.replay_playing {
+                    "Timeline replay playing"
+                } else {
+                    "Timeline replay stopped"
+                };
+                ui.push_toast("Replay", replay_msg);
+            }
+            UiAction::SendPrompt { session_id, text } => {
+                let clean: String = station_core::redact::redact(text.trim())
+                    .chars()
+                    .take(4000)
+                    .collect();
+                if clean.is_empty() {
+                    continue;
+                }
+                let fallback_agent = ui
+                    .sessions
+                    .iter()
+                    .find(|s| s.id == session_id)
+                    .map(|s| s.agent.clone())
+                    .unwrap_or_else(|| "claude".to_owned());
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/tasks",
+                            body: json!({
+                                "sid": session_id,
+                                "text": clean,
+                                "agent": fallback_agent,
+                            }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess {
+                        app_state,
+                        runtime_handle,
+                        ..
+                    } => {
+                        let ts = now_ms();
+                        let (cwd, agent, name, is_busy) = {
+                            let office = app_state.office.lock().unwrap_or_else(|e| e.into_inner());
+                            office
+                                .sessions
+                                .get(&session_id)
+                                .map(|s| {
+                                    (
+                                        s.cwd.clone(),
+                                        s.agent.clone(),
+                                        s.name.clone(),
+                                        s.status != "rest",
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    (
+                                        String::new(),
+                                        fallback_agent.clone(),
+                                        session_id.clone(),
+                                        true,
+                                    )
+                                })
+                        };
+                        if let Ok(mut q) = app_state.steer_queue.lock() {
+                            q.enqueue(
+                                station_core::state::steer::QueuedSteer {
+                                    key: session_id.clone(),
+                                    sid: Some(session_id.clone()),
+                                    dir: (!cwd.is_empty()).then_some(cwd.clone()),
+                                    agent: agent.clone(),
+                                    text: clean.clone(),
+                                    name,
+                                    at: ts,
+                                },
+                                ts,
+                            );
+                        }
+                        if !is_busy
+                            && !cwd.is_empty()
+                            && let Some(rt) = runtime_handle
+                        {
+                            let tasks = app_state.tasks.clone();
+                            let toast_tx = bridge.toast_tx.clone();
+                            let req = station_core::state::tasks::TaskStartRequest {
+                                dir: cwd,
+                                text: clean,
+                                agent: agent.clone(),
+                                model: String::new(),
+                                fork: false,
+                            };
+                            rt.spawn(async move {
+                                let res = station_core::state::tasks::start_and_spawn(
+                                    tasks, req, ts, None,
+                                );
+                                if res.get("ok").and_then(Value::as_bool) != Some(true) {
+                                    let code = res
+                                        .get("code")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("queued");
+                                    let _ = toast_tx
+                                        .try_send(("Prompt".to_owned(), format!("{agent}: {code}")));
+                                }
+                            });
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast("Prompt", "Server offline — prompt not sent");
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Pop);
+                }
+            }
+            UiAction::PostGroupChat(text) => {
+                let clean = station_core::redact::redact(text.trim());
+                if clean.is_empty() {
+                    continue;
+                }
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "send", "text": clean }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            let ts = now_ms();
+                            let msg = office.chat.send_rich(
+                                "me", "Boss", &clean, ts, false, None, None, None,
+                            );
+                            let _ = office.save_chat();
+                            office.broadcast(json!({ "k": "chat", "op": "send", "m": msg }));
+                            sync_office_chat_to_ui(&office, &mut ui);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast("Group Chat", "Server offline — message not persisted");
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Chat);
+                }
+            }
+            UiAction::SaveWhiteboard(text) => {
+                let todos = parse_whiteboard_todos(&text);
+                let _ = station_core::atomic::write_json_atomic(
+                    &bridge.data_dir.join("whiteboard.json"),
+                    &json!({ "text": text, "todos": todos }),
+                );
+                match &bridge.backend {
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.todos = todos;
+                        }
+                    }
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/todos",
+                            body: json!({ "todos": todos }),
+                            refresh: RefreshKind::None,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast("Whiteboard", "Saved locally to whiteboard.json");
+                    }
+                }
+                if let (Some(mats), Some(imgs), Some(shared_fonts)) = (
+                    world_params.materials.as_deref_mut(),
+                    world_params.images.as_deref_mut(),
+                    world_params.shared_fonts.as_deref_mut(),
+                ) {
+                    let fonts = shared_fonts.get_or_init();
+                    for wb_mat in &aux.wb_q {
+                        station_3d::furniture::redraw_whiteboard_surface(
+                            &text,
+                            ui.streamer_mode,
+                            &wb_mat.0,
+                            mats,
+                            imgs,
+                            fonts,
+                        );
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Rustle);
+                }
+            }
         }
     }
 
@@ -1734,7 +2776,11 @@ mod tests {
 
     #[test]
     fn attached_snapshot_clears_resolved_perms_and_ended_sessions_when_empty() {
-        let mut ui = UiState::default();
+        let mut ui = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
         assert!(!ui.sessions.is_empty());
         assert!(!ui.pending_perms.is_empty());
 
@@ -1744,10 +2790,12 @@ mod tests {
                 id: "s-1".to_owned(),
                 agent: "claude".to_owned(),
                 project: "proj".to_owned(),
-                status: "working".to_owned(),
+                status: "work".to_owned(),
                 model: "opus".to_owned(),
                 last_prompt: "hi".to_owned(),
                 tool: None,
+                tool_kind: None,
+                desk: 0,
                 cost_usd: 0.0,
                 tokens: 0,
                 pinned: false,
@@ -1760,8 +2808,7 @@ mod tests {
                 summary: "echo hi".to_owned(),
                 kind: "permission".to_owned(),
             }],
-            feed: Vec::new(),
-            harnesses: Vec::new(),
+            ..RemoteSnapshot::default()
         };
         apply_remote_snapshot_to_ui(&populated, &mut ui);
         assert_eq!(ui.sessions.len(), 1);
@@ -1769,14 +2816,12 @@ mod tests {
 
         let cleared = RemoteSnapshot {
             has_snapshot: true,
-            sessions: Vec::new(),
-            pending_perms: Vec::new(),
-            feed: Vec::new(),
-            harnesses: Vec::new(),
+            ..RemoteSnapshot::default()
         };
         apply_remote_snapshot_to_ui(&cleared, &mut ui);
         assert!(ui.sessions.is_empty(), "ended sessions must clear from UI");
         assert!(ui.pending_perms.is_empty(), "resolved perms must clear from UI");
+        assert!(ui.feed.is_empty(), "empty feed must clear from UI");
     }
 
     #[test]
@@ -2597,9 +3642,12 @@ mod tests {
                 action_tx,
                 _shutdown: shutdown,
             },
+            data_dir: PathBuf::from("data"),
             assets_dir: PathBuf::from("assets"),
             port: 4310,
             sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+            sys_synced_once: false,
             banner_pushed: true,
             seen_perm_ids: HashSet::new(),
             last_window_focused: None,
@@ -2949,5 +3997,275 @@ mod tests {
         drop(app);
         let _ = handle.shutdown.send(true);
         drop(rt);
+    }
+
+    #[test]
+    fn in_process_clearing_last_session_and_perm_clears_ui_and_despawns_3d_workers() {
+        use bevy::input::mouse::{MouseMotion, MouseWheel};
+        use station_3d::{BackdropKind, OfficeLayout};
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs(2));
+        app.insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(time)
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .add_event::<MouseMotion>()
+            .add_event::<MouseWheel>()
+            .add_event::<AppExit>()
+            .add_plugins(station_3d::OfficeWorldPlugin {
+                layout: OfficeLayout::Pro,
+                backdrop: BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            })
+            .insert_resource(UiState::new_live(
+                OfficeLayout::Pro,
+                BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_systems(
+                Update,
+                (sync_live_state_to_ui, sync_live_sessions_to_3d).chain(),
+            );
+
+        // Initial tick with 0 live sessions -> 0 UI sessions, 0 3D LiveSessionWorkers, valid PIN & HH:MM clock.
+        app.update();
+        {
+            let ui = app.world().resource::<UiState>();
+            assert!(ui.sessions.is_empty());
+            assert!(ui.pending_perms.is_empty());
+            assert!(!ui.pairing_pin.is_empty());
+            assert_eq!(ui.clock_label.len(), 5);
+            assert_eq!(&ui.clock_label[2..3], ":");
+        }
+        assert_eq!(
+            app.world_mut()
+                .query::<&station_3d::people::LiveSessionWorker>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+
+        // Ingest 1 active working session + 1 pending perm -> UI and 3D reflect both.
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        {
+            let mut office = state.office.lock().unwrap();
+            office.ingest_raw_event(json!({
+                "session_id": "sess-live-clear",
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": "D:/repo/app",
+                "prompt": "build task 6"
+            }));
+            office.register_hold(
+                PendingPerm {
+                    id: "perm-clear-1".to_owned(),
+                    sess: "sess-live-clear".to_owned(),
+                    name: "app".to_owned(),
+                    kind: "permission".to_owned(),
+                    tool_type: "Bash".to_owned(),
+                    label: "cargo test".to_owned(),
+                    detail: "cargo test".to_owned(),
+                    danger: None,
+                    created_at: 1,
+                },
+                tx,
+            );
+        }
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(2));
+        app.update();
+        assert_eq!(app.world().resource::<UiState>().sessions.len(), 1);
+        assert_eq!(app.world().resource::<UiState>().pending_perms.len(), 1);
+        assert_eq!(
+            app.world_mut()
+                .query::<&station_3d::people::LiveSessionWorker>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+
+        // Resolve perm and end session -> BOTH UI and 3D must clear cleanly to 0.
+        {
+            let mut office = state.office.lock().unwrap();
+            office.resolve_hold("perm-clear-1", PermDecision::Allow);
+            office.ingest_raw_event(json!({
+                "session_id": "sess-live-clear",
+                "hook_event_name": "SessionEnd"
+            }));
+        }
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(2));
+        app.update();
+        assert!(
+            app.world().resource::<UiState>().sessions.is_empty(),
+            "ending last session must clear UiState.sessions"
+        );
+        assert!(
+            app.world().resource::<UiState>().pending_perms.is_empty(),
+            "resolving last perm must clear UiState.pending_perms"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&station_3d::people::LiveSessionWorker>()
+                .iter(app.world())
+                .count(),
+            0,
+            "ending last session must despawn dynamic 3D workers cleanly"
+        );
+    }
+
+    #[test]
+    fn all_remaining_ui_actions_execute_real_behavior_with_zero_noop_stubs() {
+        use bevy::input::mouse::{MouseMotion, MouseWheel};
+        use station_3d::{BackdropKind, OfficeLayout};
+        use station_ui::state::GpuPrefUi;
+
+        // 1. Structural guard: zero `=> {}` arms on UiAction inside process_ui_actions.
+        let src = include_str!("bridge.rs");
+        let start = src.find("fn process_ui_actions(").expect("process_ui_actions present");
+        let end = src[start..].find("#[cfg(test)]").map(|o| start + o).unwrap_or(src.len());
+        let body = &src[start..end];
+        let match_start = body.find("match action {").expect("match action present");
+        let match_end = body[match_start..]
+            .find("// Execute at most ONE world transition")
+            .map(|o| match_start + o)
+            .unwrap_or(body.len());
+        let match_body = &body[match_start..match_end];
+        assert!(
+            !match_body.contains("=> {}"),
+            "process_ui_actions must have ZERO `=> {{}}` no-op UiAction stubs"
+        );
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let bridge = LiveServerBridge::connect_or_start(
+            data_dir.clone(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+
+        let mut app = App::new();
+        app.insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .add_event::<MouseMotion>()
+            .add_event::<MouseWheel>()
+            .add_event::<AppExit>()
+            .add_plugins(station_3d::OfficeWorldPlugin {
+                layout: OfficeLayout::Pro,
+                backdrop: BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            })
+            .insert_resource(UiState::new_live(
+                OfficeLayout::Pro,
+                BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_systems(Update, process_ui_actions);
+
+        app.update();
+
+        // Queue every remaining UiAction variant and verify real state/disk mutations.
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::SetWeatherCity("hn".to_owned()));
+            ui.push_action(UiAction::SetSound(false));
+            ui.push_action(UiAction::ToggleCameraFp);
+            ui.push_action(UiAction::TriggerPhoto);
+            ui.push_action(UiAction::ToggleDemo);
+            ui.push_action(UiAction::ToggleReplay);
+            ui.push_action(UiAction::PostGroupChat("Hello live team!".to_owned()));
+            ui.push_action(UiAction::SaveWhiteboard("- Ship Task 6\n- Verify tests".to_owned()));
+            ui.push_action(UiAction::SetGpuPref(GpuPrefUi::Integrated));
+            ui.push_action(UiAction::SendPrompt {
+                session_id: "sess-prompt-1".to_owned(),
+                text: "Run cargo test".to_owned(),
+            });
+        }
+        app.update();
+
+        assert_eq!(app.world().resource::<station_3d::life::OfficeLifeState>().weather_city, "hn");
+        assert!(!app.world().resource::<station_3d::audio::SfxEngine>().enabled);
+        assert!(app.world().resource::<station_3d::camera::CameraRig>().first_person);
+        assert!(app.world().resource::<UiState>().first_person);
+        assert!(app.world().resource::<UiState>().demo_running);
+        assert!(!app.world().resource::<UiState>().sessions.is_empty());
+        assert!(app.world().resource::<station_3d::replay::ReplayState>().playing);
+
+        let shots_dir = data_dir.join("shots");
+        let shot_count = std::fs::read_dir(&shots_dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert!(shot_count >= 1, "TriggerPhoto must save a real PNG to data/shots/");
+
+        {
+            let office = state.office.lock().unwrap();
+            assert!(
+                office.chat.msgs.iter().any(|m| m.text.contains("Hello live team!")),
+                "PostGroupChat must persist message into OfficeState.chat"
+            );
+            assert_eq!(office.todos.len(), 2, "SaveWhiteboard must update OfficeState.todos");
+        }
+        assert!(
+            data_dir.join("whiteboard.json").is_file(),
+            "SaveWhiteboard must persist whiteboard.json"
+        );
+        let prefs = station_core::prefs::PrefsStore::load(&data_dir);
+        assert_eq!(
+            prefs.get("gpuPref").and_then(Value::as_str),
+            Some("integrated"),
+            "SetGpuPref must persist gpuPref in prefs.json"
+        );
+        assert_eq!(
+            prefs.get("weatherCity").and_then(Value::as_str),
+            Some("hn"),
+            "SetWeatherCity must persist weatherCity in prefs.json"
+        );
+        assert_eq!(
+            prefs.get("soundOn").and_then(Value::as_bool),
+            Some(false),
+            "SetSound must persist soundOn in prefs.json"
+        );
+        assert!(
+            state.steer_queue.lock().unwrap().len() >= 1,
+            "SendPrompt must route through steer_queue/TaskManager"
+        );
     }
 }
