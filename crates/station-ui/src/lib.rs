@@ -59,6 +59,10 @@ impl Plugin for StationUiPlugin {
             .insert_resource(i18n)
             .insert_resource(self.initial_state.clone())
             .init_resource::<station_3d::UiInputCapture>()
+            .configure_sets(
+                PostUpdate,
+                station_3d::CameraControlSet.after(bevy_egui::EguiPostUpdateSet::EndPass),
+            )
             .add_systems(Update, tick_ui_timers)
             .add_systems(EguiContextPass, render_primary_station_ui)
             .add_systems(CaptureUiPass, render_capture_station_ui);
@@ -260,4 +264,72 @@ fn render_capture_smoke_hud(
 
 pub fn ui_ready() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
+    use bevy_egui::EguiPostUpdateSet;
+    use std::time::Duration;
+
+    #[test]
+    fn same_frame_egui_input_capture_blocks_camera_control_without_one_frame_lag() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .add_event::<MouseMotion>()
+            .add_event::<MouseWheel>()
+            .add_plugins(station_3d::OfficeWorldRuntimePlugin {
+                assets_dir: assets_dir.clone(),
+            })
+            .add_plugins(StationUiPlugin {
+                assets_dir,
+                initial_state: UiState::default(),
+                initial_lang: "en".to_owned(),
+            });
+
+        // Simulate egui setting UiInputCapture during PostUpdate::EguiPostUpdateSet::EndPass
+        // on the EXACT same frame that KeyF + MouseWheel arrive.
+        app.add_systems(
+            PostUpdate,
+            (|mut cap: ResMut<station_3d::UiInputCapture>| {
+                cap.wants_keyboard = true;
+                cap.wants_pointer = true;
+            })
+            .in_set(EguiPostUpdateSet::EndPass),
+        );
+
+        let spec = station_3d::LayoutSpec::for_layout(station_3d::OfficeLayout::Pro);
+        let mut cmds = app.world_mut().commands();
+        station_3d::camera::spawn_office_camera(&mut cmds, &spec);
+        app.world_mut().flush();
+
+        let before = app.world().resource::<station_3d::camera::CameraRig>().clone();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyF);
+        app.world_mut().send_event(MouseWheel {
+            unit: MouseScrollUnit::Line,
+            x: 0.0,
+            y: 5.0,
+            window: Entity::PLACEHOLDER,
+        });
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(16));
+        app.update();
+
+        let after = app.world().resource::<station_3d::camera::CameraRig>().clone();
+        assert_eq!(
+            after.first_person, before.first_person,
+            "KeyF must be blocked on the exact same frame EguiPostUpdateSet::EndPass sets wants_keyboard"
+        );
+        assert_eq!(
+            after.viewport_height, before.viewport_height,
+            "MouseWheel must be blocked on the exact same frame EguiPostUpdateSet::EndPass sets wants_pointer"
+        );
+    }
 }
