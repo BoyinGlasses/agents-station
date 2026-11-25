@@ -414,6 +414,64 @@ impl ChatEngine {
         self.msgs.iter().find(|m| m.id == id)
     }
 
+    pub fn reply_ref(&self, id: &str) -> Option<ChatReplyRef> {
+        let m = self.msgs.iter().find(|m| m.id == id && !m.recalled)?;
+        Some(ChatReplyRef {
+            id: m.id.clone(),
+            name: m.name.clone().unwrap_or_default(),
+            text: short(&m.text, 90),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_rich(
+        &mut self,
+        from: &str,
+        name: &str,
+        text: &str,
+        now_ms: u64,
+        long: bool,
+        sticker: Option<u32>,
+        photo: Option<String>,
+        reply: Option<ChatReplyRef>,
+    ) -> ChatMessage {
+        let id = self.next_id(now_ms);
+        let key = staff_key(from).unwrap_or(from).to_owned();
+        let limit = if long { 4000 } else { 600 };
+        let clipped: String = text.chars().take(limit).collect();
+        let kind = if photo.is_some() && clipped.is_empty() {
+            "photo"
+        } else if sticker.is_some() && clipped.is_empty() {
+            "sticker"
+        } else {
+            "text"
+        };
+        self.add_msg(ChatMessage {
+            id,
+            at: now_ms,
+            kind: kind.to_owned(),
+            from: Some(key),
+            name: Some(name.to_owned()),
+            text: clipped,
+            reacts: BTreeMap::new(),
+            sticker,
+            photo,
+            poll: None,
+            remind: None,
+            reply,
+            work: None,
+            r#loop: None,
+            ci: None,
+            deny: None,
+            tag: None,
+            recalled: false,
+        })
+    }
+
+    pub fn photo(&mut self, from: &str, name: &str, data_url: String, now_ms: u64) -> ChatMessage {
+        self.send_rich(from, name, "", now_ms, false, None, Some(data_url), None)
+    }
+
     pub fn react(&mut self, id: &str, by: &str, emoji: &str) -> bool {
         if !REACTIONS.contains(&emoji) {
             return false;
