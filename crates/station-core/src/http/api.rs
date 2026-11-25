@@ -684,9 +684,30 @@ pub async fn post_perm(
         state.allowed_tunnel_host().as_deref(),
         via_tunnel,
     )?;
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if !local {
+        let phone_approve = state
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("phoneApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !phone_approve {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
     let id = body.get("id").and_then(Value::as_str).unwrap_or("");
-    let removed = state.office.lock().expect("office").pending_perms.remove(id).is_some();
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    if !local
+        && office
+            .pending_perms
+            .get(id)
+            .is_some_and(|p| p.danger.is_some())
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let removed = office.pending_perms.remove(id).is_some();
     Ok(Json(json!({ "ok": removed })))
 }
 
@@ -981,5 +1002,139 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(good_req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn post_perm_remote_requires_phone_approve_and_blocks_dangerous_items() {
+        use crate::auth::COOKIE_NAME;
+        use crate::http::guard::ViaTunnel;
+        use crate::state::sessions::PendingPerm;
+        use axum::extract::ConnectInfo;
+        use serde_json::{Value, json};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let cookie = format!("{COOKIE_NAME}={}", state.auth.sign_cookie(false));
+
+        let mk_perm = |id: &str, danger: Option<&str>| PendingPerm {
+            id: id.to_owned(),
+            sess: "s1".to_owned(),
+            name: "proj".to_owned(),
+            kind: "perm".to_owned(),
+            tool_type: "bash".to_owned(),
+            label: "cmd".to_owned(),
+            detail: "detail".to_owned(),
+            danger: danger.map(str::to_owned),
+            created_at: 1,
+        };
+        {
+            let mut office = state.office.lock().unwrap();
+            office.pending_perms.insert("safe1".into(), mk_perm("safe1", None));
+            office.pending_perms.insert("danger1".into(), mk_perm("danger1", Some("rm_rf")));
+        }
+
+        let app = build_router(state.clone());
+        let lan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 52000);
+        let loopback_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52001);
+
+        // 1. Non-loopback with phoneApprove unset -> 403 and perm preserved
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id": "safe1"}).to_string()))
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(lan_peer));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(state.office.lock().unwrap().pending_perms.contains_key("safe1"));
+
+        // 2. ViaTunnel(true) even from loopback IP with phoneApprove unset -> 403
+        let mut tunnel_req = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "127.0.0.1:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id": "safe1"}).to_string()))
+            .unwrap();
+        tunnel_req.extensions_mut().insert(ConnectInfo(loopback_peer));
+        tunnel_req.extensions_mut().insert(ViaTunnel(true));
+        let resp = app.clone().oneshot(tunnel_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(state.office.lock().unwrap().pending_perms.contains_key("safe1"));
+
+        // Enable phoneApprove = true
+        state
+            .prefs
+            .lock()
+            .unwrap()
+            .set("phoneApprove", Some(Value::Bool(true)))
+            .unwrap();
+
+        // 3. Non-loopback with phoneApprove=true STILL rejects danger.is_some() -> 403
+        let mut danger_req = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id": "danger1"}).to_string()))
+            .unwrap();
+        danger_req.extensions_mut().insert(ConnectInfo(lan_peer));
+        let resp = app.clone().oneshot(danger_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(state.office.lock().unwrap().pending_perms.contains_key("danger1"));
+
+        // 4. ViaTunnel(true) with phoneApprove=true STILL rejects danger.is_some() -> 403
+        let mut danger_tunnel = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "127.0.0.1:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id": "danger1"}).to_string()))
+            .unwrap();
+        danger_tunnel.extensions_mut().insert(ConnectInfo(loopback_peer));
+        danger_tunnel.extensions_mut().insert(ViaTunnel(true));
+        let resp = app.clone().oneshot(danger_tunnel).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(state.office.lock().unwrap().pending_perms.contains_key("danger1"));
+
+        // 5. Non-loopback with phoneApprove=true allows safe perm -> 200 and removes it
+        let mut ok_remote = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id": "safe1"}).to_string()))
+            .unwrap();
+        ok_remote.extensions_mut().insert(ConnectInfo(lan_peer));
+        let resp = app.clone().oneshot(ok_remote).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!state.office.lock().unwrap().pending_perms.contains_key("safe1"));
+
+        // 6. Loopback (non-tunnel) allows dangerous perm even when phoneApprove=false
+        state
+            .prefs
+            .lock()
+            .unwrap()
+            .set("phoneApprove", Some(Value::Bool(false)))
+            .unwrap();
+        let mut ok_local = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"id": "danger1"}).to_string()))
+            .unwrap();
+        ok_local.extensions_mut().insert(ConnectInfo(loopback_peer));
+        let resp = app.oneshot(ok_local).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!state.office.lock().unwrap().pending_perms.contains_key("danger1"));
     }
 }
