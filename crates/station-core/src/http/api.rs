@@ -635,9 +635,12 @@ pub async fn post_pin_update(
     require_local_post(peer, via_tunnel, &headers)?;
     let pin = body.get("pin").and_then(Value::as_str).unwrap_or("");
     let valid = !crate::auth::pin_weak(pin);
-    let ip = peer
-        .map(|a| a.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let ip = if via_tunnel {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        peer.map(|a| a.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    };
     {
         let mut limiter = state
             .pin_limiter

@@ -126,9 +126,12 @@ pub async fn post_pin(
     let keep = body.get("keep").and_then(Value::as_bool).unwrap_or(true);
     let expected = state.auth.current_pin();
     let matched = constant_time_eq(pin, &expected);
-    let ip = peer
-        .map(|a| a.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let ip = if via_tunnel {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        peer.map(|a| a.ip())
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    };
     {
         let mut limiter = state
             .pin_limiter
@@ -409,5 +412,111 @@ mod tests {
         assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
         assert!(html.contains("&lt;script&gt;alert(2)&lt;/script&gt;"));
         assert!(html.contains("textContent"));
+    }
+
+    #[tokio::test]
+    async fn tunnel_pin_failures_do_not_collide_with_local_loopback_bucket() {
+        use crate::http::guard::ViaTunnel;
+
+        // 1. 5 bad tunnel PIN attempts lock out the tunnel without locking out local 127.0.0.1,
+        //    and a local valid PIN must not clear the tunnel's lockout bucket.
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        state.auth.set_pin("492817").unwrap();
+        let app = build_router(state.clone());
+        let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52010);
+
+        for i in 0..5 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/pin")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"pin": "000000"}).to_string()))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(loopback));
+            req.extensions_mut().insert(ViaTunnel(true));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "tunnel attempt {}", i + 1);
+        }
+
+        let mut tunnel_6th = Request::builder()
+            .method("POST")
+            .uri("/pin")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"pin": "492817"}).to_string()))
+            .unwrap();
+        tunnel_6th.extensions_mut().insert(ConnectInfo(loopback));
+        tunnel_6th.extensions_mut().insert(ViaTunnel(true));
+        let resp = app.clone().oneshot(tunnel_6th).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // Local 127.0.0.1 POST /api/pin is NOT locked out by tunnel failures
+        let mut local_ok = Request::builder()
+            .method("POST")
+            .uri("/api/pin")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"pin": "839204"}).to_string()))
+            .unwrap();
+        local_ok.extensions_mut().insert(ConnectInfo(loopback));
+        let resp = app.clone().oneshot(local_ok).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Tunnel remains locked out even after local valid PIN succeeded
+        let mut tunnel_still_locked = Request::builder()
+            .method("POST")
+            .uri("/pin")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"pin": "839204"}).to_string()))
+            .unwrap();
+        tunnel_still_locked.extensions_mut().insert(ConnectInfo(loopback));
+        tunnel_still_locked.extensions_mut().insert(ViaTunnel(true));
+        let resp = app.oneshot(tunnel_still_locked).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // 2. Vice versa: 5 bad local 127.0.0.1 attempts lock out local without locking out tunnel
+        let dir2 = tempfile::tempdir().unwrap();
+        let state2 = Arc::new(AppState::new(dir2.path().to_path_buf(), None).unwrap());
+        state2.auth.set_pin("492817").unwrap();
+        let app2 = build_router(state2);
+
+        for i in 0..5 {
+            let mut req = Request::builder()
+                .method("POST")
+                .uri("/api/pin")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"pin": "123456"}).to_string()))
+                .unwrap();
+            req.extensions_mut().insert(ConnectInfo(loopback));
+            let resp = app2.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "local attempt {}", i + 1);
+        }
+
+        let mut local_6th = Request::builder()
+            .method("POST")
+            .uri("/api/pin")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"pin": "839204"}).to_string()))
+            .unwrap();
+        local_6th.extensions_mut().insert(ConnectInfo(loopback));
+        let resp = app2.clone().oneshot(local_6th).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let mut tunnel_ok = Request::builder()
+            .method("POST")
+            .uri("/pin")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"pin": "492817"}).to_string()))
+            .unwrap();
+        tunnel_ok.extensions_mut().insert(ConnectInfo(loopback));
+        tunnel_ok.extensions_mut().insert(ViaTunnel(true));
+        let resp = app2.oneshot(tunnel_ok).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
