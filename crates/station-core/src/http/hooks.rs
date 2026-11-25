@@ -24,18 +24,18 @@ pub async fn post_event(
     let today = day_key(ts);
 
     let ev_opt = {
-        let mut office = state.office.lock().expect("office lock poisoned");
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
         office.ingest_raw_event(body)
     };
 
     if let Some(ev) = ev_opt {
-        let mut trophies = state.trophies.lock().expect("trophies lock poisoned");
+        let mut trophies = state.trophies.lock().unwrap_or_else(|e| e.into_inner());
         trophies.session(&ev.session_id, &today, ts);
         match ev.hook_event_name.as_str() {
             "UserPromptSubmit" => {
                 trophies.bump("prompts", 1, &today, ts);
                 if let Some(prompt) = &ev.prompt {
-                    let mut vault = state.vault.lock().expect("vault lock poisoned");
+                    let mut vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
                     let cwd = ev.cwd.as_deref().unwrap_or("");
                     let title = Path::new(cwd)
                         .file_name()
@@ -60,7 +60,7 @@ pub async fn post_event(
                 if let Some(cwd) = &ev.cwd
                     && let Some(name) = Path::new(cwd).file_name().and_then(|n| n.to_str())
                 {
-                    let mut tenure = state.tenure.lock().expect("tenure lock poisoned");
+                    let mut tenure = state.tenure.lock().unwrap_or_else(|e| e.into_inner());
                     tenure.touch(name, ts, true);
                 }
             }
@@ -81,7 +81,7 @@ pub async fn post_hook_loop(
 ) -> Result<Json<Value>, StatusCode> {
     enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let ts = now_ms();
-    let mut office = state.office.lock().expect("office lock poisoned");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(sid) = body.get("session_id").and_then(Value::as_str) {
         let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
@@ -145,7 +145,7 @@ pub async fn post_hook_status(
     let ts = now_ms();
     let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
     if !sid.is_empty() {
-        let mut office = state.office.lock().expect("office lock poisoned");
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
         let ctx_tokens = body
             .get("context_window")
             .and_then(|c| c.get("total_input_tokens"))
@@ -190,7 +190,7 @@ pub async fn post_hook_bind(
         .unwrap_or("");
     let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
     if !job.is_empty() {
-        let mut tasks = state.tasks.lock().expect("tasks lock poisoned");
+        let mut tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
         tasks.bind(job, sid, inbox);
     }
     Ok(Json(json!({ "ok": true })))
@@ -205,7 +205,7 @@ pub async fn post_hook_start(
 ) -> Result<Json<Value>, StatusCode> {
     enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
-    let office = state.office.lock().expect("office lock poisoned");
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(list) = office.pins.get(sid)
         && !list.is_empty()
     {
@@ -231,7 +231,7 @@ pub async fn post_hook_permission(
         obj.entry("hook_event_name")
             .or_insert_with(|| Value::String("PermissionRequest".to_owned()));
     }
-    let mut office = state.office.lock().expect("office lock poisoned");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     office.ingest_raw_event(body);
     // Non-blocking fast return when no interactive hold is active so Claude Code falls back safely.
     Ok(Json(json!({})))
@@ -245,7 +245,7 @@ pub async fn post_hook_question(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     enforce_hook_loopback(peer, via_tunnel, &headers)?;
-    let mut office = state.office.lock().expect("office lock poisoned");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     office.ingest_raw_event(body);
     Ok(Json(json!({})))
 }

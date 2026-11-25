@@ -107,7 +107,7 @@ impl AppState {
     pub fn allowed_tunnel_host(&self) -> Option<String> {
         self.prefs
             .lock()
-            .expect("prefs")
+            .unwrap_or_else(|e| e.into_inner())
             .get("tunnelDomain")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -117,12 +117,12 @@ impl AppState {
 
     pub fn flush_all(&self) -> Result<()> {
         let now = now_ms();
-        self.prefs.lock().expect("prefs").save()?;
-        self.office.lock().expect("office").flush_all()?;
-        self.otel.lock().expect("otel").flush(now)?;
-        self.trophies.lock().expect("trophies").flush()?;
-        self.vault.lock().expect("vault").flush()?;
-        self.tenure.lock().expect("tenure").save()?;
+        self.prefs.lock().unwrap_or_else(|e| e.into_inner()).save()?;
+        self.office.lock().unwrap_or_else(|e| e.into_inner()).flush_all()?;
+        self.otel.lock().unwrap_or_else(|e| e.into_inner()).flush(now)?;
+        self.trophies.lock().unwrap_or_else(|e| e.into_inner()).flush()?;
+        self.vault.lock().unwrap_or_else(|e| e.into_inner()).flush()?;
+        self.tenure.lock().unwrap_or_else(|e| e.into_inner()).save()?;
         Ok(())
     }
 }

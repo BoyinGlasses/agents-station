@@ -54,11 +54,11 @@ pub async fn get_live(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let lang = state.prefs.lock().expect("prefs").lang();
-    let office = state.office.lock().expect("office");
+    let lang = state.prefs.lock().unwrap_or_else(|e| e.into_inner()).lang();
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     let mut snap = office.snapshot_json(local, lang);
     if let Some(obj) = snap.as_object_mut() {
-        obj.insert("trophies".to_owned(), state.trophies.lock().expect("trophies").pub_view());
+        obj.insert("trophies".to_owned(), state.trophies.lock().unwrap_or_else(|e| e.into_inner()).pub_view());
         obj.insert("lift".to_owned(), json!(state.lift.pub_view(now_ms())));
         if local {
             obj.insert("pin".to_owned(), Value::String(state.auth.current_pin()));
@@ -79,8 +79,8 @@ pub async fn get_doctor(
         "ok": true,
         "platform": state.sys.platform().name(),
         "dataDir": state.data_dir,
-        "otel": state.otel.lock().expect("otel").info(),
-        "sessions": state.office.lock().expect("office").sessions.len(),
+        "otel": state.otel.lock().unwrap_or_else(|e| e.into_inner()).info(),
+        "sessions": state.office.lock().unwrap_or_else(|e| e.into_inner()).sessions.len(),
     })))
 }
 
@@ -92,7 +92,7 @@ pub async fn get_log(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let office = state.office.lock().expect("office");
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "feed": office.feed })))
 }
 
@@ -201,7 +201,7 @@ pub async fn get_pins(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let office = state.office.lock().expect("office");
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "pins": office.pins })))
 }
 
@@ -214,7 +214,7 @@ pub async fn post_pins(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let sid = body.get("sid").and_then(Value::as_str).unwrap_or("");
-    let mut office = state.office.lock().expect("office");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(idx) = body.get("remove").and_then(Value::as_u64) {
         let ok = office.remove_pin(sid, idx as usize).unwrap_or(false);
         return Ok(Json(json!({ "ok": ok, "pins": office.pins })));
@@ -233,7 +233,7 @@ pub async fn get_vault(
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let query = q.get("q").map(String::as_str).unwrap_or("");
-    let vault = state.vault.lock().expect("vault");
+    let vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "items": vault.search(query, 50) })))
 }
 
@@ -246,7 +246,7 @@ pub async fn get_vault_report(
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let since = now_ms().saturating_sub(7 * 86_400_000);
-    let prompts = state.vault.lock().expect("vault").recent_prompts(since);
+    let prompts = state.vault.lock().unwrap_or_else(|e| e.into_inner()).recent_prompts(since);
     Ok(Json(json!(build_prompt_report(&prompts, 3))))
 }
 
@@ -259,7 +259,7 @@ pub async fn get_undo(
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let sid = q.get("sid").map(String::as_str).unwrap_or("");
-    let office = state.office.lock().expect("office");
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "plan": office.undo.plan(sid) })))
 }
 
@@ -272,7 +272,7 @@ pub async fn post_undo(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let sid = body.get("sid").and_then(Value::as_str).unwrap_or("");
-    let mut office = state.office.lock().expect("office");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     let res = office.undo.apply(sid, now_ms());
     Ok(Json(json!({ "ok": true, "result": res })))
 }
@@ -286,7 +286,7 @@ pub async fn get_burn(
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let range = q.get("range").map(String::as_str).unwrap_or("today");
-    let summary = state.otel.lock().expect("otel").burn_summary(range, now_ms());
+    let summary = state.otel.lock().unwrap_or_else(|e| e.into_inner()).burn_summary(range, now_ms());
     Ok(Json(json!(summary)))
 }
 
@@ -324,7 +324,7 @@ pub async fn post_sys_auto(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let hours = body.get("hours").and_then(Value::as_u64).unwrap_or(0) as u8;
-    let ok = state.prefs.lock().expect("prefs").set_auto_close(hours).unwrap_or(false);
+    let ok = state.prefs.lock().unwrap_or_else(|e| e.into_inner()).set_auto_close(hours).unwrap_or(false);
     Ok(Json(json!({ "ok": ok, "hours": hours })))
 }
 
@@ -336,7 +336,7 @@ pub async fn get_panel(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let mut office = state.office.lock().expect("office");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     office.bar_last_seen_ms = now_ms();
     Ok(Json(json!({
         "ok": true,
@@ -353,7 +353,7 @@ pub async fn get_chat(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let office = state.office.lock().expect("office");
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({
         "ok": true,
         "msgs": office.chat.msgs,
@@ -377,7 +377,7 @@ pub async fn post_chat(
     )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let ts = now_ms();
-    let mut office = state.office.lock().expect("office");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     let op = body.get("op").and_then(Value::as_str).unwrap_or("send");
     match op {
         "react" => {
@@ -424,7 +424,7 @@ pub async fn get_loop(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let cfg = state.office.lock().expect("office").loops.config();
+    let cfg = state.office.lock().unwrap_or_else(|e| e.into_inner()).loops.config();
     Ok(Json(json!({ "ok": true, "config": cfg })))
 }
 
@@ -436,7 +436,7 @@ pub async fn post_loop(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let mut office = state.office.lock().expect("office");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(sid) = body.get("stop").and_then(Value::as_str) {
         let ok = office.loops.stop(sid, now_ms());
         return Ok(Json(json!({ "ok": ok })));
@@ -469,12 +469,12 @@ pub async fn get_tenure(
     let live: HashSet<String> = state
         .office
         .lock()
-        .expect("office")
+        .unwrap_or_else(|e| e.into_inner())
         .sessions
         .values()
         .map(|s| s.name.clone())
         .collect();
-    let list = state.tenure.lock().expect("tenure").list(30, now_ms(), &live);
+    let list = state.tenure.lock().unwrap_or_else(|e| e.into_inner()).list(30, now_ms(), &live);
     Ok(Json(json!({ "ok": true, "items": list })))
 }
 
@@ -488,7 +488,7 @@ pub async fn post_tenure(
     require_local_post(peer, via_tunnel, &headers)?;
     let name = body.get("name").and_then(Value::as_str).unwrap_or("");
     let op = body.get("op").and_then(Value::as_str).unwrap_or("");
-    let mut tenure = state.tenure.lock().expect("tenure");
+    let mut tenure = state.tenure.lock().unwrap_or_else(|e| e.into_inner());
     let ok = match op {
         "official" => tenure.mark_official(name, now_ms()),
         "farewell" => tenure.mark_farewell(name, 30, now_ms(), false),
@@ -505,7 +505,7 @@ pub async fn get_tasks(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let tasks = state.tasks.lock().expect("tasks");
+    let tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "tasks": tasks.list() })))
 }
 
@@ -524,7 +524,7 @@ pub async fn post_tasks(
         model: body.get("model").and_then(Value::as_str).unwrap_or("").to_owned(),
         fork: body.get("fork").and_then(Value::as_bool).unwrap_or(false),
     };
-    let mut tasks = state.tasks.lock().expect("tasks");
+    let mut tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(tasks.validate_and_register(req, now_ms())))
 }
 
@@ -537,7 +537,7 @@ pub async fn post_tasks_stop(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let id = body.get("id").and_then(Value::as_str).unwrap_or("");
-    let ok = state.tasks.lock().expect("tasks").finish(id).is_some();
+    let ok = state.tasks.lock().unwrap_or_else(|e| e.into_inner()).finish(id).is_some();
     Ok(Json(json!({ "ok": ok })))
 }
 
@@ -552,7 +552,7 @@ pub async fn get_models(
     let settings = state
         .prefs
         .lock()
-        .expect("prefs")
+        .unwrap_or_else(|e| e.into_inner())
         .get("claudeModels")
         .cloned()
         .unwrap_or_else(|| json!({}));
@@ -571,7 +571,7 @@ pub async fn post_models(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let mut prefs = state.prefs.lock().expect("prefs");
+    let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
     let cur = prefs.get("claudeModels").cloned().unwrap_or_else(|| json!({}));
     let next = with_models(
         &cur,
@@ -591,7 +591,7 @@ pub async fn get_prefs(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let prefs = state.prefs.lock().expect("prefs");
+    let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({
         "ok": true,
         "lang": prefs.lang(),
@@ -608,7 +608,7 @@ pub async fn post_prefs(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let mut prefs = state.prefs.lock().expect("prefs");
+    let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(l) = body.get("lang").and_then(Value::as_str) {
         let _ = prefs.set_lang(l);
     }
@@ -668,7 +668,7 @@ pub async fn post_presence(
     )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let focused = body.get("focused").and_then(Value::as_bool).unwrap_or(false);
-    state.office.lock().expect("office").presence_focused = focused;
+    state.office.lock().unwrap_or_else(|e| e.into_inner()).presence_focused = focused;
     Ok(Json(json!({ "ok": true, "focused": focused })))
 }
 
@@ -720,7 +720,7 @@ pub async fn get_push(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let push = state.push.lock().expect("push");
+    let push = state.push.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "publicKey": push.public_key, "count": push.count() })))
 }
 
@@ -738,7 +738,7 @@ pub async fn post_push(
         via_tunnel,
     )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let mut push = state.push.lock().expect("push");
+    let mut push = state.push.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ep) = body.get("remove").and_then(Value::as_str) {
         let ok = push.remove(ep);
         return Ok(Json(json!({ "ok": ok, "count": push.count() })));
@@ -783,7 +783,7 @@ pub async fn post_prompt_rewrite(
     let text = body.get("text").and_then(Value::as_str).unwrap_or("");
     let lang = body.get("lang").and_then(Value::as_str).unwrap_or("en");
     let photos = body.get("photos").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let mut rw = state.rewriter.lock().expect("rewriter");
+    let mut rw = state.rewriter.lock().unwrap_or_else(|e| e.into_inner());
     let res = rw.rewrite_with(text, lang, photos, now_ms(), |redacted, _sys, _ph| {
         Ok(format!("Goal: {redacted}"))
     });
@@ -819,7 +819,7 @@ pub async fn get_claude_version(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let v = state.claude_version.lock().expect("claude_version").current().clone();
+    let v = state.claude_version.lock().unwrap_or_else(|e| e.into_inner()).current().clone();
     Ok(Json(json!({ "ok": true, "version": v })))
 }
 
@@ -832,7 +832,7 @@ pub async fn post_todos(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     if let Some(arr) = body.get("todos").and_then(Value::as_array) {
-        state.office.lock().expect("office").todos = arr.clone();
+        state.office.lock().unwrap_or_else(|e| e.into_inner()).todos = arr.clone();
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -846,7 +846,7 @@ pub async fn post_codex_ai(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let res = state.codex_accounts.lock().expect("codex_accounts").mutate(&action, &body);
+    let res = state.codex_accounts.lock().unwrap_or_else(|e| e.into_inner()).mutate(&action, &body);
     Ok(Json(res))
 }
 
@@ -859,7 +859,7 @@ pub async fn post_ag_ai(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let res = state.ag_accounts.lock().expect("ag_accounts").mutate(&action, &body);
+    let res = state.ag_accounts.lock().unwrap_or_else(|e| e.into_inner()).mutate(&action, &body);
     Ok(Json(res))
 }
 
