@@ -1,9 +1,30 @@
 use crate::shared::timeline::{ReplayItem, build_timeline};
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+pub fn local_day_bounds_ms(nd: NaiveDate) -> Option<(u64, u64)> {
+    let start_naive = nd.and_hms_opt(0, 0, 0)?;
+    let start_dt = Local
+        .from_local_datetime(&start_naive)
+        .earliest()
+        .or_else(|| Local.from_local_datetime(&start_naive).latest())?;
+    let from_ms = start_dt.timestamp_millis().max(0) as u64;
+    let to_ms = nd
+        .succ_opt()
+        .and_then(|next| next.and_hms_opt(0, 0, 0))
+        .and_then(|end_naive| {
+            Local
+                .from_local_datetime(&end_naive)
+                .earliest()
+                .or_else(|| Local.from_local_datetime(&end_naive).latest())
+        })
+        .map(|dt| dt.timestamp_millis().max(0) as u64)
+        .unwrap_or(from_ms + 86_400_000);
+    Some((from_ms, to_ms))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WrappedDay {
@@ -62,12 +83,9 @@ pub fn week_summary(replay_dir: &Path, days: usize, now_ms: u64) -> Value {
         let Ok(nd) = NaiveDate::parse_from_str(day, "%Y-%m-%d") else {
             continue;
         };
-        let from_ms = nd
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as u64;
-        let to_ms = from_ms + 86_400_000;
+        let Some((from_ms, to_ms)) = local_day_bounds_ms(nd) else {
+            continue;
+        };
         let Ok(text) = std::fs::read_to_string(replay_dir.join(f)) else {
             continue;
         };
@@ -153,5 +171,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let w = week_summary(dir.path(), 7, 1_800_000_000_000);
         assert_eq!(w["days"], 0);
+    }
+
+    #[test]
+    fn week_summary_uses_local_timezone_day_boundaries() {
+        use chrono::{Local, TimeZone};
+
+        let dir = tempfile::tempdir().unwrap();
+        let nd = NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        let local_start = Local
+            .from_local_datetime(&nd.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+        let local_next = Local
+            .from_local_datetime(&nd.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        // Verify helper matches Local midnight bounds directly (timezone-invariant check).
+        assert_eq!(local_day_bounds_ms(nd), Some((local_start, local_next)));
+
+        // Event between local 00:30 and 01:30 (1.0 hour of work) — dropped if UTC midnight is used in non-UTC zones.
+        let t_start = local_start + 30 * 60 * 1000;
+        let t_stop = t_start + 3_600_000;
+        let lines = format!(
+            "{}\n{}\n",
+            json!({
+                "t": t_start,
+                "m": {
+                    "k": "ev",
+                    "e": { "sess": "s1", "type": "prompt", "label": "night work", "ts": t_start },
+                    "s": { "id": "s1", "name": "repo-a", "status": "work" }
+                }
+            }),
+            json!({
+                "t": t_stop,
+                "m": {
+                    "k": "ev",
+                    "e": { "sess": "s1", "type": "stop", "label": "repo-a", "ts": t_stop },
+                    "s": { "id": "s1", "name": "repo-a", "status": "rest" }
+                }
+            }),
+        );
+        std::fs::write(dir.path().join("2026-11-25.jsonl"), lines).unwrap();
+
+        let w = week_summary(dir.path(), 7, t_stop + 60_000);
+        assert_eq!(w["days"], 1);
+        assert_eq!(w["perDay"][0]["day"], "2026-11-25");
+        assert_eq!(w["perDay"][0]["prompts"], 1);
+        assert_eq!(w["perDay"][0]["hours"], 1.0);
+        assert_eq!(w["hoursSum"], 1.0);
     }
 }
