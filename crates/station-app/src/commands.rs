@@ -126,7 +126,9 @@ async fn run_cli_async(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Res
         }
         Some(Command::StatusLine) => {
             let mut stdin_bytes = Vec::new();
-            let _ = std::io::stdin().read_to_end(&mut stdin_bytes);
+            let _ = std::io::stdin()
+                .take(1024 * 1024)
+                .read_to_end(&mut stdin_bytes);
             let out = run_status_line(cli.port, &data_dir, &stdin_bytes).await;
             if !out.is_empty() {
                 print!("{out}");
