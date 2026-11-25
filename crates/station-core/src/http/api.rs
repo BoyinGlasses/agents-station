@@ -5,7 +5,10 @@ use crate::http::guard::{
 };
 use crate::shared::timeline::build_timeline;
 use crate::state::loops::LoopConfig;
-use crate::state::models::{default_claude_models, models_of, with_models};
+use crate::state::models::{
+    DEFAULT_SPLIT_NOTE, MAIN_MODELS, SUB_MODELS, default_claude_models, has_split, models_of,
+    with_models, with_split,
+};
 use crate::state::sessions::{PermDecision, now_ms, one_line, read_replay_range};
 use crate::store::prompt_report::build_prompt_report;
 use crate::store::push::{PushKeys, PushSubscription};
@@ -1501,6 +1504,43 @@ pub async fn post_ci(
     }
 }
 
+fn read_real_text(path: &std::path::Path) -> (std::path::PathBuf, Option<String>) {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    match std::fs::read_to_string(&real) {
+        Ok(text) => (real, Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (real, Some(String::new())),
+        Err(_) => (real, None),
+    }
+}
+
+fn models_out(claude_dir: &std::path::Path) -> Value {
+    let (_, set_text) = read_real_text(&claude_dir.join("settings.json"));
+    let (_, mem_text) = read_real_text(&claude_dir.join("CLAUDE.md"));
+    let parsed: Option<Value> = set_text.as_deref().and_then(|t| {
+        if t.trim().is_empty() {
+            Some(json!({}))
+        } else {
+            serde_json::from_str::<Value>(t).ok()
+        }
+    });
+    let read_only = set_text.is_none() || parsed.is_none();
+    let cfg = parsed.unwrap_or_else(|| json!({}));
+    let view = models_of(&cfg);
+    let split = mem_text.as_deref().is_some_and(has_split);
+    json!({
+        "ok": true,
+        "main": view.main,
+        "sub": view.sub,
+        "force": view.force,
+        "split": split,
+        "main_": MAIN_MODELS,
+        "sub_": SUB_MODELS,
+        "readOnly": read_only,
+        "models": default_claude_models(),
+        "config": view,
+    })
+}
+
 pub async fn get_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1508,19 +1548,23 @@ pub async fn get_models(
     ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let settings = state
-        .prefs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get("claudeModels")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    Ok(Json(json!({
-        "ok": true,
-        "models": default_claude_models(),
-        "config": models_of(&settings),
-    })))
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if q.contains_key("agent") || q.contains_key("dir") || q.contains_key("sid") {
+        require_task_permission(&state, local)?;
+        let agent = q.get("agent").map(String::as_str).unwrap_or("claude");
+        if !matches!(agent, "claude" | "codex" | "opencode" | "antigravity" | "zcode") {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        return Ok(Json(json!({
+            "ok": true,
+            "models": if agent == "claude" { default_claude_models() } else { Vec::new() },
+            "source": if agent == "claude" { "cli-aliases" } else { "cli" },
+        })));
+    }
+    if !local {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Json(models_out(&state.claude_dir)))
 }
 
 pub async fn post_models(
@@ -1531,16 +1575,64 @@ pub async fn post_models(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
-    let cur = prefs.get("claudeModels").cloned().unwrap_or_else(|| json!({}));
-    let next = with_models(
-        &cur,
-        body.get("main").and_then(Value::as_str),
-        body.get("sub").and_then(Value::as_str),
-        body.get("force").and_then(Value::as_bool),
-    );
-    let _ = prefs.set("claudeModels", Some(next.clone()));
-    Ok(Json(json!({ "ok": true, "config": models_of(&next) })))
+    let main = match body.get("main") {
+        None => None,
+        Some(v) => {
+            let s = v.as_str().ok_or(StatusCode::BAD_REQUEST)?;
+            if !MAIN_MODELS.contains(&s) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Some(s)
+        }
+    };
+    let sub = match body.get("sub") {
+        None => None,
+        Some(v) => {
+            let s = v.as_str().ok_or(StatusCode::BAD_REQUEST)?;
+            if !SUB_MODELS.contains(&s) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Some(s)
+        }
+    };
+    let force = body.get("force").and_then(Value::as_bool);
+    let split = body.get("split").and_then(Value::as_bool);
+
+    if main.is_some() || sub.is_some() || force.is_some() {
+        let (real_settings, set_text) = read_real_text(&state.claude_dir.join("settings.json"));
+        let Some(raw) = set_text else {
+            return Ok(Json(json!({ "ok": false, "message": "failed to read settings.json" })));
+        };
+        let cfg: Value = if raw.trim().is_empty() {
+            json!({})
+        } else {
+            match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Ok(Json(json!({ "ok": false, "message": "settings.json is not valid JSON" })));
+                }
+            }
+        };
+        let next = with_models(&cfg, main, sub, force);
+        if crate::atomic::write_json_atomic(&real_settings, &next).is_err() {
+            return Ok(Json(json!({ "ok": false, "message": "failed to write settings.json" })));
+        }
+    }
+
+    if let Some(on) = split {
+        let (real_md, mem_text) = read_real_text(&state.claude_dir.join("CLAUDE.md"));
+        let Some(raw) = mem_text else {
+            return Ok(Json(json!({ "ok": false, "message": "failed to read CLAUDE.md" })));
+        };
+        let next = with_split(&raw, on, DEFAULT_SPLIT_NOTE);
+        if next != raw
+            && crate::atomic::write_bytes_atomic(&real_md, next.as_bytes()).is_err()
+        {
+            return Ok(Json(json!({ "ok": false, "message": "failed to write CLAUDE.md" })));
+        }
+    }
+
+    Ok(Json(models_out(&state.claude_dir)))
 }
 
 pub async fn get_prefs(
@@ -4176,5 +4268,127 @@ mod tests {
                 "ViaTunnel caller must get 403 on {uri} {payload}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn models_api_reads_and_writes_claude_settings_and_claude_md() {
+        use crate::auth::COOKIE_NAME;
+        use crate::http::guard::ViaTunnel;
+        use axum::body::to_bytes;
+        use axum::extract::ConnectInfo;
+        use serde_json::{Value, json};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let claude_dir = dir.path().join("claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"theme":"dark","model":"sonnet"}"#,
+        )
+        .unwrap();
+        std::fs::write(claude_dir.join("CLAUDE.md"), "# Team Rules\n").unwrap();
+
+        let state = Arc::new(AppState::new_with_claude_dir(data_dir, claude_dir.clone(), None).unwrap());
+        let cookie = format!("{COOKIE_NAME}={}", state.auth.sign_cookie(false));
+        let app = build_router(state);
+
+        // GET /api/models reads settings.json + CLAUDE.md
+        let req = Request::builder()
+            .uri("/api/models")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["main"], "sonnet");
+        assert_eq!(body["sub"], "");
+        assert_eq!(body["force"], false);
+        assert_eq!(body["split"], false);
+        assert_eq!(body["readOnly"], false);
+
+        // POST /api/models updates settings.json + CLAUDE.md atomically
+        let post_req = Request::builder()
+            .method("POST")
+            .uri("/api/models")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "main": "opus", "sub": "haiku", "force": true, "split": true }).to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(post_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["main"], "opus");
+        assert_eq!(body["sub"], "haiku");
+        assert_eq!(body["force"], true);
+        assert_eq!(body["split"], true);
+
+        let disk_settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(disk_settings["theme"], "dark");
+        assert_eq!(disk_settings["model"], "opus");
+        assert_eq!(disk_settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "haiku");
+        assert_eq!(disk_settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"], "1");
+
+        let disk_md = std::fs::read_to_string(claude_dir.join("CLAUDE.md")).unwrap();
+        assert!(disk_md.contains("# Team Rules"));
+        assert!(disk_md.contains("<!-- my-office:subagents -->"));
+
+        // Clear back to defaults + split=false
+        let clear_req = Request::builder()
+            .method("POST")
+            .uri("/api/models")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "main": "", "sub": "", "split": false }).to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(clear_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cleared_settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
+                .unwrap();
+        assert!(cleared_settings.get("model").is_none());
+        assert!(cleared_settings.get("env").is_none());
+        assert_eq!(cleared_settings["theme"], "dark");
+        let cleared_md = std::fs::read_to_string(claude_dir.join("CLAUDE.md")).unwrap();
+        assert!(!cleared_md.contains("<!-- my-office:subagents -->"));
+        assert_eq!(cleared_md, "# Team Rules\n");
+
+        // Invalid model -> 400
+        let bad_req = Request::builder()
+            .method("POST")
+            .uri("/api/models")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "main": "gpt-4o" }).to_string()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(bad_req).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        // Remote tunnel caller rejected on GET & POST /api/models
+        let loopback_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52250);
+        let mut tun_get = Request::builder()
+            .uri("/api/models")
+            .header("host", "127.0.0.1:4310")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap();
+        tun_get.extensions_mut().insert(ConnectInfo(loopback_peer));
+        tun_get.extensions_mut().insert(ViaTunnel(true));
+        assert_eq!(
+            app.oneshot(tun_get).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 }
