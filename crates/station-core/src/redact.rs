@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde_json::Value;
 use std::sync::OnceLock;
 
 static REDACT_RULES: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
@@ -9,6 +10,7 @@ fn rules() -> &'static [(Regex, &'static str)] {
             (Regex::new(r#"(?i)(\bbearer\s+)[^\s"']+"#).unwrap(), "${1}•••"),
             (Regex::new(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}").unwrap(), "•••"),
             (Regex::new(r"\bgh[pousr]_[A-Za-z0-9]{10,}").unwrap(), "•••"),
+            (Regex::new(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b").unwrap(), "•••"),
             (Regex::new(r"\bxox[abpr]-[A-Za-z0-9-]{10,}").unwrap(), "•••"),
             (Regex::new(r"\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{4,}").unwrap(), "•••"),
             (
@@ -31,6 +33,19 @@ pub fn redact(input: &str) -> String {
         out = re.replace_all(&out, *rep).into_owned();
     }
     out
+}
+
+pub fn redact_json_value(v: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(redact(s)),
+        Value::Array(arr) => Value::Array(arr.iter().map(redact_json_value).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, val)| (k.clone(), redact_json_value(val)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +74,27 @@ mod tests {
     fn preserves_normal_text_without_secrets() {
         let plain = "git status && cargo test -p station-core";
         assert_eq!(redact(plain), plain);
+    }
+
+    #[test]
+    fn redact_json_value_recursively_masks_nested_strings_and_aws_keys() {
+        let raw = serde_json::json!({
+            "num": 42,
+            "flag": true,
+            "null": null,
+            "text": "sk-ant-api03-abcdef123456",
+            "nested": {
+                "arr": ["ghp_1234567890abcdef", "AKIAIOSFODNN7EXAMPLE", "plain"]
+            }
+        });
+        let masked = redact_json_value(&raw);
+        assert_eq!(masked["num"], 42);
+        assert_eq!(masked["flag"], true);
+        assert!(masked["null"].is_null());
+        let s = masked.to_string();
+        assert!(!s.contains("sk-ant-api03-abcdef123456"));
+        assert!(!s.contains("ghp_1234567890abcdef"));
+        assert!(!s.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(s.contains("plain"));
     }
 }
