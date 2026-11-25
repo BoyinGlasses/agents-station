@@ -1,77 +1,81 @@
-# Agents Station — 100% Parity Ledger
+# Agents Station — Parity Ledger
 
-Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints).
+Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
+
+Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
+
+> Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
 ## P0 — Bootstrap & Guardrails
 
 - [x] workspace/Cargo.toml & 6 crates -> `Cargo.toml`, `crates/station-{core,launcher,canvas2d,3d,ui,app}` (verified: `cargo test --workspace`, target on `D:\mystation\cargo-target` = 1.99 GB)
 - [x] scripts/sync-assets.mjs & Vietnamese/Thai TTF fonts -> `scripts/sync-assets.mjs`, `crates/station-ui/src/fonts.rs`, `assets/` (verified: 25 TTF fonts decoded, 119 assets/i18n synced, `bundled_fonts_cover_vietnamese_thai_and_ascii_glyphs` PASS)
-- [x] station-app CLI, Win32 single-instance mutex & GPU selector -> `crates/station-app/src/{cli,instance,gpu}.rs` (verified: 4 unit tests PASS)
+- [~] station-app CLI, Win32 single-instance mutex & GPU selector -> `crates/station-app/src/{cli,instance,gpu}.rs` (verified: 4 unit tests PASS)
 - [x] station-app --capture-scene smoke PNG harness -> `crates/station-app/src/capture.rs`, `crates/station-app/tests/capture_smoke.rs` (verified: composited 3D + Vietnamese/Thai `bevy_egui` HUD PNG, 104.2 MB Private Working Set)
 
 ## P1 — Backend, Shared, CLI & Hooks (61 files)
 
 - [x] server/agent-events.mjs -> `crates/station-core/src/agent_events.rs` (unit tested)
-- [x] server/agent-history.mjs -> `crates/station-core/src/store/agent_history.rs` (unit tested)
-- [x] server/agent-rpc.mjs -> `crates/station-core/src/store/agent_rpc.rs` (unit tested)
-- [x] server/antigravity-accounts.mjs -> `crates/station-core/src/store/antigravity_accounts.rs` (unit tested)
-- [x] server/antigravity-runs.mjs -> `crates/station-core/src/store/antigravity_runs.rs` (unit tested)
-- [x] server/auto-resume.mjs -> `crates/station-core/src/state/auto_resume.rs` (unit tested)
-- [x] server/bg-sessions.mjs -> `crates/station-core/src/state/bg_sessions.rs` (unit tested)
+- [ ] server/agent-history.mjs -> `crates/station-core/src/store/agent_history.rs` (unit tested)
+- [ ] server/agent-rpc.mjs -> `crates/station-core/src/store/agent_rpc.rs` (unit tested)
+- [~] server/antigravity-accounts.mjs -> `crates/station-core/src/store/antigravity_accounts.rs` (unit tested)
+- [ ] server/antigravity-runs.mjs -> `crates/station-core/src/store/antigravity_runs.rs` (unit tested)
+- [ ] server/auto-resume.mjs -> `crates/station-core/src/state/auto_resume.rs` (unit tested)
+- [ ] server/bg-sessions.mjs -> `crates/station-core/src/state/bg_sessions.rs` (unit tested)
 - [x] server/claude-version.mjs -> `crates/station-core/src/state/claude_version.rs` (unit tested)
-- [x] server/cli-command.mjs -> `crates/station-core/src/store/cli_command.rs` (unit tested)
-- [x] server/codex-accounts.mjs -> `crates/station-core/src/store/codex_accounts.rs` (unit tested)
-- [x] server/codex-history.mjs -> `crates/station-core/src/store/codex_history.rs` (unit tested)
+- [ ] server/cli-command.mjs -> `crates/station-core/src/store/cli_command.rs` (unit tested)
+- [~] server/codex-accounts.mjs -> `crates/station-core/src/store/codex_accounts.rs` (unit tested)
+- [ ] server/codex-history.mjs -> `crates/station-core/src/store/codex_history.rs` (unit tested)
 - [x] server/data-dir.mjs -> `crates/station-core/src/config.rs` (unit tested)
-- [x] server/git.mjs -> `crates/station-core/src/state/git.rs` (unit tested)
-- [x] server/index.mjs -> `crates/station-core/src/http/{mod,guard,otel_routes,hooks,sse,phone,api}.rs` (Axum 0.8 + security guards tested)
-- [x] server/lift-service.mjs -> `crates/station-core/src/state/lift_service.rs` (unit tested)
+- [ ] server/git.mjs -> `crates/station-core/src/state/git.rs` (unit tested)
+- [~] server/index.mjs -> `crates/station-core/src/http/{mod,guard,otel_routes,hooks,sse,phone,api}.rs` (Axum 0.8 + security guards tested)
+- [~] server/lift-service.mjs -> `crates/station-core/src/state/lift_service.rs` (unit tested)
 - [x] server/loops.mjs -> `crates/station-core/src/state/loops.rs` (unit tested)
-- [x] server/mac-hold.mjs -> `crates/station-core/src/state/mac_hold.rs` (unit tested)
-- [x] server/models.mjs -> `crates/station-core/src/state/models.rs` (unit tested)
+- [ ] server/mac-hold.mjs -> `crates/station-core/src/state/mac_hold.rs` (unit tested)
+- [~] server/models.mjs -> `crates/station-core/src/state/models.rs` (unit tested)
 - [x] server/otel-setup.mjs -> `crates/station-core/src/store/otel_setup.rs` (unit tested)
-- [x] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures tested)
+- [~] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures tested)
 - [x] server/overlap.mjs -> `crates/station-core/src/state/overlap.rs` (unit tested)
-- [x] server/platform/darwin.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
+- [~] server/platform/darwin.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
 - [x] server/platform/index.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
-- [x] server/platform/linux.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
+- [~] server/platform/linux.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
 - [x] server/platform/shared.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
-- [x] server/platform/win32.mjs -> `crates/station-core/src/platform/win32.rs` (0-PowerShell Win32 tested)
+- [~] server/platform/win32.mjs -> `crates/station-core/src/platform/win32.rs` (0-PowerShell Win32 tested)
 - [x] server/prefs.mjs -> `crates/station-core/src/prefs.rs` (unit tested)
 - [x] server/prompt-report.mjs -> `crates/station-core/src/store/prompt_report.rs` (unit tested)
-- [x] server/push.mjs -> `crates/station-core/src/store/push.rs` (unit tested)
+- [~] server/push.mjs -> `crates/station-core/src/store/push.rs` (unit tested)
 - [x] server/redact.mjs -> `crates/station-core/src/redact.rs` (unit tested)
-- [x] server/rewrite.mjs -> `crates/station-core/src/store/rewrite.rs` (redact-first tested)
-- [x] server/shots.mjs -> `crates/station-core/src/store/shots.rs` (unit tested)
-- [x] server/steer.mjs -> `crates/station-core/src/state/steer.rs` (unit tested)
-- [x] server/stranded.mjs -> `crates/station-core/src/state/stranded.rs` (unit tested)
-- [x] server/system.mjs -> `crates/station-core/src/system.rs` (unit tested)
-- [x] server/tasks.mjs -> `crates/station-core/src/state/tasks.rs` (unit tested)
-- [x] server/tenure.mjs -> `crates/station-core/src/state/tenure.rs` (unit tested)
-- [x] server/testrun.mjs -> `crates/station-core/src/state/testrun.rs` (unit tested)
-- [x] server/trophies.mjs -> `crates/station-core/src/store/trophies.rs` (unit tested)
-- [x] server/undo.mjs -> `crates/station-core/src/state/undo.rs` (unit tested)
-- [x] server/usage.mjs -> `crates/station-core/src/store/usage.rs` (1 MB buffer, unit tested)
-- [x] server/vault.mjs -> `crates/station-core/src/store/vault.rs` (unit tested)
-- [x] server/vsix.mjs -> `crates/station-core/src/store/vsix.rs` (unit tested)
-- [x] server/wrapped.mjs -> `crates/station-core/src/store/wrapped.rs` (unit tested)
+- [~] server/rewrite.mjs -> `crates/station-core/src/store/rewrite.rs` (redact-first tested)
+- [ ] server/shots.mjs -> `crates/station-core/src/store/shots.rs` (unit tested)
+- [ ] server/steer.mjs -> `crates/station-core/src/state/steer.rs` (unit tested)
+- [ ] server/stranded.mjs -> `crates/station-core/src/state/stranded.rs` (unit tested)
+- [~] server/system.mjs -> `crates/station-core/src/system.rs` (unit tested)
+- [~] server/tasks.mjs -> `crates/station-core/src/state/tasks.rs` (unit tested)
+- [~] server/tenure.mjs -> `crates/station-core/src/state/tenure.rs` (unit tested)
+- [ ] server/testrun.mjs -> `crates/station-core/src/state/testrun.rs` (unit tested)
+- [~] server/trophies.mjs -> `crates/station-core/src/store/trophies.rs` (unit tested)
+- [~] server/undo.mjs -> `crates/station-core/src/state/undo.rs` (unit tested)
+- [ ] server/usage.mjs -> `crates/station-core/src/store/usage.rs` (1 MB buffer, unit tested)
+- [~] server/vault.mjs -> `crates/station-core/src/store/vault.rs` (unit tested)
+- [ ] server/vsix.mjs -> `crates/station-core/src/store/vsix.rs` (unit tested)
+- [~] server/wrapped.mjs -> `crates/station-core/src/store/wrapped.rs` (unit tested)
 - [x] src/shared/burn.js -> `crates/station-core/src/shared/burn.rs` (unit tested)
 - [x] src/shared/cache-clock.js -> `crates/station-core/src/shared/cache_clock.rs` (unit tested)
 - [x] src/shared/chat-engine.js -> `crates/station-core/src/shared/chat_engine.rs` (unit tested)
-- [x] src/shared/comnha.js -> `crates/station-core/src/shared/comnha.rs` (unit tested)
-- [x] src/shared/danger.js -> `crates/station-core/src/shared/danger.rs` (unit tested)
-- [x] src/shared/duty.js -> `crates/station-core/src/shared/duty.rs` (unit tested)
-- [x] src/shared/model-name.js -> `crates/station-core/src/shared/model_name.rs` (unit tested)
+- [ ] src/shared/comnha.js -> `crates/station-core/src/shared/comnha.rs` (unit tested)
+- [~] src/shared/danger.js -> `crates/station-core/src/shared/danger.rs` (unit tested)
+- [ ] src/shared/duty.js -> `crates/station-core/src/shared/duty.rs` (unit tested)
+- [ ] src/shared/model-name.js -> `crates/station-core/src/shared/model_name.rs` (unit tested)
 - [x] src/shared/prompt-coach.js -> `crates/station-core/src/shared/prompt_coach.rs` (unit tested)
-- [x] src/shared/quick-choices.js -> `crates/station-core/src/shared/quick_choices.rs` (unit tested)
-- [x] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (unit tested)
-- [x] src/shared/workdays.js -> `crates/station-core/src/shared/workdays.rs` (unit tested)
+- [ ] src/shared/quick-choices.js -> `crates/station-core/src/shared/quick_choices.rs` (unit tested)
+- [~] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (unit tested)
+- [ ] src/shared/workdays.js -> `crates/station-core/src/shared/workdays.rs` (unit tested)
 - [x] bin/cli.mjs -> `crates/station-core/src/hooks_cli.rs`, `crates/station-app/src/{cli,commands}.rs` (unit tested)
 - [x] bin/service.mjs -> `crates/station-core/src/hooks_cli.rs::install_windows_service_in` (unit tested)
 - [x] hooks/hooks.json -> `crates/station-core/src/hooks_cli.rs::install_claude` (unit tested)
 - [x] hooks/opencode.mjs -> `crates/station-core/src/hooks_cli.rs::install_opencode` (unit tested)
 - [x] hooks/send.mjs -> `crates/station-core/src/hook_client.rs::run_hook_client` (unit tested)
-- [x] hooks/status-line.mjs -> `crates/station-core/src/http/hooks.rs::post_hook_status` + `hook_client.rs` (unit tested)
+- [~] hooks/status-line.mjs -> `crates/station-core/src/http/hooks.rs::post_hook_status` + `hook_client.rs` (unit tested)
 
 ## P2 — Public Assets & 2D Procedural Textures (17 files)
 
@@ -91,246 +95,246 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 - [x] public/assets/vehicles/cars.json -> `assets/vehicles/cars.json` + `crates/station-canvas2d/src/brands.rs` (tested)
 - [x] public/assets/vendor/qrcode.min.js -> `crates/station-canvas2d/src/street_surfaces.rs::draw_qr_block` (native Rust QR rasterizer)
 - [x] public/icon-512.png -> `assets/icon-512.png` + `crates/station-canvas2d/src/brands.rs::load_app_icon` (tested)
-- [x] public/sw.js -> `crates/station-core/src/http/phone.rs::get_sw` (served natively)
+- [~] public/sw.js -> `crates/station-core/src/http/phone.rs::get_sw` (served natively)
 
 ## P3 — 3D World Core, Layouts, Furniture & Props (55 files)
 
 - [x] src/office/core/env.js -> `crates/station-3d/src/layout.rs::OfficeLayout` (tested + visual)
-- [x] src/office/core/loop.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (tested + visual)
-- [x] src/office/core/optimize.js -> `crates/station-3d/src/palette.rs::WorldPalette` (shared meshes/mats, 168.45 MB HQ RAM)
-- [x] src/office/core/state.js -> `crates/station-3d/src/{lights,interact}.rs` (tested)
-- [x] src/office/core/world-boot.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (verified Cozy/Pro/HQ PNGs)
-- [x] src/office/interact/first-person.js -> `crates/station-3d/src/camera.rs::CameraRig` (F-key perspective + WASD)
-- [x] src/office/interact/place-cards.js -> `crates/station-3d/src/interact.rs::PlaceCardState`
-- [x] src/office/interact/place-chips.js -> `crates/station-3d/src/interact.rs::InteractiveProp`
-- [x] src/office/interact/props.js -> `crates/station-3d/src/interact.rs::PropActivated`
-- [x] src/office/interact/rings.js -> `crates/station-3d/src/interact.rs::HoverRing`
-- [x] src/office/main.js -> `crates/station-app/src/main.rs` + `crates/station-3d/src/lib.rs`
-- [x] src/office/net/live.js -> `crates/station-core/src/http/sse.rs` + `crates/station-core/src/state/sessions.rs`
-- [x] src/office/scene/blocks.js -> `crates/station-3d/src/palette.rs` (shared unit primitives & material dedupe)
-- [x] src/office/scene/lights.js -> `crates/station-3d/src/lights.rs` (sun + room lamps + day/night)
-- [x] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` (bounded shadows, Msaa::Off, MemoryHints)
-- [x] src/office/scene/renderer.js -> `crates/station-3d/src/camera.rs` + `crates/station-app/src/main.rs`
-- [x] src/office/world/cozy-room.js -> `crates/station-3d/src/rooms.rs::spawn_office_shell` (verified `g3-cozy.png`)
-- [x] src/office/world/desks.js -> `crates/station-3d/src/desks.rs::spawn_desks` (9/12/44 desks verified)
-- [x] src/office/world/entrance.js -> `crates/station-3d/src/entrance.rs::spawn_entrance` (door/lift/stairs)
-- [x] src/office/world/furniture/board.js -> `crates/station-3d/src/furniture.rs` (whiteboard + stickies)
-- [x] src/office/world/furniture/coffee.js -> `crates/station-3d/src/furniture.rs` (coffee corner + donuts)
-- [x] src/office/world/furniture/meeting.js -> `crates/station-3d/src/furniture.rs` (round & glass-room meeting tables)
-- [x] src/office/world/furniture/plants-lamps.js -> `crates/station-3d/src/rooms.rs::spawn_pot_plant` + `desks.rs`
-- [x] src/office/world/furniture/rocket.js -> `crates/station-3d/src/furniture.rs` (rocket sculpture)
-- [x] src/office/world/furniture/room-pieces.js -> `crates/station-3d/src/furniture.rs` (sofa, bookshelf, globe)
-- [x] src/office/world/furniture/server-racks.js -> `crates/station-3d/src/furniture.rs` (3 racks, LEDs, spinning fans)
+- [~] src/office/core/loop.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (tested + visual)
+- [~] src/office/core/optimize.js -> `crates/station-3d/src/palette.rs::WorldPalette` (shared meshes/mats, 168.45 MB HQ RAM)
+- [~] src/office/core/state.js -> `crates/station-3d/src/{lights,interact}.rs` (tested)
+- [~] src/office/core/world-boot.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (verified Cozy/Pro/HQ PNGs)
+- [~] src/office/interact/first-person.js -> `crates/station-3d/src/camera.rs::CameraRig` (F-key perspective + WASD)
+- [ ] src/office/interact/place-cards.js -> `crates/station-3d/src/interact.rs::PlaceCardState`
+- [ ] src/office/interact/place-chips.js -> `crates/station-3d/src/interact.rs::InteractiveProp`
+- [ ] src/office/interact/props.js -> `crates/station-3d/src/interact.rs::PropActivated`
+- [ ] src/office/interact/rings.js -> `crates/station-3d/src/interact.rs::HoverRing`
+- [~] src/office/main.js -> `crates/station-app/src/main.rs` + `crates/station-3d/src/lib.rs`
+- [~] src/office/net/live.js -> `crates/station-core/src/http/sse.rs` + `crates/station-core/src/state/sessions.rs`
+- [~] src/office/scene/blocks.js -> `crates/station-3d/src/palette.rs` (shared unit primitives & material dedupe)
+- [~] src/office/scene/lights.js -> `crates/station-3d/src/lights.rs` (sun + room lamps + day/night)
+- [~] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` (bounded shadows, Msaa::Off, MemoryHints)
+- [~] src/office/scene/renderer.js -> `crates/station-3d/src/camera.rs` + `crates/station-app/src/main.rs`
+- [~] src/office/world/cozy-room.js -> `crates/station-3d/src/rooms.rs::spawn_office_shell` (verified `g3-cozy.png`)
+- [~] src/office/world/desks.js -> `crates/station-3d/src/desks.rs::spawn_desks` (9/12/44 desks verified)
+- [~] src/office/world/entrance.js -> `crates/station-3d/src/entrance.rs::spawn_entrance` (door/lift/stairs)
+- [~] src/office/world/furniture/board.js -> `crates/station-3d/src/furniture.rs` (whiteboard + stickies)
+- [~] src/office/world/furniture/coffee.js -> `crates/station-3d/src/furniture.rs` (coffee corner + donuts)
+- [~] src/office/world/furniture/meeting.js -> `crates/station-3d/src/furniture.rs` (round & glass-room meeting tables)
+- [~] src/office/world/furniture/plants-lamps.js -> `crates/station-3d/src/rooms.rs::spawn_pot_plant` + `desks.rs`
+- [~] src/office/world/furniture/rocket.js -> `crates/station-3d/src/furniture.rs` (rocket sculpture)
+- [~] src/office/world/furniture/room-pieces.js -> `crates/station-3d/src/furniture.rs` (sofa, bookshelf, globe)
+- [~] src/office/world/furniture/server-racks.js -> `crates/station-3d/src/furniture.rs` (3 racks, LEDs, spinning fans)
 - [x] src/office/world/layout.js -> `crates/station-3d/src/layout.rs::LayoutSpec` (unit tested)
-- [x] src/office/world/pro/floor.js -> `crates/station-3d/src/rooms.rs` (verified `g3-pro.png`)
-- [x] src/office/world/pro/pieces.js -> `crates/station-3d/src/rooms.rs` (glass walls, low walls, floor zones)
-- [x] src/office/world/pro/wing.js -> `crates/station-3d/src/rooms.rs` (verified `g3-hq.png`, 44 desks)
-- [x] src/office/world/props/aquarium.js -> `crates/station-3d/src/props.rs` (animated fish)
-- [x] src/office/world/props/arcade.js -> `crates/station-3d/src/props.rs` (invaders + marquee)
-- [x] src/office/world/props/billiards.js -> `crates/station-3d/src/props.rs` (pool table + balls)
-- [x] src/office/world/props/bins.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/cat.js -> `crates/station-3d/src/props.rs` (animated office tabby)
-- [x] src/office/world/props/cups.js -> `crates/station-3d/src/props.rs` (pantry sink cups)
-- [x] src/office/world/props/dev-servers.js -> `crates/station-3d/src/props.rs` (mini server + :4310 badge)
-- [x] src/office/world/props/duty-board.js -> `crates/station-3d/src/props.rs` (`TRỰC NHẬT` board)
-- [x] src/office/world/props/game-tv.js -> `crates/station-3d/src/props.rs` (55" TV + PS5 + controllers)
-- [x] src/office/world/props/karaoke.js -> `crates/station-3d/src/props.rs` (karaoke booth + neon band + QR)
-- [x] src/office/world/props/microwave.js -> `crates/station-3d/src/props.rs` (digital timer)
-- [x] src/office/world/props/neon.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/printer.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/shredder.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/string-lights.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/switches.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/trinkets.js -> `crates/station-3d/src/props.rs`
-- [x] src/office/world/props/tv-games.js -> `crates/station-3d/src/props.rs` + `station-canvas2d/src/office_surfaces.rs`
-- [x] src/office/world/props/tv.js -> `crates/station-3d/src/props.rs` (live stats wall TV)
-- [x] src/office/world/props/update.js -> `crates/station-3d/src/props.rs::animate_props_system`
-- [x] src/office/world/props/vacuum.js -> `crates/station-3d/src/props.rs` (patrolling robot vacuum)
-- [x] src/office/world/room-update.js -> `crates/station-3d/src/lights.rs`
-- [x] src/office/world/screens.js -> `crates/station-3d/src/desks.rs::ScreenMaterials`
-- [x] src/office/world/terrace.js -> `crates/station-3d/src/rooms.rs::spawn_terrace`
-- [x] src/office/world/windows.js -> `crates/station-3d/src/rooms.rs::spawn_wall_window`
+- [~] src/office/world/pro/floor.js -> `crates/station-3d/src/rooms.rs` (verified `g3-pro.png`)
+- [~] src/office/world/pro/pieces.js -> `crates/station-3d/src/rooms.rs` (glass walls, low walls, floor zones)
+- [~] src/office/world/pro/wing.js -> `crates/station-3d/src/rooms.rs` (verified `g3-hq.png`, 44 desks)
+- [~] src/office/world/props/aquarium.js -> `crates/station-3d/src/props.rs` (animated fish)
+- [~] src/office/world/props/arcade.js -> `crates/station-3d/src/props.rs` (invaders + marquee)
+- [~] src/office/world/props/billiards.js -> `crates/station-3d/src/props.rs` (pool table + balls)
+- [~] src/office/world/props/bins.js -> `crates/station-3d/src/props.rs`
+- [~] src/office/world/props/cat.js -> `crates/station-3d/src/props.rs` (animated office tabby)
+- [~] src/office/world/props/cups.js -> `crates/station-3d/src/props.rs` (pantry sink cups)
+- [~] src/office/world/props/dev-servers.js -> `crates/station-3d/src/props.rs` (mini server + :4310 badge)
+- [~] src/office/world/props/duty-board.js -> `crates/station-3d/src/props.rs` (`TRỰC NHẬT` board)
+- [~] src/office/world/props/game-tv.js -> `crates/station-3d/src/props.rs` (55" TV + PS5 + controllers)
+- [~] src/office/world/props/karaoke.js -> `crates/station-3d/src/props.rs` (karaoke booth + neon band + QR)
+- [~] src/office/world/props/microwave.js -> `crates/station-3d/src/props.rs` (digital timer)
+- [~] src/office/world/props/neon.js -> `crates/station-3d/src/props.rs`
+- [~] src/office/world/props/printer.js -> `crates/station-3d/src/props.rs`
+- [~] src/office/world/props/shredder.js -> `crates/station-3d/src/props.rs`
+- [~] src/office/world/props/string-lights.js -> `crates/station-3d/src/props.rs`
+- [~] src/office/world/props/switches.js -> `crates/station-3d/src/props.rs`
+- [ ] src/office/world/props/trinkets.js -> `crates/station-3d/src/props.rs`
+- [~] src/office/world/props/tv-games.js -> `crates/station-3d/src/props.rs` + `station-canvas2d/src/office_surfaces.rs`
+- [~] src/office/world/props/tv.js -> `crates/station-3d/src/props.rs` (live stats wall TV)
+- [~] src/office/world/props/update.js -> `crates/station-3d/src/props.rs::animate_props_system`
+- [~] src/office/world/props/vacuum.js -> `crates/station-3d/src/props.rs` (patrolling robot vacuum)
+- [~] src/office/world/room-update.js -> `crates/station-3d/src/lights.rs`
+- [~] src/office/world/screens.js -> `crates/station-3d/src/desks.rs::ScreenMaterials`
+- [~] src/office/world/terrace.js -> `crates/station-3d/src/rooms.rs::spawn_terrace`
+- [~] src/office/world/windows.js -> `crates/station-3d/src/rooms.rs::spawn_wall_window`
 
 ## P4 — People, Backdrops, Life, Demo, Replay & Audio (88 files)
 
-- [x] src/office/audio/sfx.js -> `crates/station-3d/src/audio.rs` (all 27 SFX waveforms + cooldown tested)
+- [~] src/office/audio/sfx.js -> `crates/station-3d/src/audio.rs` (all 27 SFX waveforms + cooldown tested)
 - [x] src/office/demo/demo-log.js -> `crates/station-3d/src/demo.rs::build_demo_log`
 - [x] src/office/demo/demo.js -> `crates/station-3d/src/demo.rs::build_demo_sessions`
-- [x] src/office/life/altar.js -> `crates/station-3d/src/life.rs::spawn_life_elements` (verified `g4-city.png`)
-- [x] src/office/life/day-swaps.js -> `crates/station-core/src/shared/workdays.rs` + `crates/station-3d/src/life.rs`
-- [x] src/office/life/drill.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [x] src/office/life/incidents.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [x] src/office/life/lift-service.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [x] src/office/life/nap.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [x] src/office/life/photostrips.js -> `crates/station-3d/src/life.rs` + `station-canvas2d/src/boards_and_social.rs`
-- [x] src/office/life/post.js -> `crates/station-3d/src/life.rs`
-- [x] src/office/life/quota.js -> `crates/station-3d/src/life.rs`
-- [x] src/office/life/rain.js -> `crates/station-3d/src/life.rs::update_rain_system`
-- [x] src/office/life/seasons.js -> `crates/station-3d/src/life.rs::SeasonTheme`
-- [x] src/office/life/tests.js -> `crates/station-core/src/state/testrun.rs` + `crates/station-3d/src/life.rs`
-- [x] src/office/life/trophies.js -> `crates/station-3d/src/life.rs` (trophy shelf verified)
-- [x] src/office/life/weather.js -> `crates/station-3d/src/life.rs` (8 VN cities + Open-Meteo tested)
-- [x] src/office/life/your-turn.js -> `crates/station-3d/src/audio.rs` + `crates/station-3d/src/life.rs`
-- [x] src/office/people/accountant.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/bedding.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/billiards.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/breaks.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/chibi-rig.js -> `crates/station-3d/src/chibi.rs` (`Toy` + `Pixar` looks verified)
-- [x] src/office/people/comnha.js -> `crates/station-core/src/shared/comnha.rs` + `crates/station-3d/src/people.rs`
-- [x] src/office/people/comtrua.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/director.js -> `crates/station-3d/src/people.rs` (verified in walnut office)
-- [x] src/office/people/duty.js -> `crates/station-core/src/shared/duty.rs` + `crates/station-3d/src/people.rs`
-- [x] src/office/people/errands.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/evswap.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/farewell.js -> `crates/station-core/src/state/tenure.rs` + `crates/station-3d/src/people.rs`
-- [x] src/office/people/foosball.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/gaming.js -> `crates/station-3d/src/people.rs` (verified on lounge sofa)
-- [x] src/office/people/gatherings.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/guard.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/hr.js -> `crates/station-3d/src/people.rs` (verified patrolling corridor)
-- [x] src/office/people/interns.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/karaoke-songs.js -> `crates/station-3d/src/people.rs::KARAOKE_SONGS`
-- [x] src/office/people/karaoke.js -> `crates/station-3d/src/people.rs` (verified inside KTV booth)
-- [x] src/office/people/look.js -> `crates/station-3d/src/chibi.rs::ChibiLook`
-- [x] src/office/people/navigation.js -> `crates/station-3d/src/people.rs::PatrolPath`
-- [x] src/office/people/nhau.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/outings.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/payday.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/photobooth.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/pickle.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/rounds.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/staff.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/team-lines.js -> `crates/station-3d/src/people.rs::TEAM_CHAT_LINES`
-- [x] src/office/people/teatime.js -> `crates/station-3d/src/people.rs`
-- [x] src/office/people/workers.js -> `crates/station-3d/src/people.rs::spawn_office_cast`
-- [x] src/office/replay/replay.js -> `crates/station-3d/src/replay.rs::ReplayState`
-- [x] src/office/replay/timeline.js -> `crates/station-3d/src/replay.rs` + `station-core/src/shared/timeline.rs`
-- [x] src/office/world/backdrops/beach.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-beach.png`)
-- [x] src/office/world/backdrops/city.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-city.png`)
-- [x] src/office/world/backdrops/countryside.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-country.png`)
-- [x] src/office/world/backdrops/eat-com.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
-- [x] src/office/world/backdrops/index.js -> `crates/station-3d/src/backdrops.rs::BackdropKind` (true unload tested)
-- [x] src/office/world/backdrops/shared.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/shop-cong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-dmx.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-highlands.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-katinat.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-longchau.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-mixue.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-paint.js -> `crates/station-canvas2d/src/street_surfaces.rs`
-- [x] src/office/world/backdrops/shop-phuclong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shop-tgdd.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/shops.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
-- [x] src/office/world/backdrops/street-atm.js -> `crates/station-3d/src/backdrops.rs` + `draw_atm_atlas`
-- [x] src/office/world/backdrops/street-corner.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-csgt.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-ev.js -> `crates/station-3d/src/backdrops.rs` + `draw_ev_cabinet_atlas`
-- [x] src/office/world/backdrops/street-folk.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-life.js -> `crates/station-3d/src/backdrops.rs::animate_backdrop_traffic_system`
-- [x] src/office/world/backdrops/street-lunar.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-morning.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-nhau.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-park.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-photo.js -> `crates/station-3d/src/backdrops.rs` + `draw_photo_studio_atlas`
-- [x] src/office/world/backdrops/street-pickle.js -> `crates/station-3d/src/backdrops.rs` + `draw_pickleball_atlas`
-- [x] src/office/world/backdrops/street-repair.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-riders.js -> `crates/station-3d/src/backdrops.rs::StreetVehicle`
-- [x] src/office/world/backdrops/street-shade.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-signals.js -> `crates/station-3d/src/backdrops.rs` + `draw_traffic_countdown`
-- [x] src/office/world/backdrops/street-siren.js -> `crates/station-3d/src/audio.rs` + `backdrops.rs`
-- [x] src/office/world/backdrops/street-spots.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-wedding.js -> `crates/station-3d/src/backdrops.rs`
-- [x] src/office/world/backdrops/street-wires.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/life/altar.js -> `crates/station-3d/src/life.rs::spawn_life_elements` (verified `g4-city.png`)
+- [ ] src/office/life/day-swaps.js -> `crates/station-core/src/shared/workdays.rs` + `crates/station-3d/src/life.rs`
+- [ ] src/office/life/drill.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [ ] src/office/life/incidents.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [ ] src/office/life/lift-service.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [ ] src/office/life/nap.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
+- [~] src/office/life/photostrips.js -> `crates/station-3d/src/life.rs` + `station-canvas2d/src/boards_and_social.rs`
+- [ ] src/office/life/post.js -> `crates/station-3d/src/life.rs`
+- [ ] src/office/life/quota.js -> `crates/station-3d/src/life.rs`
+- [~] src/office/life/rain.js -> `crates/station-3d/src/life.rs::update_rain_system`
+- [~] src/office/life/seasons.js -> `crates/station-3d/src/life.rs::SeasonTheme`
+- [ ] src/office/life/tests.js -> `crates/station-core/src/state/testrun.rs` + `crates/station-3d/src/life.rs`
+- [~] src/office/life/trophies.js -> `crates/station-3d/src/life.rs` (trophy shelf verified)
+- [~] src/office/life/weather.js -> `crates/station-3d/src/life.rs` (8 VN cities + Open-Meteo tested)
+- [ ] src/office/life/your-turn.js -> `crates/station-3d/src/audio.rs` + `crates/station-3d/src/life.rs`
+- [ ] src/office/people/accountant.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/bedding.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/billiards.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/breaks.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/chibi-rig.js -> `crates/station-3d/src/chibi.rs` (`Toy` + `Pixar` looks verified)
+- [ ] src/office/people/comnha.js -> `crates/station-core/src/shared/comnha.rs` + `crates/station-3d/src/people.rs`
+- [ ] src/office/people/comtrua.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/director.js -> `crates/station-3d/src/people.rs` (verified in walnut office)
+- [ ] src/office/people/duty.js -> `crates/station-core/src/shared/duty.rs` + `crates/station-3d/src/people.rs`
+- [ ] src/office/people/errands.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/evswap.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/farewell.js -> `crates/station-core/src/state/tenure.rs` + `crates/station-3d/src/people.rs`
+- [ ] src/office/people/foosball.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/gaming.js -> `crates/station-3d/src/people.rs` (verified on lounge sofa)
+- [ ] src/office/people/gatherings.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/guard.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/hr.js -> `crates/station-3d/src/people.rs` (verified patrolling corridor)
+- [ ] src/office/people/interns.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/karaoke-songs.js -> `crates/station-3d/src/people.rs::KARAOKE_SONGS`
+- [~] src/office/people/karaoke.js -> `crates/station-3d/src/people.rs` (verified inside KTV booth)
+- [~] src/office/people/look.js -> `crates/station-3d/src/chibi.rs::ChibiLook`
+- [ ] src/office/people/navigation.js -> `crates/station-3d/src/people.rs::PatrolPath`
+- [ ] src/office/people/nhau.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/outings.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/payday.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/photobooth.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/pickle.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/rounds.js -> `crates/station-3d/src/people.rs`
+- [ ] src/office/people/staff.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/team-lines.js -> `crates/station-3d/src/people.rs::TEAM_CHAT_LINES`
+- [ ] src/office/people/teatime.js -> `crates/station-3d/src/people.rs`
+- [~] src/office/people/workers.js -> `crates/station-3d/src/people.rs::spawn_office_cast`
+- [~] src/office/replay/replay.js -> `crates/station-3d/src/replay.rs::ReplayState`
+- [~] src/office/replay/timeline.js -> `crates/station-3d/src/replay.rs` + `station-core/src/shared/timeline.rs`
+- [~] src/office/world/backdrops/beach.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-beach.png`)
+- [~] src/office/world/backdrops/city.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-city.png`)
+- [~] src/office/world/backdrops/countryside.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-country.png`)
+- [~] src/office/world/backdrops/eat-com.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
+- [~] src/office/world/backdrops/index.js -> `crates/station-3d/src/backdrops.rs::BackdropKind` (true unload tested)
+- [~] src/office/world/backdrops/shared.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/world/backdrops/shop-cong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [ ] src/office/world/backdrops/shop-dmx.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [~] src/office/world/backdrops/shop-highlands.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [ ] src/office/world/backdrops/shop-katinat.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [~] src/office/world/backdrops/shop-longchau.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [~] src/office/world/backdrops/shop-mixue.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [ ] src/office/world/backdrops/shop-paint.js -> `crates/station-canvas2d/src/street_surfaces.rs`
+- [ ] src/office/world/backdrops/shop-phuclong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [~] src/office/world/backdrops/shop-tgdd.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
+- [~] src/office/world/backdrops/shops.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
+- [~] src/office/world/backdrops/street-atm.js -> `crates/station-3d/src/backdrops.rs` + `draw_atm_atlas`
+- [ ] src/office/world/backdrops/street-corner.js -> `crates/station-3d/src/backdrops.rs`
+- [ ] src/office/world/backdrops/street-csgt.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/world/backdrops/street-ev.js -> `crates/station-3d/src/backdrops.rs` + `draw_ev_cabinet_atlas`
+- [ ] src/office/world/backdrops/street-folk.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/world/backdrops/street-life.js -> `crates/station-3d/src/backdrops.rs::animate_backdrop_traffic_system`
+- [ ] src/office/world/backdrops/street-lunar.js -> `crates/station-3d/src/backdrops.rs`
+- [ ] src/office/world/backdrops/street-morning.js -> `crates/station-3d/src/backdrops.rs`
+- [ ] src/office/world/backdrops/street-nhau.js -> `crates/station-3d/src/backdrops.rs`
+- [ ] src/office/world/backdrops/street-park.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/world/backdrops/street-photo.js -> `crates/station-3d/src/backdrops.rs` + `draw_photo_studio_atlas`
+- [~] src/office/world/backdrops/street-pickle.js -> `crates/station-3d/src/backdrops.rs` + `draw_pickleball_atlas`
+- [ ] src/office/world/backdrops/street-repair.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/world/backdrops/street-riders.js -> `crates/station-3d/src/backdrops.rs::StreetVehicle`
+- [ ] src/office/world/backdrops/street-shade.js -> `crates/station-3d/src/backdrops.rs`
+- [~] src/office/world/backdrops/street-signals.js -> `crates/station-3d/src/backdrops.rs` + `draw_traffic_countdown`
+- [ ] src/office/world/backdrops/street-siren.js -> `crates/station-3d/src/audio.rs` + `backdrops.rs`
+- [ ] src/office/world/backdrops/street-spots.js -> `crates/station-3d/src/backdrops.rs`
+- [ ] src/office/world/backdrops/street-wedding.js -> `crates/station-3d/src/backdrops.rs`
+- [ ] src/office/world/backdrops/street-wires.js -> `crates/station-3d/src/backdrops.rs`
 
 ## P5 — UI, Panel, Components, App, Styles & i18n (240 files)
 
-- [x] src/office/ui/activity.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/ai-accounts.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/burn.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/cache-words.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/camera-bar.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/chat-avatars.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/ci-card.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/clip-music.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/denied-card.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/event-text.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/group-chat-view.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/group-chat.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/icons.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/image-view.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/lite.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/office/ui/look-switch.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/mac-approve.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/mac-drawer.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/model-choices.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/models.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/notify.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/permissions.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/phone-home.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/phone.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/photo.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/pins.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/portraits.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/session-account.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/session-compose.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/session-drawer.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/settings.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/stranded.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/stuck.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/task-sheet.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/ticks.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/timelapse.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/tips.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/topbar.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/undo-view.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/office/ui/vault.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/whiteboard.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/office/ui/wrapped.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/panel/fmt.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/panel/keys.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/panel/mac.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/panel/main.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/panel/md.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/panel/quota.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/panel/session-card.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
-- [x] src/components/OfficeBoot.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/PanelBoot.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/ActivityPanel.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/BurnDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/CameraToolbar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/FirstPersonHud.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/MacDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/PhoneModal.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/PhotoBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/PlaceCard.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/ReplayBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/SessionDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/SessionRail.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/SettingsPanel.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/Stage.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/TimelinePanel.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/Toast.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/TopBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
-- [x] src/components/office/VaultDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] src/components/office/WrappedModal.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
-- [x] app/apple-icon.png -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/favicon.ico -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/icon.svg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/layout.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/manifest.ts -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/opengraph-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/opengraph-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/panel/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/twitter-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] app/twitter-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [x] src/styles/activity.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/base.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/burn.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/chat.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/csgt.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/drawers.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/fonts.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/office/ui/activity.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/ai-accounts.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/burn.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/office/ui/cache-words.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/camera-bar.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/chat-avatars.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/office/ui/ci-card.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/clip-music.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/denied-card.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/event-text.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/group-chat-view.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/office/ui/group-chat.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/office/ui/icons.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/image-view.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/lite.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [ ] src/office/ui/look-switch.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/mac-approve.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/office/ui/mac-drawer.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/office/ui/model-choices.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/models.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/notify.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/permissions.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/phone-home.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/office/ui/phone.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/office/ui/photo.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/pins.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/portraits.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/session-account.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/session-compose.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/session-drawer.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/office/ui/settings.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/office/ui/stranded.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/stuck.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/task-sheet.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/ticks.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/timelapse.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/tips.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/topbar.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/office/ui/undo-view.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/office/ui/vault.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/office/ui/whiteboard.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/office/ui/wrapped.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/panel/fmt.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/panel/keys.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/panel/mac.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/panel/main.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/panel/md.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/panel/quota.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/panel/session-card.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [~] src/components/OfficeBoot.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/PanelBoot.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/components/office/ActivityPanel.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/BurnDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/components/office/CameraToolbar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/components/office/FirstPersonHud.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/MacDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/components/office/PhoneModal.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] src/components/office/PhotoBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/components/office/PlaceCard.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [ ] src/components/office/ReplayBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/SessionDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/components/office/SessionRail.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/SettingsPanel.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/components/office/Stage.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/TimelinePanel.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/components/office/Toast.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/TopBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [~] src/components/office/VaultDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [~] src/components/office/WrappedModal.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [ ] app/apple-icon.png -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/favicon.ico -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/icon.svg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/layout.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/manifest.ts -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/opengraph-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/opengraph-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [~] app/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [~] app/panel/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/twitter-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] app/twitter-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [ ] src/styles/activity.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/base.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/burn.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/chat.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/csgt.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/drawers.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/fonts.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
 - [x] src/styles/fonts/BeVietnamPro-400-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
 - [x] src/styles/fonts/BeVietnamPro-400-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
 - [x] src/styles/fonts/BeVietnamPro-400-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
@@ -356,240 +360,240 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 - [x] src/styles/fonts/PlexThaiLooped-500-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
 - [x] src/styles/fonts/PlexThaiLooped-600-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
 - [x] src/styles/fonts/PlexThaiLooped-700-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/group-chat.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/labels.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/lite.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/mac.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/modal.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/panel.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/permissions.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/phone.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/photo.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/places.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/replay.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/responsive.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/sessions.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/settings.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/sidebars.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/stage.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/streamer.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/timeline.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/tips.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/todos.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/topbar-plan.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/topbar.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/styles/vault.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
-- [x] src/i18n/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/en/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/chat-a.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/chat-b.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/people-a.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/people-b.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/th/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/locales/vi/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
-- [x] src/i18n/server.ts -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [ ] src/styles/group-chat.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/labels.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/lite.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/mac.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/modal.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/panel.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/permissions.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/phone.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/photo.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/places.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/replay.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/responsive.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/sessions.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/settings.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/sidebars.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/stage.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/streamer.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/timeline.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/tips.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/todos.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/topbar-plan.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/styles/topbar.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [ ] src/styles/vault.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [~] src/i18n/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/en/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/chat-a.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/chat-b.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/people-a.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/people-b.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/th/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/locales/vi/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [~] src/i18n/server.ts -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
 
 ## P1 — HTTP / SSE / OTLP / Launcher Endpoints (106 endpoints)
 
 - [x] endpoint:POST /event -> `crates/station-core/src/http/hooks.rs::post_event`
 - [x] endpoint:POST /v1/metrics -> `crates/station-core/src/http/otel_routes.rs::post_metrics`
 - [x] endpoint:POST /v1/logs -> `crates/station-core/src/http/otel_routes.rs::post_logs`
-- [x] endpoint:POST /hook/question -> `crates/station-core/src/http/hooks.rs::post_hook_question`
+- [~] endpoint:POST /hook/question -> `crates/station-core/src/http/hooks.rs::post_hook_question`
 - [x] endpoint:POST /hook/bind -> `crates/station-core/src/http/hooks.rs::post_hook_bind`
 - [x] endpoint:POST /hook/status -> `crates/station-core/src/http/hooks.rs::post_hook_status`
 - [x] endpoint:POST /hook/loop -> `crates/station-core/src/http/hooks.rs::post_hook_loop`
 - [x] endpoint:POST /hook/start -> `crates/station-core/src/http/hooks.rs::post_hook_start`
-- [x] endpoint:POST /hook/denied -> `crates/station-core/src/http/hooks.rs::post_hook_denied`
-- [x] endpoint:POST /hook/permission -> `crates/station-core/src/http/hooks.rs::post_hook_permission`
+- [~] endpoint:POST /hook/denied -> `crates/station-core/src/http/hooks.rs::post_hook_denied`
+- [~] endpoint:POST /hook/permission -> `crates/station-core/src/http/hooks.rs::post_hook_permission`
 - [x] endpoint:GET /health -> `crates/station-core/src/http/phone.rs::get_health`
 - [x] endpoint:GET /stream -> `crates/station-core/src/http/sse.rs::get_stream`
 - [x] endpoint:GET /api/live -> `crates/station-core/src/http/api.rs::get_live`
 - [x] endpoint:GET /api/doctor -> `crates/station-core/src/http/api.rs::get_doctor`
 - [x] endpoint:GET /api/log -> `crates/station-core/src/http/api.rs::get_log`
-- [x] endpoint:GET /api/timeline -> `crates/station-core/src/http/api.rs::get_timeline`
-- [x] endpoint:GET /api/wrapped -> `crates/station-core/src/http/api.rs::get_wrapped`
-- [x] endpoint:GET /api/replay -> `crates/station-core/src/http/api.rs::get_replay`
-- [x] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
-- [x] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
+- [~] endpoint:GET /api/timeline -> `crates/station-core/src/http/api.rs::get_timeline`
+- [~] endpoint:GET /api/wrapped -> `crates/station-core/src/http/api.rs::get_wrapped`
+- [~] endpoint:GET /api/replay -> `crates/station-core/src/http/api.rs::get_replay`
+- [~] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
+- [~] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
 - [x] endpoint:GET /api/pins -> `crates/station-core/src/http/api.rs::get_pins`
 - [x] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
 - [x] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
-- [x] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
+- [~] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
 - [x] endpoint:GET /api/burn -> `crates/station-core/src/http/api.rs::get_burn`
 - [x] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
 - [x] endpoint:GET /api/panel -> `crates/station-core/src/http/api.rs::get_panel`
 - [x] endpoint:GET /api/chat -> `crates/station-core/src/http/api.rs::get_chat`
 - [x] endpoint:GET /api/loop -> `crates/station-core/src/http/api.rs::get_loop`
 - [x] endpoint:GET /api/tenure -> `crates/station-core/src/http/api.rs::get_tenure`
-- [x] endpoint:GET /api/cache -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [ ] endpoint:GET /api/cache -> `crates/station-core/src/http/api.rs::get_generic_ok`
 - [x] endpoint:GET /api/tasks -> `crates/station-core/src/http/api.rs::get_tasks`
 - [x] endpoint:GET /api/models -> `crates/station-core/src/http/api.rs::get_models`
-- [x] endpoint:GET /api/quick -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [ ] endpoint:GET /api/quick -> `crates/station-core/src/http/api.rs::get_generic_ok`
 - [x] endpoint:GET /api/claude-version -> `crates/station-core/src/http/api.rs::get_claude_version`
 - [x] endpoint:GET /api/push -> `crates/station-core/src/http/api.rs::get_push`
-- [x] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
-- [x] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [x] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [x] endpoint:GET /pin -> `crates/station-core/src/http/phone.rs::get_pin`
-- [x] endpoint:POST /pin -> `crates/station-core/src/http/phone.rs::post_pin`
+- [~] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
+- [ ] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [ ] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [~] endpoint:GET /pin -> `crates/station-core/src/http/phone.rs::get_pin`
+- [~] endpoint:POST /pin -> `crates/station-core/src/http/phone.rs::post_pin`
 - [x] endpoint:POST /api/presence -> `crates/station-core/src/http/api.rs::post_presence`
-- [x] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
+- [~] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
 - [x] endpoint:POST /api/pin -> `crates/station-core/src/http/api.rs::post_pin_update`
-- [x] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
-- [x] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
-- [x] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
-- [x] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
-- [x] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
+- [ ] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [~] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
+- [ ] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [~] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
+- [ ] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [~] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
+- [ ] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [~] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
+- [~] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
 - [x] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
 - [x] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
-- [x] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
-- [x] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/pins -> `crates/station-core/src/http/api.rs::post_pins`
-- [x] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
-- [x] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [~] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
+- [ ] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/loop -> `crates/station-core/src/http/api.rs::post_loop`
-- [x] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
-- [x] endpoint:POST /api/cache -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [~] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
+- [ ] endpoint:POST /api/cache -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/prefs -> `crates/station-core/src/http/api.rs::post_prefs`
 - [x] endpoint:POST /api/todos -> `crates/station-core/src/http/api.rs::post_todos`
-- [x] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [x] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/order -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/later -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/read -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/ag/use -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/add -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/cancel -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/remove -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/rename -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/auto -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/order -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/later -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [x] endpoint:POST /api/ai/ag/read -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [ ] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [ ] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [ ] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_any`
+- [~] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/order -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/later -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/read -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/ag/use -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/add -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/cancel -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/remove -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/rename -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/auto -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/order -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/later -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [~] endpoint:POST /api/ai/ag/read -> `crates/station-core/src/http/api.rs::post_ag_ai`
 - [x] endpoint:GET /api/harnesses -> `crates/station-core/src/http/api.rs::get_harnesses`
 - [x] endpoint:POST /api/harnesses/launch -> `crates/station-core/src/http/api.rs::post_harnesses_launch`
-- [x] endpoint:POST /api/harnesses/custom -> `crates/station-core/src/http/api.rs::post_harnesses_custom`
+- [~] endpoint:POST /api/harnesses/custom -> `crates/station-core/src/http/api.rs::post_harnesses_custom`
