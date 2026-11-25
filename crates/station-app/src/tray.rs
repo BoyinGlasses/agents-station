@@ -16,10 +16,19 @@ const WM_APP_QUIT: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 3
 #[cfg(windows)]
 const WM_APP_NOTIFY_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 4;
 
-#[cfg(windows)]
-const NOTIFY_REASON_CLOSED_TO_TRAY: usize = 0;
-#[cfg(windows)]
-const NOTIFY_REASON_MINIMIZED_TO_TRAY: usize = 1;
+pub const NOTIFY_REASON_CLOSED_TO_TRAY: usize = 0;
+pub const NOTIFY_REASON_MINIMIZED_TO_TRAY: usize = 1;
+pub const NOTIFY_REASON_PERM_PENDING: usize = 2;
+pub const NOTIFY_REASON_QUESTION_PENDING: usize = 3;
+pub const NOTIFY_REASON_DENIED_PENDING: usize = 4;
+
+pub fn hold_notify_reason(kind: &str) -> usize {
+    match kind {
+        "ask" | "question" | "plan" => NOTIFY_REASON_QUESTION_PENDING,
+        "denied" => NOTIFY_REASON_DENIED_PENDING,
+        _ => NOTIFY_REASON_PERM_PENDING,
+    }
+}
 
 #[cfg(windows)]
 const IDM_OPEN_3D: usize = 1001;
@@ -358,10 +367,31 @@ unsafe fn emit_parent_tray_balloon(
         NIF_INFO, NIIF_INFO, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
     };
 
-    let body = if reason == NOTIFY_REASON_CLOSED_TO_TRAY {
-        format!("GUI closed · HTTP daemon active on 127.0.0.1:{port}")
-    } else {
-        format!("3D world unloaded · HTTP daemon active on 127.0.0.1:{port}")
+    let (title, body) = match reason {
+        NOTIFY_REASON_CLOSED_TO_TRAY => (
+            "Agents Station running in Tray",
+            format!("GUI closed · HTTP daemon active on 127.0.0.1:{port}"),
+        ),
+        NOTIFY_REASON_MINIMIZED_TO_TRAY => (
+            "Agents Station running in Tray",
+            format!("3D world unloaded · HTTP daemon active on 127.0.0.1:{port}"),
+        ),
+        NOTIFY_REASON_QUESTION_PENDING => (
+            "Agents Station · Question",
+            "An agent has a question waiting for your answer.".to_owned(),
+        ),
+        NOTIFY_REASON_DENIED_PENDING => (
+            "Agents Station · Action Refused",
+            "An agent tool call was refused. Click the tray icon to retry or keep.".to_owned(),
+        ),
+        NOTIFY_REASON_PERM_PENDING => (
+            "Agents Station · Approval Needed",
+            "An agent is waiting for your permission approval.".to_owned(),
+        ),
+        _ => (
+            "Agents Station",
+            format!("HTTP daemon active on 127.0.0.1:{port}"),
+        ),
     };
 
     unsafe {
@@ -371,7 +401,7 @@ unsafe fn emit_parent_tray_balloon(
         nid.uID = TRAY_ICON_UID;
         nid.uFlags = NIF_INFO;
         nid.dwInfoFlags = NIIF_INFO;
-        copy_wide(&mut nid.szInfoTitle, "Agents Station running in Tray");
+        copy_wide(&mut nid.szInfoTitle, title);
         copy_wide(&mut nid.szInfo, &body);
         Shell_NotifyIconW(NIM_MODIFY, &nid) != 0
     }
@@ -841,6 +871,48 @@ pub fn notify_parent_in_tray(closed_window: bool) -> bool {
     }
 }
 
+/// Asks the parent `"AgentsStationTrayHost"` process to emit an unfocused/in-tray balloon
+/// alert for a newly arrived permission, question, or denied hold via `WM_APP_NOTIFY_TRAY`.
+pub fn notify_parent_hold_alert(kind: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+        let class_w = to_wide(TRAY_WINDOW_CLASS);
+        let reason = hold_notify_reason(kind);
+        unsafe {
+            let hwnd = FindWindowW(class_w.as_ptr(), std::ptr::null());
+            if hwnd.is_null() {
+                return false;
+            }
+            PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, reason, 0) != 0
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = kind;
+        false
+    }
+}
+
+/// Posts a hold alert directly to a known parent `TrayDaemon` `HWND`.
+pub fn notify_tray_hwnd_hold_alert(hwnd_raw: isize, kind: &str) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW;
+        if hwnd_raw == 0 {
+            return false;
+        }
+        let reason = hold_notify_reason(kind);
+        unsafe { PostMessageW(hwnd_raw as HWND, WM_APP_NOTIFY_TRAY, reason, 0) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (hwnd_raw, kind);
+        false
+    }
+}
+
 /// Delegates to `notify_parent_in_tray` so balloon toasts are always executed by the parent
 /// `TrayDaemon` that owns the persistent `HWND` and tray icon.
 pub fn show_native_tray_toast(_title: &str, _body: &str) -> bool {
@@ -928,6 +1000,9 @@ mod tests {
 
         // Post parent-owned tray notification (as --gui-worker does) and pump message.
         assert!(unsafe { PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, NOTIFY_REASON_CLOSED_TO_TRAY, 0) != 0 });
+        assert!(notify_tray_hwnd_hold_alert(daemon.hwnd_raw(), "perm"));
+        assert!(notify_tray_hwnd_hold_alert(daemon.hwnd_raw(), "ask"));
+        assert!(notify_tray_hwnd_hold_alert(daemon.hwnd_raw(), "denied"));
         unsafe {
             let mut msg: MSG = std::mem::zeroed();
             while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
@@ -935,7 +1010,7 @@ mod tests {
                 DispatchMessageW(&msg);
             }
         }
-        assert_eq!(daemon.notifications_dispatched(), 1);
+        assert_eq!(daemon.notifications_dispatched(), 4);
 
         // Simulate external WM_CLOSE -> DefWindowProcW -> DestroyWindow -> WM_DESTROY -> PostQuitMessage(0).
         assert!(unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0 });
