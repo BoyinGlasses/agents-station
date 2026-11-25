@@ -1,5 +1,16 @@
+pub mod auto_resume;
+pub mod bg_sessions;
+pub mod claude_version;
+pub mod git;
+pub mod lift_service;
 pub mod loops;
 pub mod mac_hold;
+pub mod models;
 pub mod overlap;
 pub mod sessions;
+pub mod steer;
+pub mod stranded;
+pub mod tasks;
+pub mod tenure;
+pub mod testrun;
 pub mod undo;
