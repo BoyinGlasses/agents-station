@@ -52,6 +52,39 @@ pub fn append_replay_event(data_dir: &Path, now_ms: u64, compact_event: &Value) 
     Ok(())
 }
 
+pub const REPLAY_RANGE_MAX_DAYS: i64 = 31;
+
+fn local_day_keys_in_range(from_ms: u64, to_ms: u64) -> Vec<String> {
+    use chrono::{Duration, Local, TimeZone};
+
+    let end_ms = to_ms.max(from_ms);
+    let Some(end_date) = Local
+        .timestamp_millis_opt(end_ms as i64)
+        .single()
+        .map(|dt| dt.date_naive())
+    else {
+        return vec![crate::store::otel::day_key(end_ms)];
+    };
+    let start_date = Local
+        .timestamp_millis_opt(from_ms as i64)
+        .single()
+        .map(|dt| dt.date_naive())
+        .unwrap_or(end_date);
+    let min_start = end_date - Duration::days(REPLAY_RANGE_MAX_DAYS);
+    let clamped_start = start_date.max(min_start).min(end_date);
+
+    let mut keys = Vec::new();
+    let mut cur = clamped_start;
+    while cur <= end_date {
+        keys.push(cur.format("%Y-%m-%d").to_string());
+        let Some(next) = cur.succ_opt() else {
+            break;
+        };
+        cur = next;
+    }
+    keys
+}
+
 pub fn read_replay_range(
     data_dir: &Path,
     from_ms: u64,
@@ -59,22 +92,7 @@ pub fn read_replay_range(
 ) -> Vec<crate::shared::timeline::ReplayItem> {
     let replay_dir = data_dir.join("replay");
     let end_ms = to_ms.max(from_ms);
-    let end_day = crate::store::otel::day_key(end_ms);
-    let mut day_keys: Vec<String> = Vec::new();
-    let mut cur = from_ms;
-    for _ in 0..14 {
-        let dk = crate::store::otel::day_key(cur);
-        if !day_keys.contains(&dk) {
-            day_keys.push(dk.clone());
-        }
-        if dk >= end_day {
-            break;
-        }
-        cur = cur.saturating_add(86_400_000);
-    }
-    if !day_keys.contains(&end_day) {
-        day_keys.push(end_day);
-    }
+    let day_keys = local_day_keys_in_range(from_ms, end_ms);
     let mut items = Vec::new();
     for dk in day_keys {
         let Ok(text) = std::fs::read_to_string(replay_dir.join(format!("{dk}.jsonl"))) else {
@@ -732,5 +750,61 @@ mod tests {
         assert!(st.sessions.contains_key("s-active"));
         assert!(!st.pending_perms.contains_key("p-orphaned"));
         assert!(st.pending_perms.contains_key("p-fresh"));
+    }
+
+    #[test]
+    fn read_replay_range_iterates_contiguous_calendar_days_and_clamps_without_gaps() {
+        use chrono::{Duration, Local, NaiveDate, TimeZone};
+
+        let dir = tempfile::tempdir().unwrap();
+        let base_date = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let noon_ms = |d: NaiveDate| -> u64 {
+            Local
+                .from_local_datetime(&d.and_hms_opt(12, 0, 0).unwrap())
+                .earliest()
+                .unwrap()
+                .timestamp_millis() as u64
+        };
+
+        // Write 40 consecutive days of replay events (2026-10-01 ..= 2026-11-09).
+        for offset in 0..40i64 {
+            let d = base_date + Duration::days(offset);
+            let ts = noon_ms(d);
+            let ds = d.format("%Y-%m-%d").to_string();
+            append_replay_event(dir.path(), ts, &json!({ "k": "ev", "day": ds })).unwrap();
+        }
+
+        // 1. 20-day range: every interior day must be present (old 14-day loop dropped days 15..19).
+        let d0 = base_date;
+        let d19 = base_date + Duration::days(19);
+        let items_20 = read_replay_range(dir.path(), noon_ms(d0), noon_ms(d19));
+        let days_20: Vec<&str> = items_20
+            .iter()
+            .map(|it| it.m["day"].as_str().unwrap())
+            .collect();
+        assert_eq!(days_20.len(), 20, "expected all 20 contiguous days, got {days_20:?}");
+        assert_eq!(days_20.first().copied(), Some("2026-10-01"));
+        assert_eq!(days_20.last().copied(), Some("2026-10-20"));
+
+        // 2. 40-day range (> 31 days): clamped at end - 31 days with zero interior gaps.
+        let d39 = base_date + Duration::days(39);
+        let items_40 = read_replay_range(dir.path(), noon_ms(d0), noon_ms(d39));
+        let parsed_dates: Vec<NaiveDate> = items_40
+            .iter()
+            .map(|it| NaiveDate::parse_from_str(it.m["day"].as_str().unwrap(), "%Y-%m-%d").unwrap())
+            .collect();
+        let expected_start = d39 - Duration::days(31);
+        assert_eq!(parsed_dates.first().copied(), Some(expected_start));
+        assert_eq!(parsed_dates.last().copied(), Some(d39));
+        assert_eq!(parsed_dates.len(), 32);
+        for pair in parsed_dates.windows(2) {
+            assert_eq!(
+                pair[0].succ_opt(),
+                Some(pair[1]),
+                "interior gap between {} and {}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 }
