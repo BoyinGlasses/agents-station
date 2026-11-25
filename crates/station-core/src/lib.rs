@@ -1,9 +1,11 @@
 pub mod atomic;
 pub mod auth;
 pub mod config;
+pub mod platform;
 pub mod prefs;
 pub mod redact;
 pub mod shared;
+pub mod system;
 
 pub const DEFAULT_PORT: u16 = 4310;
 pub const DEFAULT_HOST: &str = "127.0.0.1";
