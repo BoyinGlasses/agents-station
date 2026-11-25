@@ -1,0 +1,7 @@
+[package]
+name = "station-canvas2d"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+station-core = { path = "../station-core" }
