@@ -16,6 +16,7 @@ license = "MIT"
 authors = ["Agents Station"]
 
 [workspace.dependencies]
+ab_glyph = "0.2"
 anyhow = "1.0"
 axum = "0.8"
 base64 = "0.22"
@@ -23,16 +24,18 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
 futures-util = "0.3"
 hmac = "0.12"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 notify = "8.0"
 rand = "0.9"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+resvg = { version = "0.45", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 sysinfo = "0.35"
 tempfile = "3.19"
+tiny-skia = "0.11"
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
