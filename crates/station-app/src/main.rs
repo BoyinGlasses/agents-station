@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod cli;
 pub mod gpu;
 pub mod instance;
@@ -55,6 +56,19 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     .add_plugins(station_ui::SmokeHudPlugin {
         assets_dir: resolve_assets_dir(),
     });
+
+    if let Some(scene) = &cli.capture_scene {
+        let out_path = cli
+            .out
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("artifacts/{scene}.png")));
+        app.add_plugins(capture::CapturePlugin {
+            scene: scene.clone(),
+            out_path,
+            settle_frames: 6,
+        });
+    }
+
     app
 }
 
@@ -72,7 +86,7 @@ fn main() -> anyhow::Result<()> {
         None
     };
 
-    if matches!(cli.command, None | Some(cli::Command::Gui)) {
+    if cli.capture_scene.is_some() || matches!(cli.command, None | Some(cli::Command::Gui)) {
         let mut app = build_gui_app(&cli);
         app.run();
         return Ok(());
