@@ -66,10 +66,14 @@ pub fn resolve_install_root() -> PathBuf {
     resolve_install_root_from(exe.as_deref(), Some(manifest))
 }
 
+pub fn resolve_runtime_data_dir_with(env_dir: Option<&str>, install_root: &Path) -> PathBuf {
+    resolve_data_dir(install_root, env_dir)
+}
+
 pub fn resolve_runtime_data_dir() -> PathBuf {
     let root = resolve_install_root();
     let env_dir = std::env::var("OFFICE_DATA_DIR").ok();
-    resolve_data_dir(&root, env_dir.as_deref())
+    resolve_runtime_data_dir_with(env_dir.as_deref(), &root)
 }
 
 pub fn run_cli_command(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Result<()> {
@@ -180,6 +184,9 @@ async fn run_cli_async(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     struct RestoreCwd(PathBuf);
     impl Drop for RestoreCwd {
@@ -190,25 +197,27 @@ mod tests {
 
     #[test]
     fn resolve_runtime_data_dir_ignores_unrelated_temp_cwd_when_env_unset() {
+        let _serial = ENV_CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let orig = std::env::current_dir().unwrap();
         let _guard = RestoreCwd(orig);
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
-        let prev_env = std::env::var_os("OFFICE_DATA_DIR");
-        // SAFETY: serialized test in station-app; restored before exit.
-        unsafe { std::env::remove_var("OFFICE_DATA_DIR") };
-        let resolved = resolve_runtime_data_dir();
-        if let Some(val) = prev_env {
-            unsafe { std::env::set_var("OFFICE_DATA_DIR", val) };
-        }
+        let install_root = resolve_install_root();
+        let resolved = resolve_runtime_data_dir_with(None, &install_root);
 
         assert_ne!(
             resolved,
             tmp.path().join("data"),
             "data_dir must not anchor to arbitrary CWD"
         );
-        assert_eq!(resolved, resolve_install_root().join("data"));
+        assert_eq!(resolved, install_root.join("data"));
+
+        let custom = tmp.path().join("override-data");
+        assert_eq!(
+            resolve_runtime_data_dir_with(custom.to_str(), &install_root),
+            custom
+        );
     }
 
     #[test]
