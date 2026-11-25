@@ -6,7 +6,7 @@ use crate::http::guard::{
 use crate::shared::timeline::build_timeline;
 use crate::state::loops::LoopConfig;
 use crate::state::models::{default_claude_models, models_of, with_models};
-use crate::state::sessions::now_ms;
+use crate::state::sessions::{now_ms, read_replay_range};
 use crate::store::prompt_report::build_prompt_report;
 use crate::store::push::{PushKeys, PushSubscription};
 use crate::store::wrapped::week_summary;
@@ -110,7 +110,8 @@ pub async fn get_timeline(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or_else(|| now.saturating_sub(86_400_000));
     let to = q.get("to").and_then(|s| s.parse::<u64>().ok()).unwrap_or(now);
-    let tl = build_timeline(&[], from, to, now);
+    let items = read_replay_range(&state.data_dir, from, to);
+    let tl = build_timeline(&items, from, to, now);
     Ok(Json(json!(tl)))
 }
 
@@ -1183,5 +1184,88 @@ mod tests {
             assert!(!stored_text.contains(secret), "in-memory chat leaked {secret}");
             assert!(!on_disk.contains(secret), "chat.json leaked {secret}");
         }
+    }
+
+    #[tokio::test]
+    async fn replay_timeline_and_wrapped_read_live_persisted_events() {
+        use crate::state::sessions::now_ms;
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state);
+
+        let before = now_ms();
+        for ev in [
+            json!({
+                "session_id": "s-hist",
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": "D:/repo/hist-proj",
+                "prompt": "ship feature"
+            }),
+            json!({
+                "session_id": "s-hist",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Edit",
+                "tool_input": { "file_path": "src/main.rs" }
+            }),
+            json!({
+                "session_id": "s-hist",
+                "hook_event_name": "Stop",
+                "cwd": "D:/repo/hist-proj"
+            }),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/event")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(ev.to_string()))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+
+        let today = crate::store::otel::day_key(before);
+        let replay_req = Request::builder()
+            .uri(format!("/api/replay?day={today}"))
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let replay_resp = app.clone().oneshot(replay_req).await.unwrap();
+        assert_eq!(replay_resp.status(), StatusCode::OK);
+        let replay_body: Value =
+            serde_json::from_slice(&to_bytes(replay_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(replay_body["items"].as_array().unwrap().len(), 3);
+
+        let tl_req = Request::builder()
+            .uri("/api/timeline")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let tl_resp = app.clone().oneshot(tl_req).await.unwrap();
+        assert_eq!(tl_resp.status(), StatusCode::OK);
+        let tl_body: Value =
+            serde_json::from_slice(&to_bytes(tl_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert!(
+            !tl_body["rows"].as_array().unwrap().is_empty(),
+            "/api/timeline must read replay history rows: {tl_body}"
+        );
+        assert_eq!(tl_body["totals"]["prompts"], 1);
+
+        let wrapped_req = Request::builder()
+            .uri("/api/wrapped")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let wrapped_resp = app.oneshot(wrapped_req).await.unwrap();
+        assert_eq!(wrapped_resp.status(), StatusCode::OK);
+        let wrapped_body: Value =
+            serde_json::from_slice(&to_bytes(wrapped_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(wrapped_body["days"], 1);
+        assert_eq!(wrapped_body["perDay"][0]["prompts"], 1);
     }
 }
