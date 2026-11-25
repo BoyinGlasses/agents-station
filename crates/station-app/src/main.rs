@@ -67,6 +67,19 @@ fn handle_window_close_requests(
     app_exit.write(AppExit::Success);
 }
 
+fn resolve_effective_gpu_pref(cli: &cli::Cli) -> cli::GpuPreference {
+    if cli.gpu != cli::GpuPreference::Auto {
+        return cli.gpu;
+    }
+    let data_dir = commands::resolve_runtime_data_dir();
+    let prefs = station_core::prefs::PrefsStore::load(&data_dir);
+    match prefs.get("gpuPref").and_then(|v| v.as_str()) {
+        Some("integrated") => cli::GpuPreference::Integrated,
+        Some("discrete") => cli::GpuPreference::Discrete,
+        _ => cli::GpuPreference::Auto,
+    }
+}
+
 fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
     let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
     let default_backend = if is_lite_2d {
@@ -74,6 +87,7 @@ fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
     } else {
         Backends::VULKAN
     };
+    let effective_gpu = resolve_effective_gpu_pref(cli);
     // Keep PbrPlugin active even in --lite so switching 2D Lite -> 3D works seamlessly at runtime.
     DefaultPlugins
         .set(WindowPlugin {
@@ -88,7 +102,7 @@ fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
         .set(RenderPlugin {
             render_creation: RenderCreation::Automatic(WgpuSettings {
                 backends: Some(Backends::from_env().unwrap_or(default_backend)),
-                power_preference: gpu::wgpu_power_preference(cli.gpu),
+                power_preference: gpu::wgpu_power_preference(effective_gpu),
                 memory_hints: MemoryHints::MemoryUsage,
                 instance_flags: InstanceFlags::empty(),
                 ..default()
@@ -102,6 +116,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     let capture_mode = cli.capture_scene.is_some();
     let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
     app.add_plugins(build_default_plugins(cli))
+        .add_plugins(MeshPickingPlugin)
         .insert_resource(DirectionalLightShadowMap { size: 1024 })
         .insert_resource(PointLightShadowMap { size: 256 });
     app.add_plugins(EguiPlugin {
@@ -209,13 +224,32 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         None => {
-            let mut ui_state = station_ui::UiState::with_demo_seed(
+            let data_dir = commands::resolve_runtime_data_dir();
+            let prefs = station_core::prefs::PrefsStore::load(&data_dir);
+            let initial_lang = prefs.lang().to_owned();
+            let mut ui_state = station_ui::UiState::new_live(
                 station_3d::OfficeLayout::Pro,
                 station_3d::BackdropKind::City,
                 false,
             );
             ui_state.server_port = cli.port;
-            let data_dir = commands::resolve_runtime_data_dir();
+            if let Some(g) = prefs.get("gpuPref").and_then(|v| v.as_str()) {
+                ui_state.gpu_pref = station_ui::state::GpuPrefUi::from_pref_str(g);
+            }
+            if let Some(s) = prefs.get("soundOn").and_then(|v| v.as_bool()) {
+                ui_state.sound_on = s;
+            }
+            if let Some(c) = prefs.get("weatherCity").and_then(|v| v.as_str()) {
+                ui_state.weather_city = c.to_owned();
+            }
+            if let Ok(raw) = std::fs::read_to_string(data_dir.join("whiteboard.json"))
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
+                && let Some(text) = val.get("text").and_then(|v| v.as_str())
+            {
+                ui_state.whiteboard_text = text.to_owned();
+            }
+            let initial_sound = ui_state.sound_on;
+            let initial_city = ui_state.weather_city.clone();
             if is_lite_2d {
                 ui_state.view_mode = station_ui::ViewMode::Lite2D;
                 app.add_plugins(station_3d::OfficeWorldRuntimePlugin {
@@ -231,10 +265,16 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                     night: false,
                 });
             }
+            app.world_mut()
+                .resource_mut::<station_3d::audio::SfxEngine>()
+                .enabled = initial_sound;
+            app.world_mut()
+                .resource_mut::<station_3d::life::OfficeLifeState>()
+                .weather_city = initial_city;
             app.add_plugins(station_ui::StationUiPlugin {
                 assets_dir: assets_dir.clone(),
                 initial_state: ui_state,
-                initial_lang: "en".to_owned(),
+                initial_lang,
             })
             .add_plugins(bridge::LiveServerBridgePlugin {
                 data_dir,
