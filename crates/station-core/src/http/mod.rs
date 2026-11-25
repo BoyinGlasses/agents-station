@@ -24,6 +24,10 @@ use crate::store::vault::VaultStore;
 use crate::system::SystemMonitor;
 use anyhow::Result;
 use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -98,6 +102,17 @@ impl AppState {
         })
     }
 
+    pub fn allowed_tunnel_host(&self) -> Option<String> {
+        self.prefs
+            .lock()
+            .expect("prefs")
+            .get("tunnelDomain")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
     pub fn flush_all(&self) -> Result<()> {
         let now = now_ms();
         self.prefs.lock().expect("prefs").save()?;
@@ -108,6 +123,16 @@ impl AppState {
         self.tenure.lock().expect("tenure").save()?;
         Ok(())
     }
+}
+
+async fn enforce_host_middleware(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let allowed_tunnel = state.allowed_tunnel_host();
+    guard::enforce_host_allowed(req.headers(), allowed_tunnel.as_deref())?;
+    Ok(next.run(req).await)
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
@@ -190,7 +215,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/harnesses", get(api::get_harnesses))
         .route("/api/harnesses/launch", post(api::post_harnesses_launch))
         .route("/api/harnesses/custom", post(api::post_harnesses_custom))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_host_middleware,
+        ))
         .with_state(state)
+}
+
+/// Router for a dedicated loopback tunnel listener: marks every request server-side with `ViaTunnel(true)`.
+pub fn build_tunnel_router(state: Arc<AppState>) -> Router {
+    build_router(state).layer(axum::Extension(guard::ViaTunnel(true)))
 }
 
 pub struct ServerHandle {
@@ -221,6 +255,29 @@ pub async fn start_http_server(
     Ok(ServerHandle { addr, shutdown: tx })
 }
 
+/// Dedicated loopback-only listener for tunnel ingress (e.g. cloudflared).
+/// Injects `ViaTunnel(true)` server-side so loopback auto-trust is never granted.
+pub async fn start_tunnel_http_server(
+    state: Arc<AppState>,
+    port: u16,
+) -> Result<ServerHandle> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let addr = listener.local_addr()?;
+    let (tx, mut rx) = watch::channel(false);
+    let router = build_tunnel_router(state.clone());
+
+    tokio::spawn(async move {
+        let svc = router.into_make_service_with_connect_info::<SocketAddr>();
+        let _ = axum::serve(listener, svc)
+            .with_graceful_shutdown(async move {
+                let _ = rx.changed().await;
+            })
+            .await;
+    });
+
+    Ok(ServerHandle { addr, shutdown: tx })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,7 +292,7 @@ mod tests {
         let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
         let app = build_router(state.clone());
 
-        // 1. Spoofed Host header -> 403 and zero session mutations
+        // 1. Spoofed Host header -> 421 Misdirected Request and zero session mutations
         let bad_host = Request::builder()
             .method("POST")
             .uri("/event")
@@ -244,7 +301,7 @@ mod tests {
             .body(Body::from(json!({"session_id":"s1","hook_event_name":"SessionStart"}).to_string()))
             .unwrap();
         let resp = app.clone().oneshot(bad_host).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
         assert_eq!(state.office.lock().unwrap().sessions.len(), 0);
 
         // 2. Cross-origin browser request -> 403

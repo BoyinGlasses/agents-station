@@ -1,5 +1,5 @@
 use crate::http::AppState;
-use crate::http::guard::{OptionalPeer, enforce_loopback_strict};
+use crate::http::guard::{OptionalPeer, ViaTunnel, enforce_hook_loopback};
 use crate::state::sessions::now_ms;
 use axum::Json;
 use axum::extract::State;
@@ -11,9 +11,10 @@ pub async fn post_metrics(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     if body.get("resourceMetrics").is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -28,9 +29,10 @@ pub async fn post_logs(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     if body.get("resourceLogs").is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }

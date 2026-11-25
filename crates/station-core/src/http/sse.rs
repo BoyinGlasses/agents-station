@@ -1,5 +1,5 @@
 use crate::http::AppState;
-use crate::http::guard::{OptionalPeer, is_authorized, is_loopback_peer};
+use crate::http::guard::{OptionalPeer, ViaTunnel, is_authorized, is_loopback_peer};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -14,12 +14,19 @@ pub async fn get_stream(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StatusCode> {
-    if !is_authorized(peer, &headers, q.get("k").map(String::as_str), &state.auth) {
+    if !is_authorized(
+        peer,
+        via_tunnel,
+        &headers,
+        q.get("k").map(String::as_str),
+        &state.auth,
+    ) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    let local = is_loopback_peer(peer, &headers);
+    let local = is_loopback_peer(peer, via_tunnel, &headers);
     let lang = state.prefs.lock().expect("prefs lock").lang();
     let (snap_str, rx) = {
         let office = state.office.lock().expect("office lock");

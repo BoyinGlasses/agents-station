@@ -1,5 +1,5 @@
 use crate::http::AppState;
-use crate::http::guard::{OptionalPeer, enforce_loopback_strict};
+use crate::http::guard::{OptionalPeer, ViaTunnel, enforce_hook_loopback};
 use crate::shared::cache_clock::cache_from_status;
 use crate::state::overlap::{file_of, is_edit_tool};
 use crate::state::sessions::now_ms;
@@ -16,9 +16,10 @@ pub async fn post_event(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let ts = now_ms();
     let today = day_key(ts);
 
@@ -75,9 +76,10 @@ pub async fn post_hook_loop(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let ts = now_ms();
     let mut office = state.office.lock().expect("office lock poisoned");
 
@@ -136,9 +138,10 @@ pub async fn post_hook_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let ts = now_ms();
     let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
     if !sid.is_empty() {
@@ -171,10 +174,11 @@ pub async fn post_hook_bind(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let job = headers
         .get("x-office-job")
         .and_then(|v| v.to_str().ok())
@@ -196,9 +200,10 @@ pub async fn post_hook_start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
     let office = state.office.lock().expect("office lock poisoned");
     if let Some(list) = office.pins.get(sid)
@@ -218,9 +223,10 @@ pub async fn post_hook_permission(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(mut body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     if let Some(obj) = body.as_object_mut() {
         obj.entry("hook_event_name")
             .or_insert_with(|| Value::String("PermissionRequest".to_owned()));
@@ -235,9 +241,10 @@ pub async fn post_hook_question(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let mut office = state.office.lock().expect("office lock poisoned");
     office.ingest_raw_event(body);
     Ok(Json(json!({})))
@@ -247,9 +254,10 @@ pub async fn post_hook_denied(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    enforce_loopback_strict(peer, &headers)?;
+    enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let ts = now_ms();
     let mut office = state.office.lock().expect("office lock poisoned");
     let sid = body

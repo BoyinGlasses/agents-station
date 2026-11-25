@@ -1,6 +1,8 @@
 use crate::auth::constant_time_eq;
 use crate::http::AppState;
-use crate::http::guard::{OptionalPeer, is_authorized, is_loopback_peer};
+use crate::http::guard::{
+    OptionalPeer, ViaTunnel, enforce_same_origin_post, is_authorized, is_loopback_peer,
+};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -12,9 +14,16 @@ pub async fn get_root(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !is_authorized(peer, &headers, q.get("k").map(String::as_str), &state.auth) {
+    if !is_authorized(
+        peer,
+        via_tunnel,
+        &headers,
+        q.get("k").map(String::as_str),
+        &state.auth,
+    ) {
         return Redirect::to("/pin").into_response();
     }
     Html(PHONE_HTML).into_response()
@@ -24,9 +33,16 @@ pub async fn get_phone(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !is_authorized(peer, &headers, q.get("k").map(String::as_str), &state.auth) {
+    if !is_authorized(
+        peer,
+        via_tunnel,
+        &headers,
+        q.get("k").map(String::as_str),
+        &state.auth,
+    ) {
         return Redirect::to("/pin").into_response();
     }
     Html(PHONE_HTML).into_response()
@@ -39,15 +55,18 @@ pub async fn get_pin() -> Html<&'static str> {
 pub async fn post_pin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    ViaTunnel(via_tunnel): ViaTunnel,
     axum::Json(body): axum::Json<Value>,
 ) -> Response {
+    if let Err(code) = enforce_same_origin_post(&headers, state.allowed_tunnel_host().as_deref()) {
+        return code.into_response();
+    }
     let pin = body.get("pin").and_then(Value::as_str).unwrap_or("").trim();
     let keep = body.get("keep").and_then(Value::as_bool).unwrap_or(true);
     let expected = state.auth.current_pin();
     if !constant_time_eq(pin, &expected) {
         return (StatusCode::UNAUTHORIZED, axum::Json(json!({ "ok": false }))).into_response();
     }
-    let via_tunnel = headers.contains_key("x-office-via-tunnel");
     let cookie = state.auth.set_cookie_header(keep, via_tunnel);
     let mut resp = axum::Json(json!({ "ok": true })).into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
@@ -83,8 +102,9 @@ pub async fn get_sw() -> Response {
 pub async fn get_health(
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
 ) -> (StatusCode, &'static str) {
-    let _ = is_loopback_peer(peer, &headers);
+    let _ = is_loopback_peer(peer, via_tunnel, &headers);
     (StatusCode::OK, "ok")
 }
 
