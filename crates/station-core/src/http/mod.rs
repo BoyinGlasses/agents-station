@@ -66,7 +66,7 @@ pub struct AppState {
     pub tasks: Arc<Mutex<TaskManager>>,
     pub steer_queue: Mutex<SteerQueue>,
     pub push: Mutex<PushStore>,
-    pub rewriter: Mutex<Rewriter>,
+    pub rewriter: Arc<Mutex<Rewriter>>,
     pub codex_accounts: Mutex<CodexAccounts>,
     pub ag_accounts: Mutex<AntigravityAccounts>,
     pub claude_version: Mutex<ClaudeVersionWatcher>,
@@ -94,7 +94,7 @@ impl AppState {
         let tasks = Arc::new(Mutex::new(TaskManager::new()));
         let steer_queue = Mutex::new(SteerQueue::default());
         let push = PushStore::load(&data_dir);
-        let rewriter = Rewriter::default();
+        let rewriter = Arc::new(Mutex::new(Rewriter::default()));
         let codex_accounts = CodexAccounts::load(&data_dir);
         let ag_accounts = AntigravityAccounts::load(&data_dir);
         let claude_version = ClaudeVersionWatcher::load(&data_dir, home_dir());
@@ -120,7 +120,7 @@ impl AppState {
             tasks,
             steer_queue,
             push: Mutex::new(push),
-            rewriter: Mutex::new(rewriter),
+            rewriter,
             codex_accounts: Mutex::new(codex_accounts),
             ag_accounts: Mutex::new(ag_accounts),
             claude_version: Mutex::new(claude_version),

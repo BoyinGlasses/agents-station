@@ -1578,17 +1578,39 @@ pub async fn post_prompt_rewrite(
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    require_local_post(peer, via_tunnel, &headers)?;
-    let text = body.get("text").and_then(Value::as_str).unwrap_or("");
-    let lang = body.get("lang").and_then(Value::as_str).unwrap_or("en");
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    require_task_permission(&state, local)?;
+    let text = body.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+    let lang = body
+        .get("lang")
+        .and_then(Value::as_str)
+        .unwrap_or("en")
+        .to_owned();
     let photos = body.get("photos").and_then(Value::as_u64).unwrap_or(0) as usize;
-    let mut rw = state.rewriter.lock().unwrap_or_else(|e| e.into_inner());
-    let res = rw.rewrite_with(text, lang, photos, now_ms(), |redacted, _sys, _ph| {
-        Ok(format!("Goal: {redacted}"))
-    });
-    Ok(Json(json!(res)))
+    let rewriter = Arc::clone(&state.rewriter);
+    let work_dir = state.data_dir.join("rewrite");
+    let now = now_ms();
+    let res = tokio::task::spawn_blocking(move || {
+        crate::store::rewrite::Rewriter::execute_blocking(rewriter, work_dir, text, lang, photos, now)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let status = if res.ok {
+        StatusCode::OK
+    } else if matches!(res.code, Some("busy" | "tooMany")) {
+        StatusCode::TOO_MANY_REQUESTS
+    } else {
+        StatusCode::CONFLICT
+    };
+    Ok((status, Json(json!(res))))
 }
 
 pub async fn get_image(
@@ -2684,5 +2706,71 @@ mod tests {
                 .unwrap();
         assert_eq!(ok_ci_body["ok"], true);
         assert!(matches!(ok_ci_body["how"].as_str(), Some("note" | "sent")));
+    }
+
+    #[tokio::test]
+    async fn post_prompt_rewrite_uses_real_transport_redacts_secrets_and_enforces_codes() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+        use std::sync::Mutex;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_cb = Arc::clone(&seen);
+        state
+            .rewriter
+            .lock()
+            .unwrap()
+            .set_transport(Arc::new(move |redacted, _sys, _photos| {
+                seen_cb.lock().unwrap().push(redacted.to_owned());
+                Ok(format!(
+                    "Goal: Rewrite via transport ({redacted})\nContext: repo\nDone when: tests pass"
+                ))
+            }));
+        let app = build_router(state.clone());
+
+        // 1. Valid rewrite invokes real transport with secret already redacted
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/prompt/rewrite")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "text": "fix bug using sk-ant-api03-secret9999",
+                    "lang": "en",
+                    "photos": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        let text = body["text"].as_str().unwrap();
+        assert!(text.contains("Rewrite via transport"), "must use real transport, got: {text}");
+        assert!(!text.contains("sk-ant-api03-secret9999"));
+        let captured = seen.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(!captured[0].contains("sk-ant-api03-secret9999"));
+
+        // 2. Empty prompt -> 409 with code="empty"
+        let empty_req = Request::builder()
+            .method("POST")
+            .uri("/api/prompt/rewrite")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "text": "   " }).to_string()))
+            .unwrap();
+        let empty_resp = app.oneshot(empty_req).await.unwrap();
+        assert_eq!(empty_resp.status(), StatusCode::CONFLICT);
+        let empty_body: Value =
+            serde_json::from_slice(&to_bytes(empty_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(empty_body["ok"], false);
+        assert_eq!(empty_body["code"], "empty");
     }
 }
