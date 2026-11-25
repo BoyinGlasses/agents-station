@@ -1,3 +1,4 @@
+pub mod agent_events;
 pub mod atomic;
 pub mod auth;
 pub mod config;
@@ -5,6 +6,7 @@ pub mod platform;
 pub mod prefs;
 pub mod redact;
 pub mod shared;
+pub mod state;
 pub mod system;
 
 pub const DEFAULT_PORT: u16 = 4310;
