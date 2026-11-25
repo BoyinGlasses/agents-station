@@ -45,6 +45,7 @@ impl AntigravityAccounts {
                     email: body.get("email").and_then(Value::as_str).unwrap_or("").to_owned(),
                     active: self.data.accounts.is_empty(),
                     later: false,
+                    ..Default::default()
                 });
                 let _ = write_json_atomic(&self.file, &self.data);
                 json!({ "ok": true, "slug": slug })
