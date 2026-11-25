@@ -988,6 +988,42 @@ fn require_task_permission(state: &AppState, local: bool) -> Result<(), StatusCo
     }
 }
 
+fn is_dir_allowed_for_remote(state: &AppState, dir: &str) -> bool {
+    let Ok(target) = std::fs::canonicalize(dir) else {
+        return false;
+    };
+    if !target.is_dir() {
+        return false;
+    }
+    let matches_or_inside = |root: &str| -> bool {
+        if root.is_empty() {
+            return false;
+        }
+        std::fs::canonicalize(root).is_ok_and(|r| target == r || target.starts_with(&r))
+    };
+    {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        if office.known_dirs.iter().any(|d| matches_or_inside(d))
+            || office.sessions.values().any(|s| matches_or_inside(&s.cwd))
+        {
+            return true;
+        }
+    }
+    {
+        let git = state.git.lock().unwrap_or_else(|e| e.into_inner());
+        if git.all_repos().iter().any(|r| matches_or_inside(&r.root)) {
+            return true;
+        }
+    }
+    {
+        let stranded = state.stranded.lock().unwrap_or_else(|e| e.into_inner());
+        if stranded.dir_of(dir).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn spawn_task_with_card(
     state: &Arc<AppState>,
     req: crate::state::tasks::TaskStartRequest,
@@ -999,48 +1035,98 @@ pub(crate) fn spawn_task_with_card(
         .and_then(|n| n.to_str())
         .unwrap_or(&work_agent)
         .to_owned();
+    // Create and broadcast the work card BEFORE spawning so fast-exiting children
+    // can never race ahead of `card_id` registration.
+    let card_id = {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let card = office.chat.work_card(
+            &work_agent,
+            &dir_name,
+            json!({ "state": "work", "steps": [], "n": 0, "at": ts, "task": "" }),
+            ts,
+        );
+        let id = card.id.clone();
+        let _ = office.save_chat();
+        office.broadcast(json!({ "k": "chat", "op": "work", "m": card }));
+        id
+    };
+
     let state_done = Arc::clone(state);
-    let card_id_cell: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-    let card_id_cb = Arc::clone(&card_id_cell);
+    let cid_done = card_id.clone();
     let on_done: Arc<dyn Fn(crate::state::tasks::TaskRecord) + Send + Sync> =
         Arc::new(move |rec| {
-            let card_id = card_id_cb
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
-            if let Some(cid) = card_id {
+            let mut updated_card = None;
+            {
                 let mut office = state_done.office.lock().unwrap_or_else(|e| e.into_inner());
                 let st = if rec.status == "done" { "done" } else { &rec.status };
-                office.chat.set_work(
-                    &cid,
+                if let Some(m) = office.chat.set_work(
+                    &cid_done,
                     json!({
                         "state": st,
+                        "task": rec.id,
                         "result": rec.result,
                         "error": rec.error,
+                        "shots": rec.shots,
+                        "choices": rec.choices,
                     }),
-                );
+                ) {
+                    updated_card = Some(m.clone());
+                }
                 let _ = office.save_chat();
+                if let Some(m) = &updated_card {
+                    office.broadcast(json!({ "k": "chat", "op": "work", "id": cid_done, "m": m }));
+                }
+            }
+            // Drain any queued steer note targeting this task or its session.
+            let queued = {
+                let mut sq = state_done
+                    .steer_queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                sq.take(&rec.id)
+                    .or_else(|| rec.sid.as_deref().and_then(|sid| sq.take(sid)))
+                    .or_else(|| sq.take(&format!("dir:{}", rec.dir)))
+            };
+            if let Some(q) = queued
+                && let Some(q_dir) = q.dir.filter(|d| std::path::Path::new(d).is_dir())
+            {
+                let _ = spawn_task_with_card(
+                    &state_done,
+                    crate::state::tasks::TaskStartRequest {
+                        dir: q_dir,
+                        text: q.text,
+                        agent: q.agent,
+                        model: String::new(),
+                        fork: false,
+                    },
+                );
             }
         });
+
     let res = crate::state::tasks::start_and_spawn(
         Arc::clone(&state.tasks),
         req,
         ts,
         Some(on_done),
     );
-    if res.get("ok").and_then(Value::as_bool) == Some(true)
-        && let Some(tid) = res.get("task").and_then(|t| t.get("id")).and_then(Value::as_str)
-    {
+    if res.get("ok").and_then(Value::as_bool) == Some(true) {
+        if let Some(tid) = res
+            .get("task")
+            .and_then(|t| t.get("id"))
+            .and_then(Value::as_str)
+        {
+            let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(m) = office.chat.set_work(&card_id, json!({ "task": tid })) {
+                let m_clone = m.clone();
+                let _ = office.save_chat();
+                office.broadcast(json!({ "k": "chat", "op": "work", "id": card_id, "m": m_clone }));
+            }
+        }
+    } else {
+        // Spawn failed: remove the pre-created work card cleanly.
         let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
-        let card = office.chat.work_card(
-            &work_agent,
-            &dir_name,
-            json!({ "state": "work", "steps": [], "n": 0, "at": ts, "task": tid }),
-            ts,
-        );
-        *card_id_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(card.id.clone());
+        office.chat.msgs.retain(|m| m.id != card_id);
         let _ = office.save_chat();
-        office.broadcast(json!({ "k": "chat", "op": "work", "m": card }));
     }
     res
 }
@@ -1221,6 +1307,9 @@ pub async fn post_tasks(
         if let Some(s) = office.sessions.get(sid) {
             dir = s.cwd.clone();
         }
+    }
+    if !local && !is_dir_allowed_for_remote(&state, &dir) {
+        return Err(StatusCode::FORBIDDEN);
     }
     let req = crate::state::tasks::TaskStartRequest {
         dir,
@@ -3125,11 +3214,13 @@ mod tests {
         let fast_cmd = || crate::state::tasks::TaskCommandSpec {
             program: std::path::PathBuf::from("cmd.exe"),
             args: vec!["/C".into(), "echo".into(), "done".into()],
+            stdin_payload: None,
         };
         #[cfg(not(windows))]
         let fast_cmd = || crate::state::tasks::TaskCommandSpec {
             program: std::path::PathBuf::from("sh"),
             args: vec!["-c".into(), "echo done".into()],
+            stdin_payload: None,
         };
         state
             .tasks
@@ -3438,11 +3529,13 @@ mod tests {
         let fast_cmd = || crate::state::tasks::TaskCommandSpec {
             program: std::path::PathBuf::from("cmd.exe"),
             args: vec!["/C".into(), "echo".into(), "ok".into()],
+            stdin_payload: None,
         };
         #[cfg(not(windows))]
         let fast_cmd = || crate::state::tasks::TaskCommandSpec {
             program: std::path::PathBuf::from("sh"),
             args: vec!["-c".into(), "echo ok".into()],
+            stdin_payload: None,
         };
         state
             .tasks
@@ -3645,5 +3738,158 @@ mod tests {
         )
         .unwrap();
         assert!(days_body["today"].as_str().is_some_and(|s| s.len() == 10));
+    }
+
+    #[tokio::test]
+    async fn post_tasks_enforces_remote_dir_allowlist_stops_inflight_child_and_broadcasts_done() {
+        use crate::auth::COOKIE_NAME;
+        use axum::body::to_bytes;
+        use axum::extract::ConnectInfo;
+        use serde_json::{Value, json};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let allowed_dir = dir.path().join("allowed");
+        let secret_dir = dir.path().join("secret");
+        std::fs::create_dir_all(&allowed_dir).unwrap();
+        std::fs::create_dir_all(&secret_dir).unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        state
+            .prefs
+            .lock()
+            .unwrap()
+            .set("phoneTasks", Some(Value::Bool(true)))
+            .unwrap();
+        state
+            .office
+            .lock()
+            .unwrap()
+            .note_dir(&allowed_dir.to_string_lossy());
+        let cookie = format!("{COOKIE_NAME}={}", state.auth.sign_cookie(false));
+        let lan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 52100);
+
+        #[cfg(windows)]
+        let slow_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("ping.exe"),
+            args: vec!["-n".into(), "20".into(), "127.0.0.1".into()],
+            stdin_payload: None,
+        };
+        #[cfg(not(windows))]
+        let slow_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("sleep"),
+            args: vec!["20".into()],
+            stdin_payload: None,
+        };
+        state
+            .tasks
+            .lock()
+            .unwrap()
+            .set_command_override(Arc::new(move |_req, _id| Some(slow_cmd())));
+
+        let app = build_router(state.clone());
+
+        // 1. Remote caller targeting unknown directory -> 403 Forbidden
+        let mut bad_remote = Request::builder()
+            .method("POST")
+            .uri("/api/tasks")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "dir": secret_dir.to_string_lossy(), "text": "pwn", "agent": "claude" })
+                    .to_string(),
+            ))
+            .unwrap();
+        bad_remote.extensions_mut().insert(ConnectInfo(lan_peer));
+        assert_eq!(
+            app.clone().oneshot(bad_remote).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // 2. Remote caller targeting known project dir -> 200 OK, then POST /api/tasks/stop kills & frees slot
+        let mut ok_remote = Request::builder()
+            .method("POST")
+            .uri("/api/tasks")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "dir": allowed_dir.to_string_lossy(), "text": "run", "agent": "claude" })
+                    .to_string(),
+            ))
+            .unwrap();
+        ok_remote.extensions_mut().insert(ConnectInfo(lan_peer));
+        let start_resp = app.clone().oneshot(ok_remote).await.unwrap();
+        assert_eq!(start_resp.status(), StatusCode::OK);
+        let start_body: Value =
+            serde_json::from_slice(&to_bytes(start_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let tid = start_body["task"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(state.tasks.lock().unwrap().list().len(), 1);
+
+        let stop_req = Request::builder()
+            .method("POST")
+            .uri("/api/tasks/stop")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": tid }).to_string()))
+            .unwrap();
+        let stop_resp = app.clone().oneshot(stop_req).await.unwrap();
+        assert_eq!(stop_resp.status(), StatusCode::OK);
+        let stop_body: Value =
+            serde_json::from_slice(&to_bytes(stop_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(stop_body["ok"], true);
+        assert!(
+            state.tasks.lock().unwrap().list().is_empty(),
+            "/api/tasks/stop must immediately release running slot"
+        );
+
+        // 3. Fast task broadcasts SSE completion update with state="done"
+        #[cfg(windows)]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("cmd.exe"),
+            args: vec!["/C".into(), "echo".into(), "finished-ok".into()],
+            stdin_payload: None,
+        };
+        #[cfg(not(windows))]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("sh"),
+            args: vec!["-c".into(), "echo finished-ok".into()],
+            stdin_payload: None,
+        };
+        state
+            .tasks
+            .lock()
+            .unwrap()
+            .set_command_override(Arc::new(move |_req, _id| Some(fast_cmd())));
+        let mut rx = state.office.lock().unwrap().subscribe();
+        let run_req = Request::builder()
+            .method("POST")
+            .uri("/api/tasks")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "dir": allowed_dir.to_string_lossy(), "text": "quick", "agent": "claude" })
+                    .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.oneshot(run_req).await.unwrap().status(), StatusCode::OK);
+
+        let mut saw_done = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && !saw_done {
+            if let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                if ev["k"] == "chat"
+                    && ev["op"] == "work"
+                    && ev["m"]["work"]["state"] == "done"
+                {
+                    saw_done = true;
+                }
+            }
+        }
+        assert!(saw_done, "task completion must broadcast SSE work card update with state=done");
     }
 }
