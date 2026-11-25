@@ -418,9 +418,19 @@ impl UndoManager {
                 after.join("manifest.json"),
                 serde_json::to_string_pretty(&manifest).unwrap_or_default(),
             );
-        }
-        if let Some(t) = self.turns.get_mut(sid).and_then(|l| l.last_mut()) {
-            t.undone = now_ms;
+            if let Some(t) = self.turns.get_mut(sid).and_then(|l| l.last_mut()) {
+                if only_files.is_some_and(|f| !f.is_empty()) {
+                    let done_set: std::collections::HashSet<String> =
+                        done.iter().map(|d| d.file.clone()).collect();
+                    t.files
+                        .retain(|x| !done_set.contains(&x.file.to_string_lossy().into_owned()));
+                    if t.files.is_empty() {
+                        t.undone = now_ms;
+                    }
+                } else {
+                    t.undone = now_ms;
+                }
+            }
         }
         UndoApplyResult {
             done,

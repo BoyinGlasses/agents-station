@@ -541,6 +541,9 @@ pub async fn post_undo(
                 .collect()
         });
     let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    if !office.sessions.contains_key(sid) && office.undo.plan(sid).is_none() {
+        return Ok((StatusCode::NOT_FOUND, Json(json!({ "ok": false, "code": "gone" }))));
+    }
     if office
         .sessions
         .get(sid)
@@ -4027,5 +4030,142 @@ mod tests {
             }
         }
         assert!(saw_auto_resume, "StopFailure with autoResume=true must trigger autoResume");
+    }
+
+    #[tokio::test]
+    async fn post_undo_selective_files_keeps_remaining_file_undoable_and_returns_404_when_missing() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let fa = ws.join("a.txt");
+        let fb = ws.join("b.txt");
+        std::fs::write(&fa, "orig-a").unwrap();
+        std::fs::write(&fb, "orig-b").unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        let app = build_router(state.clone());
+
+        // Missing session & no turns -> 404
+        let missing = Request::builder()
+            .method("POST")
+            .uri("/api/undo")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": "nonexistent-sid" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(missing).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+        for ev in [
+            json!({ "session_id": "s-sel2", "hook_event_name": "UserPromptSubmit", "cwd": ws.to_string_lossy(), "prompt": "edit two" }),
+            json!({ "session_id": "s-sel2", "hook_event_name": "PreToolUse", "cwd": ws.to_string_lossy(), "tool_name": "Edit", "tool_input": { "file_path": fa.to_string_lossy() } }),
+            json!({ "session_id": "s-sel2", "hook_event_name": "PreToolUse", "cwd": ws.to_string_lossy(), "tool_name": "Edit", "tool_input": { "file_path": fb.to_string_lossy() } }),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/event")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(ev.to_string()))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+        std::fs::write(&fa, "mod-a").unwrap();
+        std::fs::write(&fb, "mod-b").unwrap();
+        let stop = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "session_id": "s-sel2", "hook_event_name": "Stop", "cwd": ws.to_string_lossy() }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(stop).await.unwrap().status(), StatusCode::OK);
+
+        // First selective undo: only a.txt
+        let canon_a = std::fs::canonicalize(&fa).unwrap();
+        let req_a = Request::builder()
+            .method("POST")
+            .uri("/api/undo")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": "s-sel2", "files": [canon_a.to_string_lossy()] }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req_a).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(std::fs::read_to_string(&fa).unwrap(), "orig-a");
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), "mod-b");
+
+        // Second selective undo: b.txt MUST STILL be undoable (not locked out by turn.undone!)
+        let canon_b = std::fs::canonicalize(&fb).unwrap();
+        let req_b = Request::builder()
+            .method("POST")
+            .uri("/api/undo")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": "s-sel2", "files": [canon_b.to_string_lossy()] }).to_string()))
+            .unwrap();
+        let resp_b = app.oneshot(req_b).await.unwrap();
+        assert_eq!(resp_b.status(), StatusCode::OK);
+        let body_b: Value =
+            serde_json::from_slice(&to_bytes(resp_b.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body_b["done"].as_array().unwrap().len(), 1);
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), "orig-b");
+    }
+
+    #[tokio::test]
+    async fn remote_auth_boundaries_block_chat_photo_say_and_undo_without_phone_tasks() {
+        use crate::auth::COOKIE_NAME;
+        use crate::http::guard::ViaTunnel;
+        use axum::extract::ConnectInfo;
+        use serde_json::json;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let cookie = format!("{COOKIE_NAME}={}", state.auth.sign_cookie(false));
+        let app = build_router(state);
+        let lan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 52200);
+        let loopback_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52201);
+
+        let cases = [
+            ("/api/chat", json!({ "op": "photo", "data": "data:image/jpeg;base64,/9j/4AAQ" })),
+            ("/api/chat", json!({ "op": "say", "from": "reception", "text": "spoof" })),
+            ("/api/undo", json!({ "id": "s1" })),
+        ];
+        for (uri, payload) in cases {
+            let mut lan_req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("host", "192.168.1.20:4310")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            lan_req.extensions_mut().insert(ConnectInfo(lan_peer));
+            assert_eq!(
+                app.clone().oneshot(lan_req).await.unwrap().status(),
+                StatusCode::FORBIDDEN,
+                "LAN caller must get 403 on {uri} {payload}"
+            );
+
+            let mut tun_req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("host", "127.0.0.1:4310")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            tun_req.extensions_mut().insert(ConnectInfo(loopback_peer));
+            tun_req.extensions_mut().insert(ViaTunnel(true));
+            assert_eq!(
+                app.clone().oneshot(tun_req).await.unwrap().status(),
+                StatusCode::FORBIDDEN,
+                "ViaTunnel caller must get 403 on {uri} {payload}"
+            );
+        }
     }
 }
