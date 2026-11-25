@@ -11,7 +11,7 @@ use crate::platform::default_platform;
 use crate::prefs::PrefsStore;
 use crate::state::claude_version::ClaudeVersionWatcher;
 use crate::state::lift_service::LiftService;
-use crate::state::sessions::{OfficeState, now_ms};
+use crate::state::sessions::{OfficeState, ReapReport, now_ms};
 use crate::state::tasks::TaskManager;
 use crate::state::tenure::TenureStore;
 use crate::store::antigravity_accounts::AntigravityAccounts;
@@ -33,7 +33,11 @@ use serde_json::Value;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::watch;
+
+pub const OTEL_FLUSH_INTERVAL: Duration = Duration::from_secs(15);
+pub const REAP_INTERVAL: Duration = Duration::from_secs(60);
 
 pub trait HarnessApi: Send + Sync {
     fn list_json(&self) -> Value;
@@ -124,6 +128,26 @@ impl AppState {
         self.vault.lock().unwrap_or_else(|e| e.into_inner()).flush()?;
         self.tenure.lock().unwrap_or_else(|e| e.into_inner()).save()?;
         Ok(())
+    }
+
+    pub fn flush_dirty_otel(&self, now: u64) -> Result<bool> {
+        let mut otel = self.otel.lock().unwrap_or_else(|e| e.into_inner());
+        if otel.is_dirty() {
+            otel.flush(now)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn reap_once(&self, now: u64) -> ReapReport {
+        let auto_close_hours = self
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .auto_close();
+        let mut office = self.office.lock().unwrap_or_else(|e| e.into_inner());
+        office.reap_stale(now, auto_close_hours)
     }
 }
 
@@ -234,6 +258,49 @@ pub struct ServerHandle {
     pub shutdown: watch::Sender<bool>,
 }
 
+fn spawn_maintenance_loop_with_intervals(
+    state: Arc<AppState>,
+    mut shutdown: watch::Receiver<bool>,
+    otel_every: Duration,
+    reap_every: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if *shutdown.borrow() {
+            let _ = state.flush_dirty_otel(now_ms());
+            return;
+        }
+        let start = tokio::time::Instant::now();
+        let mut otel_tick = tokio::time::interval_at(start + otel_every, otel_every);
+        otel_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut reap_tick = tokio::time::interval_at(start + reap_every, reap_every);
+        reap_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = otel_tick.tick() => {
+                    let _ = state.flush_dirty_otel(now_ms());
+                }
+                _ = reap_tick.tick() => {
+                    let _ = state.reap_once(now_ms());
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        let _ = state.flush_dirty_otel(now_ms());
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+pub fn spawn_maintenance_loop(
+    state: Arc<AppState>,
+    shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_maintenance_loop_with_intervals(state, shutdown, OTEL_FLUSH_INTERVAL, REAP_INTERVAL)
+}
+
 pub async fn start_http_server(
     state: Arc<AppState>,
     host: &str,
@@ -242,6 +309,7 @@ pub async fn start_http_server(
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
     let (tx, mut rx) = watch::channel(false);
+    spawn_maintenance_loop(state.clone(), tx.subscribe());
     let router = build_router(state.clone());
 
     tokio::spawn(async move {
@@ -378,5 +446,127 @@ mod tests {
         let resp = app.clone().oneshot(img).await.unwrap();
         assert_eq!(resp.headers().get("content-security-policy").unwrap(), "sandbox");
         assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
+    }
+
+    #[tokio::test]
+    async fn maintenance_loop_flushes_dirty_otel_reaps_stale_and_flushes_on_shutdown() {
+        use crate::state::sessions::PendingPerm;
+        use crate::store::otel::{COST_METRIC, OtelStore, day_key};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let state = Arc::new(AppState::new(data_dir.clone(), None).unwrap());
+        state.prefs.lock().unwrap().set_auto_close(2).unwrap();
+
+        let now = now_ms();
+        let metric_at = |val: f64, seq: u64| {
+            let t_ns = (now + seq * 1000) * 1_000_000;
+            json!({
+                "resourceMetrics": [{
+                    "scopeMetrics": [{
+                        "metrics": [{
+                            "name": COST_METRIC,
+                            "sum": {
+                                "aggregationTemporality": 1,
+                                "dataPoints": [{
+                                    "asDouble": val,
+                                    "startTimeUnixNano": (t_ns - 1_000_000).to_string(),
+                                    "timeUnixNano": t_ns.to_string(),
+                                    "attributes": [
+                                        { "key": "session.id", "value": { "stringValue": "s-maint" } },
+                                        { "key": "model", "value": { "stringValue": "claude-sonnet-4" } }
+                                    ]
+                                }]
+                            }
+                        }]
+                    }]
+                }]
+            })
+        };
+
+        {
+            let mut otel = state.otel.lock().unwrap();
+            assert_eq!(otel.ingest_metrics(&metric_at(1.5, 1), now), 1);
+            assert!(otel.is_dirty());
+        }
+        assert!(
+            !data_dir.join("otel").join("state.json").exists(),
+            "otel state should not be flushed before maintenance tick"
+        );
+
+        {
+            let mut office = state.office.lock().unwrap();
+            office
+                .ingest_raw_event(json!({
+                    "session_id": "s-idle-maint",
+                    "hook_event_name": "SessionStart",
+                    "cwd": "D:/repo/old"
+                }))
+                .unwrap();
+            office.sessions.get_mut("s-idle-maint").unwrap().updated_at =
+                now.saturating_sub(3 * 3_600_000);
+            office.pending_perms.insert(
+                "p-old".into(),
+                PendingPerm {
+                    id: "p-old".into(),
+                    sess: "s-idle-maint".into(),
+                    name: "old".into(),
+                    kind: "perm".into(),
+                    tool_type: "bash".into(),
+                    label: "cmd".into(),
+                    detail: "echo".into(),
+                    danger: None,
+                    created_at: now.saturating_sub(15 * 60_000),
+                },
+            );
+        }
+
+        assert_eq!(OTEL_FLUSH_INTERVAL, Duration::from_secs(15));
+        assert_eq!(REAP_INTERVAL, Duration::from_secs(60));
+
+        let (tx, rx) = watch::channel(false);
+        let handle = spawn_maintenance_loop_with_intervals(
+            state.clone(),
+            rx,
+            Duration::from_millis(20),
+            Duration::from_millis(80),
+        );
+
+        // OTel flush tick fires before shutdown and before reaper tick.
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        let otel_dir = data_dir.join("otel");
+        assert!(otel_dir.join("state.json").exists(), "otel state.json must flush on periodic tick");
+        assert!(
+            otel_dir.join(format!("{}.json", day_key(now))).exists(),
+            "otel day file must flush on periodic tick"
+        );
+        let reloaded = OtelStore::load(otel_dir.clone(), 30, now);
+        assert!((reloaded.burn_summary("today", now).total.row.usd - 1.5).abs() < 1e-6);
+
+        // Reaper tick fires and cleans idle session + expired pending_perms.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        {
+            let office = state.office.lock().unwrap();
+            assert!(!office.sessions.contains_key("s-idle-maint"));
+            assert!(!office.pending_perms.contains_key("p-old"));
+        }
+
+        // Stop short-interval loop cleanly.
+        tx.send(true).unwrap();
+        handle.await.unwrap();
+
+        // Public spawn_maintenance_loop flushes dirty OTel on shutdown.
+        let (tx2, rx2) = watch::channel(false);
+        let handle2 = spawn_maintenance_loop(state.clone(), rx2);
+        {
+            let mut otel = state.otel.lock().unwrap();
+            assert_eq!(otel.ingest_metrics(&metric_at(2.0, 2), now), 1);
+        }
+        tx2.send(true).unwrap();
+        handle2.await.unwrap();
+
+        let reloaded2 = OtelStore::load(otel_dir, 30, now);
+        assert!((reloaded2.burn_summary("today", now).total.row.usd - 3.5).abs() < 1e-6);
     }
 }
