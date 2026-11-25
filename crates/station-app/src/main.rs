@@ -40,12 +40,7 @@ fn resolve_assets_dir() -> PathBuf {
 
 /// Bare camera for ultra-low RAM 2D Lite mode (zero 3D meshes, lights, or textures).
 fn spawn_lite_2d_camera(mut commands: Commands) {
-    commands.spawn((
-        Camera3d::default(),
-        bevy::core_pipeline::tonemapping::Tonemapping::None,
-        Msaa::Off,
-        Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
+    station_3d::camera::spawn_lite_2d_camera(&mut commands);
 }
 
 fn handle_window_close_requests(
@@ -68,16 +63,15 @@ fn handle_window_close_requests(
     app_exit.write(AppExit::Success);
 }
 
-fn build_gui_app(cli: &cli::Cli) -> App {
-    let mut app = App::new();
-    let capture_mode = cli.capture_scene.is_some();
+fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
     let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
     let default_backend = if is_lite_2d {
         Backends::DX12
     } else {
         Backends::VULKAN
     };
-    let plugins = DefaultPlugins
+    // Keep PbrPlugin active even in --lite so switching 2D Lite -> 3D works seamlessly at runtime.
+    DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Agents Station".to_owned(),
@@ -96,14 +90,16 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 ..default()
             }),
             ..default()
-        });
-    if is_lite_2d {
-        app.add_plugins(plugins.disable::<bevy::pbr::PbrPlugin>());
-    } else {
-        app.add_plugins(plugins)
-            .insert_resource(DirectionalLightShadowMap { size: 1024 })
-            .insert_resource(PointLightShadowMap { size: 256 });
-    }
+        })
+}
+
+fn build_gui_app(cli: &cli::Cli) -> App {
+    let mut app = App::new();
+    let capture_mode = cli.capture_scene.is_some();
+    let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
+    app.add_plugins(build_default_plugins(cli))
+        .insert_resource(DirectionalLightShadowMap { size: 1024 })
+        .insert_resource(PointLightShadowMap { size: 256 });
     app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
     })
@@ -218,8 +214,11 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             let data_dir = commands::resolve_runtime_data_dir();
             if is_lite_2d {
                 ui_state.view_mode = station_ui::ViewMode::Lite2D;
-                app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
-                    .add_systems(Startup, spawn_lite_2d_camera);
+                app.add_plugins(station_3d::OfficeWorldRuntimePlugin {
+                    assets_dir: assets_dir.clone(),
+                })
+                .insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
+                .add_systems(Startup, spawn_lite_2d_camera);
             } else {
                 app.add_plugins(station_3d::OfficeWorldPlugin {
                     layout: station_3d::OfficeLayout::Pro,
@@ -445,5 +444,15 @@ mod tests {
         let emitted: Vec<&AppExit> = reader.read(exits).collect();
         assert_eq!(emitted.len(), 1);
         assert!(matches!(emitted[0], AppExit::Success));
+    }
+
+    #[test]
+    fn lite_mode_keeps_pbr_plugin_enabled_for_runtime_3d_switch() {
+        let lite_cli = cli::Cli::parse_from(["agents-station", "--lite"]);
+        let plugins = build_default_plugins(&lite_cli);
+        assert!(
+            plugins.enabled::<bevy::pbr::PbrPlugin>(),
+            "PbrPlugin must remain enabled in --lite so switching 2D Lite -> 3D works seamlessly"
+        );
     }
 }
