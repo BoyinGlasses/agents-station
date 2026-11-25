@@ -14,6 +14,7 @@ use crate::state::claude_version::ClaudeVersionWatcher;
 use crate::state::git::GitTracker;
 use crate::state::lift_service::LiftService;
 use crate::state::sessions::{OfficeState, ReapReport, now_ms};
+use crate::state::steer::SteerQueue;
 use crate::state::stranded::StrandedScanner;
 use crate::state::tasks::TaskManager;
 use crate::state::tenure::TenureStore;
@@ -62,7 +63,8 @@ pub struct AppState {
     pub trophies: Mutex<TrophyStore>,
     pub vault: Mutex<VaultStore>,
     pub tenure: Mutex<TenureStore>,
-    pub tasks: Mutex<TaskManager>,
+    pub tasks: Arc<Mutex<TaskManager>>,
+    pub steer_queue: Mutex<SteerQueue>,
     pub push: Mutex<PushStore>,
     pub rewriter: Mutex<Rewriter>,
     pub codex_accounts: Mutex<CodexAccounts>,
@@ -89,7 +91,8 @@ impl AppState {
         let trophies = TrophyStore::load(&data_dir, now);
         let vault = VaultStore::load(&data_dir);
         let tenure = TenureStore::load(&data_dir, now);
-        let tasks = TaskManager::new();
+        let tasks = Arc::new(Mutex::new(TaskManager::new()));
+        let steer_queue = Mutex::new(SteerQueue::default());
         let push = PushStore::load(&data_dir);
         let rewriter = Rewriter::default();
         let codex_accounts = CodexAccounts::load(&data_dir);
@@ -114,7 +117,8 @@ impl AppState {
             trophies: Mutex::new(trophies),
             vault: Mutex::new(vault),
             tenure: Mutex::new(tenure),
-            tasks: Mutex::new(tasks),
+            tasks,
+            steer_queue,
             push: Mutex::new(push),
             rewriter: Mutex::new(rewriter),
             codex_accounts: Mutex::new(codex_accounts),
@@ -231,10 +235,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/tenure", get(api::get_tenure).post(api::post_tenure))
         .route("/api/cache", get(api::get_generic_ok).post(api::post_local_ok))
         .route("/api/tasks", get(api::get_tasks).post(api::post_tasks))
-        .route("/api/tasks/allow", post(api::post_local_ok))
-        .route("/api/tasks/bg", post(api::post_local_ok))
+        .route("/api/tasks/allow", post(api::post_tasks_allow))
+        .route("/api/tasks/bg", post(api::post_tasks_bg))
         .route("/api/tasks/stop", post(api::post_tasks_stop))
-        .route("/api/tasks/steer", post(api::post_local_ok))
+        .route("/api/tasks/steer", post(api::post_tasks_steer))
+        .route("/api/steer", post(api::post_tasks_steer))
         .route("/api/models", get(api::get_models).post(api::post_models))
         .route("/api/quick", get(api::get_generic_ok).post(api::post_local_ok))
         .route("/api/claude-version", get(api::get_claude_version))
@@ -252,7 +257,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/prompt/rewrite", post(api::post_prompt_rewrite))
         .route("/api/open", post(api::post_local_ok))
         .route("/api/denied", post(api::post_denied))
-        .route("/api/ci", post(api::post_local_ok))
+        .route("/api/ci", post(api::post_ci))
         .route("/api/prefs", get(api::get_prefs).post(api::post_prefs))
         .route("/api/todos", post(api::post_todos))
         // Accounts & multi-AI

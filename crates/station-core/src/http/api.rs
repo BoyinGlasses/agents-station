@@ -606,6 +606,283 @@ pub async fn post_tenure(
     Ok(Json(json!({ "ok": ok })))
 }
 
+fn tasks_out(state: &AppState, local: bool) -> Value {
+    let (phone_tasks, phone_bg) = {
+        let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            prefs.get("phoneTasks").and_then(Value::as_bool).unwrap_or(false),
+            prefs.get("phoneTasksBg").and_then(Value::as_bool).unwrap_or(false),
+        )
+    };
+    let (running, completed, bg_probe) = {
+        let tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            tasks.list().into_iter().cloned().collect::<Vec<_>>(),
+            tasks.recent_completed().into_iter().cloned().collect::<Vec<_>>(),
+            tasks.bg_probe().clone(),
+        )
+    };
+    let (projects, sessions) = {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let projects: Vec<Value> = office
+            .known_dirs
+            .iter()
+            .filter(|d| std::path::Path::new(d).exists())
+            .map(|d| {
+                let name = std::path::Path::new(d)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(d);
+                json!({ "dir": d, "name": name })
+            })
+            .collect();
+        let sessions: Vec<Value> = office
+            .sessions
+            .values()
+            .filter(|s| !s.cwd.is_empty())
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "sid": s.id,
+                    "agent": s.agent,
+                    "name": s.name,
+                    "dir": s.cwd,
+                    "status": s.status,
+                    "cache": s.cache,
+                })
+            })
+            .collect();
+        (projects, sessions)
+    };
+    json!({
+        "ok": true,
+        "allowed": local || phone_tasks,
+        "tasks": running,
+        "running": running,
+        "completed": completed,
+        "bg": {
+            "on": phone_bg,
+            "supported": bg_probe.supported,
+            "version": bg_probe.version,
+        },
+        "agents": crate::state::tasks::available_agents(),
+        "projects": projects,
+        "sessions": sessions,
+    })
+}
+
+fn require_task_permission(state: &AppState, local: bool) -> Result<(), StatusCode> {
+    if local {
+        return Ok(());
+    }
+    let allowed = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("phoneTasks")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+pub(crate) fn spawn_task_with_card(
+    state: &Arc<AppState>,
+    req: crate::state::tasks::TaskStartRequest,
+) -> Value {
+    let ts = now_ms();
+    let work_agent = req.agent.clone();
+    let dir_name = std::path::Path::new(&req.dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&work_agent)
+        .to_owned();
+    let state_done = Arc::clone(state);
+    let card_id_cell: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let card_id_cb = Arc::clone(&card_id_cell);
+    let on_done: Arc<dyn Fn(crate::state::tasks::TaskRecord) + Send + Sync> =
+        Arc::new(move |rec| {
+            let card_id = card_id_cb
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(cid) = card_id {
+                let mut office = state_done.office.lock().unwrap_or_else(|e| e.into_inner());
+                let st = if rec.status == "done" { "done" } else { &rec.status };
+                office.chat.set_work(
+                    &cid,
+                    json!({
+                        "state": st,
+                        "result": rec.result,
+                        "error": rec.error,
+                    }),
+                );
+                let _ = office.save_chat();
+            }
+        });
+    let res = crate::state::tasks::start_and_spawn(
+        Arc::clone(&state.tasks),
+        req,
+        ts,
+        Some(on_done),
+    );
+    if res.get("ok").and_then(Value::as_bool) == Some(true)
+        && let Some(tid) = res.get("task").and_then(|t| t.get("id")).and_then(Value::as_str)
+    {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let card = office.chat.work_card(
+            &work_agent,
+            &dir_name,
+            json!({ "state": "work", "steps": [], "n": 0, "at": ts, "task": tid }),
+            ts,
+        );
+        *card_id_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(card.id.clone());
+        let _ = office.save_chat();
+        office.broadcast(json!({ "k": "chat", "op": "work", "m": card }));
+    }
+    res
+}
+
+pub(crate) async fn steer_inner(
+    state: &Arc<AppState>,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let text: String = body
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(2000)
+        .collect();
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, json!({ "ok": false, "code": "empty" }));
+    }
+    let task_id = body.get("task").and_then(Value::as_str);
+    let sid_req = body.get("sid").and_then(Value::as_str);
+    let dir_req = body.get("dir").and_then(Value::as_str);
+    let agent_req = body.get("agent").and_then(Value::as_str).unwrap_or("claude");
+
+    let (task_rec, task_inbox) = {
+        let tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let rec = task_id
+            .and_then(|id| tasks.get(id))
+            .or_else(|| sid_req.and_then(|sid| tasks.of_sid(sid)));
+        let inbox = rec.as_ref().and_then(|r| tasks.inbox_of(&r.id));
+        (rec, inbox)
+    };
+
+    let sess_rec = {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let target_sid = task_rec
+            .as_ref()
+            .and_then(|t| t.sid.as_deref())
+            .or(sid_req);
+        target_sid.and_then(|sid| office.sessions.get(sid).cloned())
+    };
+
+    let sess_busy = sess_rec.as_ref().is_some_and(|s| s.status != "rest");
+    if task_rec.is_none() && !sess_busy {
+        return (StatusCode::CONFLICT, json!({ "ok": false, "code": "notBusy" }));
+    }
+
+    let name = sess_rec
+        .as_ref()
+        .map(|s| s.name.clone())
+        .or_else(|| {
+            task_rec.as_ref().and_then(|t| {
+                std::path::Path::new(&t.dir)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| "Claude".to_owned());
+    let agent = task_rec
+        .as_ref()
+        .map(|t| t.agent.as_str())
+        .or_else(|| sess_rec.as_ref().map(|s| s.agent.as_str()))
+        .unwrap_or(agent_req)
+        .to_owned();
+    let inbox = task_inbox.or_else(|| sess_rec.as_ref().and_then(|s| s.inbox.clone()));
+    let cwd = sess_rec
+        .as_ref()
+        .map(|s| s.cwd.clone())
+        .or_else(|| task_rec.as_ref().map(|t| t.dir.clone()))
+        .or_else(|| dir_req.map(str::to_owned));
+
+    let check = if agent == "claude" {
+        let inbound = crate::state::steer::inbound_from(
+            Some(state.claude_dir.as_path()),
+            cwd.as_deref().map(std::path::Path::new),
+        );
+        let sock_ok = inbox
+            .as_deref()
+            .is_some_and(crate::state::steer::is_socket_path);
+        crate::state::steer::steerable(inbox.as_deref(), "", inbound, sock_ok)
+    } else {
+        crate::state::steer::SteerCheck {
+            ok: false,
+            why: Some("noInbox"),
+        }
+    };
+
+    let ts = now_ms();
+    let clean_text = crate::redact::redact(&text);
+    {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let msg = office
+            .chat
+            .say("me", "Boss", &format!("💬 @{name} {clean_text}"), ts, true, None);
+        let _ = office.save_chat();
+        office.broadcast(json!({ "k": "chat", "op": "send", "m": msg }));
+    }
+
+    if check.ok
+        && let Some(ib) = inbox.as_deref()
+        && crate::state::steer::deliver(ib, &text, 3000).await
+    {
+        return (StatusCode::OK, json!({ "ok": true, "how": "now" }));
+    }
+
+    let why = if check.ok {
+        "failed"
+    } else {
+        check.why.unwrap_or("noInbox")
+    };
+    let key = sid_req
+        .map(str::to_owned)
+        .or_else(|| sess_rec.as_ref().map(|s| s.id.clone()))
+        .or_else(|| task_rec.as_ref().map(|t| t.id.clone()))
+        .or_else(|| cwd.as_ref().map(|d| format!("dir:{d}")));
+    let Some(key) = key else {
+        return (StatusCode::CONFLICT, json!({ "ok": false, "code": "notBusy" }));
+    };
+
+    state
+        .steer_queue
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .enqueue(
+            crate::state::steer::QueuedSteer {
+                key,
+                sid: sid_req
+                    .map(str::to_owned)
+                    .or_else(|| sess_rec.as_ref().map(|s| s.id.clone())),
+                dir: cwd,
+                agent,
+                text,
+                name,
+                at: ts,
+            },
+            ts,
+        );
+    (StatusCode::OK, json!({ "ok": true, "how": "later", "why": why }))
+}
+
 pub async fn get_tasks(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -613,9 +890,8 @@ pub async fn get_tasks(
     ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(Json(json!({ "ok": true, "tasks": tasks.list() })))
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    Ok(Json(tasks_out(&state, local)))
 }
 
 pub async fn post_tasks(
@@ -623,21 +899,45 @@ pub async fn post_tasks(
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
-    require_local_post(peer, via_tunnel, &headers)?;
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    require_task_permission(&state, local)?;
+    let sid = body.get("sid").and_then(Value::as_str);
+    let mut dir = body
+        .get("dir")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if dir.is_empty()
+        && let Some(sid) = sid
+    {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = office.sessions.get(sid) {
+            dir = s.cwd.clone();
+        }
+    }
     let req = crate::state::tasks::TaskStartRequest {
-        dir: body.get("dir").and_then(Value::as_str).unwrap_or("").to_owned(),
+        dir,
         text: body.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
-        agent: body.get("agent").and_then(Value::as_str).unwrap_or("claude").to_owned(),
+        agent: body
+            .get("agent")
+            .and_then(Value::as_str)
+            .unwrap_or("claude")
+            .to_owned(),
         model: body.get("model").and_then(Value::as_str).unwrap_or("").to_owned(),
         fork: body.get("fork").and_then(Value::as_bool).unwrap_or(false),
     };
-    let mut tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(Json(tasks.validate_and_register(req, now_ms())))
+    Ok(Json(spawn_task_with_card(&state, req)))
 }
 
-pub async fn post_tasks_stop(
+pub async fn post_tasks_allow(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
@@ -645,9 +945,160 @@ pub async fn post_tasks_stop(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    let approve = {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set("phoneTasks", if on { Some(Value::Bool(true)) } else { None });
+        prefs
+            .get("phoneApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    state
+        .office
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .broadcast(json!({ "k": "phone", "approve": approve, "tasks": on }));
+    Ok(Json(tasks_out(&state, true)))
+}
+
+pub async fn post_tasks_bg(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set("phoneTasksBg", if on { Some(Value::Bool(true)) } else { None });
+    }
+    let tasks = Arc::clone(&state.tasks);
+    let _ = tokio::task::spawn_blocking(move || {
+        tasks.lock().unwrap_or_else(|e| e.into_inner()).probe_bg()
+    })
+    .await;
+    Ok(Json(tasks_out(&state, true)))
+}
+
+pub async fn post_tasks_stop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    require_task_permission(&state, local)?;
     let id = body.get("id").and_then(Value::as_str).unwrap_or("");
-    let ok = state.tasks.lock().unwrap_or_else(|e| e.into_inner()).finish(id).is_some();
+    let ok = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .stop(id);
     Ok(Json(json!({ "ok": ok })))
+}
+
+pub async fn post_tasks_steer(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    require_task_permission(&state, local)?;
+    let (status, val) = steer_inner(&state, &body).await;
+    Ok((status, Json(val)))
+}
+
+pub async fn post_ci(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    require_task_permission(&state, local)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let ci_data = {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        office
+            .chat
+            .by_id(id)
+            .filter(|m| m.kind == "ci")
+            .and_then(|m| m.ci.clone())
+    };
+    let Some(c) = ci_data else {
+        return Ok((StatusCode::NOT_FOUND, Json(json!({ "ok": false, "code": "gone" }))));
+    };
+    if c.get("state").and_then(Value::as_str) != Some("red") {
+        return Ok((StatusCode::CONFLICT, Json(json!({ "ok": false, "code": "notRed" }))));
+    }
+    let wf = c.get("wf").and_then(Value::as_str).unwrap_or("CI");
+    let branch = c.get("branch").and_then(Value::as_str).unwrap_or("");
+    let url = c.get("url").and_then(Value::as_str).unwrap_or("");
+    let sid = c
+        .get("sid")
+        .or_else(|| c.get("sess"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let dir = c.get("dir").and_then(Value::as_str).unwrap_or("");
+    let prompt = format!("Fix failing {wf} on branch {branch} ({url})");
+
+    let sess_busy = {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        !sid.is_empty() && office.sessions.get(sid).is_some_and(|s| s.status != "rest")
+    };
+    if sess_busy {
+        let (st, out) = steer_inner(&state, &json!({ "sid": sid, "text": prompt })).await;
+        if st == StatusCode::OK {
+            let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+            office.chat.set_ci(id, json!({ "fix": "note" }));
+            let _ = office.save_chat();
+            return Ok((StatusCode::OK, Json(json!({ "ok": true, "how": "note" }))));
+        }
+        return Ok((st, Json(out)));
+    }
+    let res = spawn_task_with_card(
+        &state,
+        crate::state::tasks::TaskStartRequest {
+            dir: dir.to_owned(),
+            text: prompt,
+            agent: "claude".to_owned(),
+            model: String::new(),
+            fork: false,
+        },
+    );
+    if res.get("ok").and_then(Value::as_bool) == Some(true) {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        office.chat.set_ci(id, json!({ "fix": "sent" }));
+        let _ = office.save_chat();
+        Ok((StatusCode::OK, Json(json!({ "ok": true, "how": "sent" }))))
+    } else {
+        Ok((StatusCode::CONFLICT, Json(res)))
+    }
 }
 
 pub async fn get_models(
@@ -2046,5 +2497,192 @@ mod tests {
                 .unwrap();
         assert_eq!(rm_clean_body["ok"], true, "clean worktree must remove cleanly: {rm_clean_body}");
         assert!(!wt_clean.exists(), "clean worktree directory must be removed");
+    }
+
+    #[tokio::test]
+    async fn tasks_spawn_never_wedges_at_three_and_wires_allow_bg_stop_steer_and_ci() {
+        use crate::state::sessions::now_ms;
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().join("proj");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        let app = build_router(state.clone());
+
+        // 1. POST /api/tasks/allow toggles phoneTasks pref (stub post_local_ok won't persist it!)
+        let allow_req = Request::builder()
+            .method("POST")
+            .uri("/api/tasks/allow")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "on": true }).to_string()))
+            .unwrap();
+        let allow_resp = app.clone().oneshot(allow_req).await.unwrap();
+        assert_eq!(allow_resp.status(), StatusCode::OK);
+        assert_eq!(
+            state.prefs.lock().unwrap().get("phoneTasks").and_then(Value::as_bool),
+            Some(true),
+            "/api/tasks/allow must persist phoneTasks pref"
+        );
+
+        // 2. POST /api/tasks/bg toggles phoneTasksBg pref
+        let bg_req = Request::builder()
+            .method("POST")
+            .uri("/api/tasks/bg")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "on": true }).to_string()))
+            .unwrap();
+        let bg_resp = app.clone().oneshot(bg_req).await.unwrap();
+        assert_eq!(bg_resp.status(), StatusCode::OK);
+        assert_eq!(
+            state.prefs.lock().unwrap().get("phoneTasksBg").and_then(Value::as_bool),
+            Some(true),
+            "/api/tasks/bg must persist phoneTasksBg pref"
+        );
+
+        // 3. Configure fast exiting CLI command override and run 4 sequential tasks (must NOT wedge at 3!)
+        #[cfg(windows)]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("cmd.exe"),
+            args: vec!["/C".into(), "echo".into(), "done".into()],
+        };
+        #[cfg(not(windows))]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("sh"),
+            args: vec!["-c".into(), "echo done".into()],
+        };
+        state
+            .tasks
+            .lock()
+            .unwrap()
+            .set_command_override(Arc::new(move |_req, _id| Some(fast_cmd())));
+
+        for i in 0..4 {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/tasks")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "dir": work_dir.to_string_lossy(),
+                        "text": format!("task #{i}"),
+                        "agent": "claude"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: Value =
+                serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["ok"], true, "task #{i} must start without wedging: {body}");
+            // Wait up to 2s for child command to exit and free slot
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            while !state.tasks.lock().unwrap().list().is_empty() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "task #{i} never freed its running slot"
+                );
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        }
+
+        // 4. POST /api/steer rejects empty text (400), rejects idle session (409), queues busy session without inbox (200 how="later")
+        let empty_steer = Request::builder()
+            .method("POST")
+            .uri("/api/steer")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "sid": "s-steer", "text": "   " }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(empty_steer).await.unwrap().status(), StatusCode::BAD_REQUEST);
+
+        // Start a working session s-steer
+        let start_ev = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "session_id": "s-steer",
+                    "hook_event_name": "UserPromptSubmit",
+                    "cwd": work_dir.to_string_lossy(),
+                    "prompt": "working"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(start_ev).await.unwrap().status(), StatusCode::OK);
+
+        let steer_req = Request::builder()
+            .method("POST")
+            .uri("/api/steer")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "sid": "s-steer", "text": "fix tests too" }).to_string()))
+            .unwrap();
+        let steer_resp = app.clone().oneshot(steer_req).await.unwrap();
+        assert_eq!(steer_resp.status(), StatusCode::OK);
+        let steer_body: Value =
+            serde_json::from_slice(&to_bytes(steer_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(steer_body["ok"], true);
+        assert_eq!(steer_body["how"], "later");
+        assert_eq!(steer_body["why"], "noInbox");
+
+        // 5. POST /api/ci returns 404 for unknown card, and 200 how="sent"|"note" for a red CI card
+        let bad_ci = Request::builder()
+            .method("POST")
+            .uri("/api/ci")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": "missing-ci" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(bad_ci).await.unwrap().status(), StatusCode::NOT_FOUND);
+
+        let ci_card_id = {
+            let mut office = state.office.lock().unwrap();
+            office
+                .chat
+                .ci_card(
+                    "s-steer",
+                    "proj",
+                    json!({
+                        "repo": "proj",
+                        "branch": "main",
+                        "wf": "CI",
+                        "url": "https://example.test/runs/1",
+                        "sess": "s-steer",
+                        "sid": "s-steer",
+                        "dir": work_dir.to_string_lossy(),
+                        "state": "red",
+                        "fix": null
+                    }),
+                    now_ms(),
+                )
+                .id
+        };
+        let ok_ci = Request::builder()
+            .method("POST")
+            .uri("/api/ci")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": ci_card_id }).to_string()))
+            .unwrap();
+        let ok_ci_resp = app.oneshot(ok_ci).await.unwrap();
+        assert_eq!(ok_ci_resp.status(), StatusCode::OK);
+        let ok_ci_body: Value =
+            serde_json::from_slice(&to_bytes(ok_ci_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(ok_ci_body["ok"], true);
+        assert!(matches!(ok_ci_body["how"].as_str(), Some("note" | "sent")));
     }
 }
