@@ -1,5 +1,5 @@
 use crate::fps::AdaptiveFpsState;
-use crate::tray::{TrayState, notify_parent_in_tray};
+use crate::tray::{TrayState, notify_parent_hold_alert, notify_parent_in_tray};
 use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 use station_3d::{BackdropAssets, BackdropEntity, WorldEntity, WorldPalette};
 use station_canvas2d::BrandRegistry;
 use station_core::http::{AppState, HarnessApi, start_http_server};
+use station_core::state::sessions::PermDecision;
 use station_launcher::focus_launch::Win32WindowLauncher;
 use station_launcher::{HarnessService, HarnessStatus};
 use station_ui::state::{FeedEntry, HarnessDockItem, PendingPermCard, SessionCard, UiAction};
 use station_ui::{I18nStore, UiState, ViewMode};
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -550,6 +552,8 @@ pub struct LiveServerBridge {
     pub assets_dir: PathBuf,
     sync_timer: Timer,
     banner_pushed: bool,
+    seen_perm_ids: HashSet<String>,
+    last_window_focused: Option<bool>,
 }
 
 impl LiveServerBridge {
@@ -576,6 +580,8 @@ impl LiveServerBridge {
                 assets_dir,
                 sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                 banner_pushed: false,
+                seen_perm_ids: HashSet::new(),
+                last_window_focused: None,
             };
         }
 
@@ -599,6 +605,8 @@ impl LiveServerBridge {
                     assets_dir,
                     sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                     banner_pushed: false,
+                    seen_perm_ids: HashSet::new(),
+                    last_window_focused: None,
                 };
             }
         };
@@ -613,6 +621,8 @@ impl LiveServerBridge {
                 assets_dir,
                 sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                 banner_pushed: false,
+                seen_perm_ids: HashSet::new(),
+                last_window_focused: None,
             };
         }
 
@@ -672,6 +682,8 @@ impl LiveServerBridge {
                 assets_dir,
                 sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                 banner_pushed: false,
+                seen_perm_ids: HashSet::new(),
+                last_window_focused: None,
             },
             Err(err) => {
                 // Re-check once in case another Agents Station daemon just finished binding :4310.
@@ -690,6 +702,8 @@ impl LiveServerBridge {
                         assets_dir,
                         sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                         banner_pushed: false,
+                        seen_perm_ids: HashSet::new(),
+                        last_window_focused: None,
                     }
                 } else {
                     Self {
@@ -702,6 +716,8 @@ impl LiveServerBridge {
                         assets_dir,
                         sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                         banner_pushed: false,
+                        seen_perm_ids: HashSet::new(),
+                        last_window_focused: None,
                     }
                 }
             }
@@ -748,6 +764,14 @@ impl LiveServerBridge {
     }
 
     #[cfg(test)]
+    fn in_process_state(&self) -> Option<Arc<AppState>> {
+        match &self.backend {
+            BridgeBackend::InProcess { app_state, .. } => Some(app_state.clone()),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
     fn enqueue_remote_action(&self, path: &'static str, body: Value, refresh: RefreshKind) -> bool {
         match &self.backend {
             BridgeBackend::AttachedHttp { action_tx, .. } => {
@@ -787,10 +811,23 @@ impl Plugin for LiveServerBridgePlugin {
     }
 }
 
+fn parse_ui_perm_decision(decision: &str) -> PermDecision {
+    match decision {
+        "deny" | "revise" => PermDecision::Deny {
+            reason: String::new(),
+        },
+        "retry" => PermDecision::Retry,
+        "keep" => PermDecision::Keep,
+        _ => PermDecision::Allow,
+    }
+}
+
 fn sync_live_state_to_ui(
     time: Res<Time>,
     mut bridge: ResMut<LiveServerBridge>,
     mut ui: ResMut<UiState>,
+    windows: Query<&Window>,
+    mut tray: Option<ResMut<TrayState>>,
 ) {
     if !bridge.banner_pushed {
         if let Some(err) = bridge.bind_error_message() {
@@ -799,14 +836,40 @@ fn sync_live_state_to_ui(
         bridge.banner_pushed = true;
     }
 
+    let has_window = windows.iter().next().is_some();
+    let window_focused = windows.iter().any(|w| w.visible && w.focused);
+    let in_tray = tray.as_deref().is_some_and(|t| t.in_tray);
+    let unfocused_or_tray = in_tray || !window_focused;
+
+    if has_window && bridge.last_window_focused != Some(window_focused) {
+        bridge.last_window_focused = Some(window_focused);
+        match &bridge.backend {
+            BridgeBackend::InProcess { app_state, .. } => {
+                if let Ok(mut office) = app_state.office.lock() {
+                    office.presence_focused = window_focused;
+                }
+            }
+            BridgeBackend::AttachedHttp { action_tx, .. } => {
+                let _ = action_tx.try_send(RemoteActionCmd {
+                    path: "/api/presence",
+                    body: json!({ "focused": window_focused }),
+                    refresh: RefreshKind::None,
+                });
+            }
+            BridgeBackend::BindError { .. } => {}
+        }
+    }
+
     bridge.sync_timer.tick(time.delta());
     if !bridge.sync_timer.just_finished() {
         return;
     }
 
+    let mut synced_live_perms = false;
     match &bridge.backend {
         BridgeBackend::AttachedHttp { snapshot, .. } => {
             let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            synced_live_perms = snap.has_snapshot;
             apply_remote_snapshot_to_ui(&snap, &mut ui);
         }
         BridgeBackend::InProcess {
@@ -848,6 +911,7 @@ fn sync_live_state_to_ui(
                         .collect();
                 }
                 if !office.pending_perms.is_empty() {
+                    synced_live_perms = true;
                     ui.pending_perms = office
                         .pending_perms
                         .values()
@@ -860,6 +924,9 @@ fn sync_live_state_to_ui(
                             kind: p.kind.clone(),
                         })
                         .collect();
+                } else if !bridge.seen_perm_ids.is_empty() {
+                    synced_live_perms = true;
+                    ui.pending_perms.clear();
                 }
                 if !office.feed.is_empty() {
                     ui.feed = office
@@ -895,6 +962,20 @@ fn sync_live_state_to_ui(
                     .collect();
             }
         }
+    }
+
+    if synced_live_perms {
+        let mut current_ids = HashSet::with_capacity(ui.pending_perms.len());
+        for perm in &ui.pending_perms {
+            current_ids.insert(perm.id.clone());
+            if bridge.seen_perm_ids.insert(perm.id.clone()) && unfocused_or_tray {
+                let _ = notify_parent_hold_alert(&perm.kind);
+                if let Some(t) = tray.as_deref_mut() {
+                    t.notifications_sent = t.notifications_sent.saturating_add(1);
+                }
+            }
+        }
+        bridge.seen_perm_ids.retain(|id| current_ids.contains(id));
     }
 }
 
@@ -1139,13 +1220,13 @@ fn process_ui_actions(
                     BridgeBackend::AttachedHttp { action_tx, .. } => {
                         let _ = action_tx.try_send(RemoteActionCmd {
                             path: "/api/perm",
-                            body: json!({ "id": id, "decision": decision }),
+                            body: json!({ "id": id, "choice": decision, "decision": decision }),
                             refresh: RefreshKind::Live,
                         });
                     }
                     BridgeBackend::InProcess { app_state, .. } => {
                         if let Ok(mut office) = app_state.office.lock() {
-                            office.pending_perms.remove(&id);
+                            office.resolve_hold(&id, parse_ui_perm_decision(&decision));
                         }
                     }
                     BridgeBackend::BindError { .. } => {}
@@ -1950,5 +2031,123 @@ mod tests {
         assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);
         assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 0);
         assert_eq!(app.world().resource::<Assets<Image>>().len(), 0);
+    }
+
+    #[test]
+    fn ui_action_decide_permission_resolves_in_process_oneshot_hold() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        {
+            let mut office = state.office.lock().unwrap();
+            office.register_hold(
+                PendingPerm {
+                    id: "perm-ui-1".to_owned(),
+                    sess: "s1".to_owned(),
+                    name: "proj".to_owned(),
+                    kind: "perm".to_owned(),
+                    tool_type: "bash".to_owned(),
+                    label: "cargo test".to_owned(),
+                    detail: "cargo test".to_owned(),
+                    danger: None,
+                    created_at: 1,
+                },
+                tx,
+            );
+        }
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(UiState::default())
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::DecidePermission {
+                id: "perm-ui-1".to_owned(),
+                decision: "allow".to_owned(),
+            });
+        }
+        app.update();
+
+        let resolved = rx
+            .try_recv()
+            .expect("UiAction::DecidePermission must resolve the pending oneshot hold");
+        assert_eq!(resolved["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            resolved["hookSpecificOutput"]["decision"]["behavior"],
+            "allow"
+        );
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
+    }
+
+    #[test]
+    fn unfocused_new_pending_perm_triggers_tray_alert_once_per_id() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir,
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        {
+            let mut office = state.office.lock().unwrap();
+            office.register_hold(
+                PendingPerm {
+                    id: "perm-alert-1".to_owned(),
+                    sess: "s1".to_owned(),
+                    name: "proj".to_owned(),
+                    kind: "perm".to_owned(),
+                    tool_type: "bash".to_owned(),
+                    label: "cmd".to_owned(),
+                    detail: "echo alert".to_owned(),
+                    danger: None,
+                    created_at: 1,
+                },
+                tx,
+            );
+        }
+
+        let mut app = App::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(Duration::from_secs(2));
+        app.insert_resource(time)
+            .insert_resource(UiState::default())
+            .insert_resource(TrayState::default())
+            .insert_resource(bridge)
+            .add_systems(Update, sync_live_state_to_ui);
+
+        // Spawn an unfocused window so window_focused == false.
+        let mut win = Window::default();
+        win.focused = false;
+        app.world_mut().spawn(win);
+
+        // Tick 1: new pending perm arrives while unfocused -> triggers 1 tray alert.
+        app.update();
+        assert_eq!(app.world().resource::<TrayState>().notifications_sent, 1);
+
+        // Tick 2: same perm still pending -> must NOT spam duplicate alerts.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs(2));
+        app.update();
+        assert_eq!(app.world().resource::<TrayState>().notifications_sent, 1);
     }
 }
