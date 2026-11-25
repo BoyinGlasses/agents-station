@@ -2,6 +2,7 @@ pub mod agent_history;
 pub mod agent_rpc;
 pub mod antigravity_accounts;
 pub mod antigravity_runs;
+pub mod claude_accounts;
 pub mod cli_command;
 pub mod codex_accounts;
 pub mod codex_history;
