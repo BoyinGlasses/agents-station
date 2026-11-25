@@ -1,3 +1,4 @@
+pub mod backdrops;
 pub mod camera;
 pub mod chibi;
 pub mod desks;
