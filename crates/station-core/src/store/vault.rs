@@ -17,6 +17,7 @@ use unicode_normalization::UnicodeNormalization;
 const MAX_TEXT: usize = 20_000;
 const MAX_MSGS: usize = 4_000;
 const MAX_RAW_JSONL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_VAULT_ENTRIES: usize = 500;
 const ARCHIVE_VERSION: u32 = 2;
 
 const WRAP_TAGS: &[&str] = &[
@@ -292,6 +293,21 @@ fn parse_transcript_jsonl(text: &str) -> ParsedTranscript {
     out
 }
 
+fn read_gzip_bounded(path: &Path, max_bytes: u64) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > max_bytes {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let mut decoder = GzDecoder::new(file).take(max_bytes.saturating_add(1));
+    let mut buf = Vec::new();
+    decoder.read_to_end(&mut buf).ok()?;
+    if buf.len() as u64 > max_bytes {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 fn collect_jsonl_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 6 {
         return;
@@ -401,7 +417,7 @@ impl VaultStore {
             let drain = entry.prompts.len() - 200;
             entry.prompts.drain(..drain);
         }
-        if self.data.entries.len() > 500
+        if self.data.entries.len() > MAX_VAULT_ENTRIES
             && let Some(oldest) = self
                 .data
                 .entries
@@ -468,8 +484,9 @@ impl VaultStore {
                 continue;
             }
 
+            let redacted_raw = redact(&raw_text);
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            if encoder.write_all(&raw_bytes).is_err() {
+            if encoder.write_all(redacted_raw.as_bytes()).is_err() {
                 continue;
             }
             let Ok(gz_bytes) = encoder.finish() else {
@@ -533,6 +550,22 @@ impl VaultStore {
             kept += 1;
         }
 
+        while self.data.entries.len() > MAX_VAULT_ENTRIES {
+            let Some(oldest) = self
+                .data
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.updated_at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            self.data.entries.remove(&oldest);
+            if let Some(p) = self.archive_path(&oldest) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+
         let mut marked_gone = false;
         for entry in self.data.entries.values_mut() {
             if entry.scanned && !seen.contains(&entry.sid) && entry.gone == 0 {
@@ -555,31 +588,27 @@ impl VaultStore {
         let entry = self.data.entries.get(sid)?;
         if let Some(gz_path) = self.archive_path(sid)
             && gz_path.is_file()
-            && let Ok(gz_bytes) = std::fs::read(&gz_path)
+            && let Some(raw) = read_gzip_bounded(&gz_path, MAX_RAW_JSONL_BYTES)
         {
-            let mut decoder = GzDecoder::new(&gz_bytes[..]);
-            let mut raw = String::new();
-            if decoder.read_to_string(&mut raw).is_ok() {
-                let parsed = parse_transcript_jsonl(&raw);
-                return Some(ArchivedTranscript {
-                    v: ARCHIVE_VERSION,
-                    sid: entry.sid.clone(),
-                    title: if parsed.title.is_empty() {
-                        entry.title.clone()
-                    } else {
-                        parsed.title
-                    },
-                    cwd: if parsed.cwd.is_empty() {
-                        entry.cwd.clone()
-                    } else {
-                        parsed.cwd
-                    },
-                    start: if parsed.start > 0 { parsed.start } else { entry.start },
-                    end: if parsed.end > 0 { parsed.end } else { entry.end },
-                    msgs: parsed.msgs,
-                    gone: entry.gone,
-                });
-            }
+            let parsed = parse_transcript_jsonl(&raw);
+            return Some(ArchivedTranscript {
+                v: ARCHIVE_VERSION,
+                sid: entry.sid.clone(),
+                title: if parsed.title.is_empty() {
+                    entry.title.clone()
+                } else {
+                    parsed.title
+                },
+                cwd: if parsed.cwd.is_empty() {
+                    entry.cwd.clone()
+                } else {
+                    parsed.cwd
+                },
+                start: if parsed.start > 0 { parsed.start } else { entry.start },
+                end: if parsed.end > 0 { parsed.end } else { entry.end },
+                msgs: parsed.msgs,
+                gone: entry.gone,
+            });
         }
         Some(ArchivedTranscript {
             v: ARCHIVE_VERSION,
@@ -750,5 +779,78 @@ mod tests {
         assert_eq!(transcript.msgs.len(), 2);
         assert!(!transcript.msgs[0].t.contains("hidden prompt"));
         assert!(!transcript.msgs[0].t.contains("sk-ant-api03-secret9999"));
+    }
+
+    #[test]
+    fn vault_gz_archive_redacts_secrets_bounds_decompression_and_caps_entries() {
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let claude_dir = dir.path().join("claude");
+        let proj = claude_dir.join("projects").join("sec");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let jsonl = concat!(
+            r#"{"type":"user","cwd":"/repo","timestamp":"2026-11-25T10:00:00Z","message":{"content":"keys sk-ant-api03-rawsecret99999 and ghp_rawgithubsecret12345"}}"#,
+            "\n"
+        );
+        std::fs::write(proj.join("sess-sec-1.jsonl"), jsonl).unwrap();
+
+        let mut vault = VaultStore::load(&data_dir);
+        assert_eq!(vault.scan_claude_projects(&claude_dir), 1);
+
+        // Raw secrets must NEVER be persisted inside .jsonl.gz archive
+        let gz_path = data_dir.join("vault").join("c").join("sess-sec-1.jsonl.gz");
+        let mut decoder = GzDecoder::new(std::fs::File::open(&gz_path).unwrap());
+        let mut raw_gz_text = String::new();
+        decoder.read_to_string(&mut raw_gz_text).unwrap();
+        assert!(
+            !raw_gz_text.contains("sk-ant-api03-rawsecret99999"),
+            "archived .jsonl.gz leaked Anthropic key"
+        );
+        assert!(
+            !raw_gz_text.contains("ghp_rawgithubsecret12345"),
+            "archived .jsonl.gz leaked GitHub token"
+        );
+
+        // Bounded gzip decompression rejects gzip bombs exceeding max_bytes
+        let bomb_path = dir.path().join("bomb.jsonl.gz");
+        {
+            let mut enc = GzEncoder::new(Vec::new(), Compression::best());
+            enc.write_all(&vec![b'A'; 4096]).unwrap();
+            let gz = enc.finish().unwrap();
+            std::fs::write(&bomb_path, gz).unwrap();
+        }
+        assert!(
+            read_gzip_bounded(&bomb_path, 512).is_none(),
+            "gzip bomb exceeding max_bytes must be rejected"
+        );
+        assert!(read_gzip_bounded(&gz_path, MAX_RAW_JSONL_BYTES).is_some());
+
+        // Entries cap enforced during scan_claude_projects (<= MAX_VAULT_ENTRIES)
+        for i in 0..MAX_VAULT_ENTRIES {
+            vault.record_prompt(
+                &format!("pre-{i:04}"),
+                "claude",
+                "t",
+                "/r",
+                "hello",
+                0,
+                1000 + i as u64,
+            );
+        }
+        std::fs::write(
+            proj.join("sess-sec-2.jsonl"),
+            r#"{"type":"user","cwd":"/repo","timestamp":"2026-11-26T10:00:00Z","message":{"content":"newest prompt"}}"#,
+        )
+        .unwrap();
+        assert_eq!(vault.scan_claude_projects(&claude_dir), 1);
+        assert!(
+            vault.data.entries.len() <= MAX_VAULT_ENTRIES,
+            "vault entries grew past cap: {}",
+            vault.data.entries.len()
+        );
     }
 }
