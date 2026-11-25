@@ -179,8 +179,8 @@ fn process_ui_actions(
     backdrop_q: Query<Entity, With<BackdropEntity>>,
     mut pal: Option<ResMut<WorldPalette>>,
     mut backdrop_assets: Option<ResMut<BackdropAssets>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut images: Option<ResMut<Assets<Image>>>,
     mut clear_color: ResMut<ClearColor>,
     mut lighting: Option<ResMut<station_3d::lights::LightingState>>,
     mut windows: Query<&mut Window>,
@@ -221,27 +221,34 @@ fn process_ui_actions(
                 for ent in &world_q {
                     commands.entity(ent).despawn();
                 }
-                if let Some(p) = pal.as_mut() {
-                    p.purge_transient_images(&mut images);
-                }
-                if let Some(ba) = backdrop_assets.as_mut() {
-                    ba.purge(&mut images);
+                if let Some(imgs) = images.as_mut() {
+                    if let Some(p) = pal.as_mut() {
+                        p.purge_transient_images(imgs);
+                    }
+                    if let Some(ba) = backdrop_assets.as_mut() {
+                        ba.purge(imgs);
+                    }
                 }
             }
             UiAction::SwitchBackdrop(bk) => {
-                if let (Some(p), Some(ba)) = (pal.as_mut(), backdrop_assets.as_mut()) {
+                if let (Some(p), Some(ba), Some(mats), Some(imgs)) = (
+                    pal.as_mut(),
+                    backdrop_assets.as_mut(),
+                    materials.as_mut(),
+                    images.as_mut(),
+                ) {
                     for ent in &backdrop_q {
                         commands.entity(ent).despawn();
                     }
-                    ba.purge(&mut images);
+                    ba.purge(imgs);
                     let spec = station_3d::LayoutSpec::for_layout(ui.layout);
                     let mut brands = BrandRegistry::new(bridge.assets_dir.clone());
                     let mut fonts = FontEngine::from_assets_dir(&bridge.assets_dir);
                     station_3d::backdrops::spawn_backdrop(
                         &mut commands,
                         p,
-                        &mut materials,
-                        &mut images,
+                        mats,
+                        imgs,
                         ba,
                         &mut brands,
                         &mut fonts,
@@ -274,11 +281,13 @@ fn process_ui_actions(
                 for ent in &world_q {
                     commands.entity(ent).despawn();
                 }
-                if let Some(p) = pal.as_mut() {
-                    p.purge_transient_images(&mut images);
-                }
-                if let Some(ba) = backdrop_assets.as_mut() {
-                    ba.purge(&mut images);
+                if let Some(imgs) = images.as_mut() {
+                    if let Some(p) = pal.as_mut() {
+                        p.purge_transient_images(imgs);
+                    }
+                    if let Some(ba) = backdrop_assets.as_mut() {
+                        ba.purge(imgs);
+                    }
                 }
                 for mut win in &mut windows {
                     win.visible = false;

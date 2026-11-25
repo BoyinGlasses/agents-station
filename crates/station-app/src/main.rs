@@ -47,7 +47,12 @@ fn spawn_lite_2d_camera(mut commands: Commands) {
 fn build_gui_app(cli: &cli::Cli) -> App {
     let mut app = App::new();
     let capture_mode = cli.capture_scene.is_some();
-    let is_lite_2d = cli.capture_scene.as_deref() == Some("lite-2d");
+    let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
+    let default_backend = if is_lite_2d {
+        Backends::DX12
+    } else {
+        Backends::VULKAN
+    };
     let plugins = DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(Window {
@@ -59,7 +64,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         })
         .set(RenderPlugin {
             render_creation: RenderCreation::Automatic(WgpuSettings {
-                backends: Some(Backends::from_env().unwrap_or(Backends::VULKAN)),
+                backends: Some(Backends::from_env().unwrap_or(default_backend)),
                 power_preference: gpu::wgpu_power_preference(cli.gpu),
                 memory_hints: MemoryHints::MemoryUsage,
                 instance_flags: InstanceFlags::empty(),
@@ -177,19 +182,25 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         None => {
-            let ui_state = station_ui::UiState::with_demo_seed(
+            let mut ui_state = station_ui::UiState::with_demo_seed(
                 station_3d::OfficeLayout::Pro,
                 station_3d::BackdropKind::City,
                 false,
             );
             let data_dir = commands::resolve_runtime_data_dir();
-            app.add_plugins(station_3d::OfficeWorldPlugin {
-                layout: station_3d::OfficeLayout::Pro,
-                backdrop: station_3d::BackdropKind::City,
-                assets_dir: assets_dir.clone(),
-                night: false,
-            })
-            .add_plugins(station_ui::StationUiPlugin {
+            if is_lite_2d {
+                ui_state.view_mode = station_ui::ViewMode::Lite2D;
+                app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
+                    .add_systems(Startup, spawn_lite_2d_camera);
+            } else {
+                app.add_plugins(station_3d::OfficeWorldPlugin {
+                    layout: station_3d::OfficeLayout::Pro,
+                    backdrop: station_3d::BackdropKind::City,
+                    assets_dir: assets_dir.clone(),
+                    night: false,
+                });
+            }
+            app.add_plugins(station_ui::StationUiPlugin {
                 assets_dir: assets_dir.clone(),
                 initial_state: ui_state,
                 initial_lang: "en".to_owned(),

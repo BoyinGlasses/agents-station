@@ -79,10 +79,11 @@ fn draw_full_station_ui(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSto
 fn render_primary_station_ui(
     mut contexts: EguiContexts,
     mut initialized: Local<bool>,
-    cached: Res<CachedFontBundle>,
+    mut cached: ResMut<CachedFontBundle>,
     assets_dir: Res<HudAssetsDir>,
     mut state: ResMut<UiState>,
     i18n: Res<I18nStore>,
+    capture_q: Query<(), With<EguiRenderToImage>>,
 ) {
     let Some(ctx) = contexts.try_ctx_mut() else {
         return;
@@ -92,6 +93,9 @@ fn render_primary_station_ui(
             install_egui_fonts(ctx, bundle);
         } else if let Ok(bundle) = fonts::load_font_bundle(&assets_dir.0) {
             install_egui_fonts(ctx, &bundle);
+        }
+        if capture_q.is_empty() {
+            cached.0 = None;
         }
         theme::apply_station_theme(ctx);
         *initialized = true;

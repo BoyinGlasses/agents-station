@@ -44,6 +44,9 @@ pub struct Cli {
     pub gpu: GpuPreference,
 
     #[arg(long)]
+    pub lite: bool,
+
+    #[arg(long)]
     pub capture_scene: Option<String>,
 
     #[arg(long)]
