@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
+Status: 107 verified `[x]` | 296 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -10,7 +10,7 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 
 - [x] workspace/Cargo.toml & 6 crates -> `Cargo.toml`, `crates/station-{core,launcher,canvas2d,3d,ui,app}` (verified: `cargo test --workspace`, target on `D:\mystation\cargo-target` = 1.99 GB)
 - [x] scripts/sync-assets.mjs & Vietnamese/Thai TTF fonts -> `scripts/sync-assets.mjs`, `crates/station-ui/src/fonts.rs`, `assets/` (verified: 25 TTF fonts decoded, 119 assets/i18n synced, `bundled_fonts_cover_vietnamese_thai_and_ascii_glyphs` PASS)
-- [~] station-app CLI, Win32 single-instance mutex & GPU selector -> `crates/station-app/src/{cli,instance,gpu}.rs` (verified: 4 unit tests PASS)
+- [x] station-app CLI, Win32 single-instance mutex & GPU selector -> `crates/station-app/src/{cli,instance,gpu,tray}.rs` (verified: CLI/mutex/show-event/GPU/TrayDaemon unit tests PASS + live TrayDaemon Private WS = 2.96 MB <= 45 MB)
 - [x] station-app --capture-scene smoke PNG harness -> `crates/station-app/src/capture.rs`, `crates/station-app/tests/capture_smoke.rs` (verified: composited 3D + Vietnamese/Thai `bevy_egui` HUD PNG, 104.2 MB Private Working Set)
 
 ## P1 — Backend, Shared, CLI & Hooks (61 files)
@@ -34,13 +34,13 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [ ] server/mac-hold.mjs -> `crates/station-core/src/state/mac_hold.rs` (unit tested)
 - [~] server/models.mjs -> `crates/station-core/src/state/models.rs` (unit tested)
 - [x] server/otel-setup.mjs -> `crates/station-core/src/store/otel_setup.rs` (unit tested)
-- [~] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures tested)
+- [x] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures, 30d burn & 15s MoveFileExW flush tested)
 - [x] server/overlap.mjs -> `crates/station-core/src/state/overlap.rs` (unit tested)
 - [~] server/platform/darwin.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
 - [x] server/platform/index.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
 - [~] server/platform/linux.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
 - [x] server/platform/shared.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
-- [~] server/platform/win32.mjs -> `crates/station-core/src/platform/win32.rs` (0-PowerShell Win32 tested)
+- [x] server/platform/win32.mjs -> `crates/station-core/src/platform/win32.rs` (0-PowerShell aligned TCP + STILL_ACTIVE PID tested)
 - [x] server/prefs.mjs -> `crates/station-core/src/prefs.rs` (unit tested)
 - [x] server/prompt-report.mjs -> `crates/station-core/src/store/prompt_report.rs` (unit tested)
 - [~] server/push.mjs -> `crates/station-core/src/store/push.rs` (unit tested)
@@ -54,21 +54,21 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [~] server/tenure.mjs -> `crates/station-core/src/state/tenure.rs` (unit tested)
 - [ ] server/testrun.mjs -> `crates/station-core/src/state/testrun.rs` (unit tested)
 - [~] server/trophies.mjs -> `crates/station-core/src/store/trophies.rs` (unit tested)
-- [~] server/undo.mjs -> `crates/station-core/src/state/undo.rs` (unit tested)
+- [x] server/undo.mjs -> `crates/station-core/src/state/undo.rs` (multi-agent colon SIDs, symlink/cwd guards, 50-session eviction & disk prune tested)
 - [ ] server/usage.mjs -> `crates/station-core/src/store/usage.rs` (1 MB buffer, unit tested)
 - [~] server/vault.mjs -> `crates/station-core/src/store/vault.rs` (unit tested)
 - [ ] server/vsix.mjs -> `crates/station-core/src/store/vsix.rs` (unit tested)
-- [~] server/wrapped.mjs -> `crates/station-core/src/store/wrapped.rs` (unit tested)
+- [x] server/wrapped.mjs -> `crates/station-core/src/store/wrapped.rs` (local-tz day bounds & live replay JSONL tested)
 - [x] src/shared/burn.js -> `crates/station-core/src/shared/burn.rs` (unit tested)
 - [x] src/shared/cache-clock.js -> `crates/station-core/src/shared/cache_clock.rs` (unit tested)
 - [x] src/shared/chat-engine.js -> `crates/station-core/src/shared/chat_engine.rs` (unit tested)
 - [ ] src/shared/comnha.js -> `crates/station-core/src/shared/comnha.rs` (unit tested)
-- [~] src/shared/danger.js -> `crates/station-core/src/shared/danger.rs` (unit tested)
+- [x] src/shared/danger.js -> `crates/station-core/src/shared/danger.rs` (12 danger patterns wired into hooks & remote perm guard, tested)
 - [ ] src/shared/duty.js -> `crates/station-core/src/shared/duty.rs` (unit tested)
 - [ ] src/shared/model-name.js -> `crates/station-core/src/shared/model_name.rs` (unit tested)
 - [x] src/shared/prompt-coach.js -> `crates/station-core/src/shared/prompt_coach.rs` (unit tested)
 - [ ] src/shared/quick-choices.js -> `crates/station-core/src/shared/quick_choices.rs` (unit tested)
-- [~] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (unit tested)
+- [x] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (live replay JSONL range wired into `/api/timeline`, tested)
 - [ ] src/shared/workdays.js -> `crates/station-core/src/shared/workdays.rs` (unit tested)
 - [x] bin/cli.mjs -> `crates/station-core/src/hooks_cli.rs`, `crates/station-app/src/{cli,commands}.rs` (unit tested)
 - [x] bin/service.mjs -> `crates/station-core/src/hooks_cli.rs::install_windows_service_in` (unit tested)
@@ -506,15 +506,15 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [x] endpoint:GET /api/live -> `crates/station-core/src/http/api.rs::get_live`
 - [x] endpoint:GET /api/doctor -> `crates/station-core/src/http/api.rs::get_doctor`
 - [x] endpoint:GET /api/log -> `crates/station-core/src/http/api.rs::get_log`
-- [~] endpoint:GET /api/timeline -> `crates/station-core/src/http/api.rs::get_timeline`
-- [~] endpoint:GET /api/wrapped -> `crates/station-core/src/http/api.rs::get_wrapped`
-- [~] endpoint:GET /api/replay -> `crates/station-core/src/http/api.rs::get_replay`
-- [~] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
+- [x] endpoint:GET /api/timeline -> `crates/station-core/src/http/api.rs::get_timeline`
+- [x] endpoint:GET /api/wrapped -> `crates/station-core/src/http/api.rs::get_wrapped`
+- [x] endpoint:GET /api/replay -> `crates/station-core/src/http/api.rs::get_replay`
+- [x] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
 - [~] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
 - [x] endpoint:GET /api/pins -> `crates/station-core/src/http/api.rs::get_pins`
 - [~] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
 - [~] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
-- [~] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
+- [x] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
 - [x] endpoint:GET /api/burn -> `crates/station-core/src/http/api.rs::get_burn`
 - [~] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
 - [x] endpoint:GET /api/panel -> `crates/station-core/src/http/api.rs::get_panel`
@@ -530,8 +530,8 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [~] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
 - [ ] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_generic_ok`
 - [ ] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [~] endpoint:GET /pin -> `crates/station-core/src/http/phone.rs::get_pin`
-- [~] endpoint:POST /pin -> `crates/station-core/src/http/phone.rs::post_pin`
+- [x] endpoint:GET /pin -> `crates/station-core/src/http/phone.rs::get_pin`
+- [x] endpoint:POST /pin -> `crates/station-core/src/http/phone.rs::post_pin`
 - [x] endpoint:POST /api/presence -> `crates/station-core/src/http/api.rs::post_presence`
 - [~] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
 - [x] endpoint:POST /api/pin -> `crates/station-core/src/http/api.rs::post_pin_update`
@@ -547,7 +547,7 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [~] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
 - [ ] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [~] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
-- [~] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
+- [x] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
 - [~] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
 - [~] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
 - [ ] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
@@ -558,7 +558,7 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [~] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
 - [ ] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/pins -> `crates/station-core/src/http/api.rs::post_pins`
-- [~] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
+- [x] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
 - [ ] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/loop -> `crates/station-core/src/http/api.rs::post_loop`
 - [~] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
@@ -596,4 +596,4 @@ Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571
 - [~] endpoint:POST /api/ai/ag/read -> `crates/station-core/src/http/api.rs::post_ag_ai`
 - [x] endpoint:GET /api/harnesses -> `crates/station-core/src/http/api.rs::get_harnesses`
 - [x] endpoint:POST /api/harnesses/launch -> `crates/station-core/src/http/api.rs::post_harnesses_launch`
-- [~] endpoint:POST /api/harnesses/custom -> `crates/station-core/src/http/api.rs::post_harnesses_custom`
+- [x] endpoint:POST /api/harnesses/custom -> `crates/station-core/src/http/api.rs::post_harnesses_custom`
