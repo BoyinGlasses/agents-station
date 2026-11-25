@@ -5062,6 +5062,7 @@ dependencies = [
  "bevy_egui",
  "clap",
  "image",
+ "reqwest",
  "serde_json",
  "station-3d",
  "station-canvas2d",
