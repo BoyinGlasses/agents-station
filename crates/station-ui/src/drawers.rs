@@ -79,7 +79,13 @@ fn draw_session_drawer(ui: &mut egui::Ui, state: &mut UiState) {
                     .color(ACCENT_TERRACOTTA),
             );
             ui.label(RichText::new(&sess.project).strong().color(TEXT_PRIMARY));
-            ui.label(RichText::new(format!("({})", sess.status)).color(STATUS_WORK));
+            let st_col = match sess.status.as_str() {
+                "work" | "working" => STATUS_WORK,
+                "wait" | "waiting" => STATUS_WAIT,
+                "error" | "denied" => STATUS_ERR,
+                _ => STATUS_INFO,
+            };
+            ui.label(RichText::new(format!("({})", sess.status)).color(st_col));
         });
         ui.label(RichText::new(format!("Model: {}", sess.model)).size(11.5).color(TEXT_MUTED));
         ui.label(
@@ -330,6 +336,23 @@ fn draw_settings_drawer(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore
             for g in [GpuPrefUi::Auto, GpuPrefUi::Integrated, GpuPrefUi::Discrete] {
                 if ui.selectable_label(state.gpu_pref == g, g.label()).clicked() {
                     state.gpu_pref = g;
+                    state.push_action(UiAction::SetGpuPref(g));
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Weather:");
+            for (code, lbl) in [
+                ("hcm", "HCM"),
+                ("hn", "HN"),
+                ("dn", "DN"),
+                ("dl", "DL"),
+                ("nt", "NT"),
+            ] {
+                let active = state.weather_city.eq_ignore_ascii_case(code)
+                    || state.weather_city.eq_ignore_ascii_case(lbl);
+                if ui.selectable_label(active, lbl).clicked() {
+                    state.push_action(UiAction::SetWeatherCity(code.to_owned()));
                 }
             }
         });

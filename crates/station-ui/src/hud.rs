@@ -19,8 +19,8 @@ pub fn draw_hud(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
 
 fn status_color(status: &str) -> Color32 {
     match status {
-        "working" => STATUS_WORK,
-        "waiting" => STATUS_WAIT,
+        "work" | "working" => STATUS_WORK,
+        "wait" | "waiting" => STATUS_WAIT,
         "error" | "denied" => STATUS_ERR,
         _ => STATUS_INFO,
     }
@@ -316,26 +316,22 @@ fn draw_camera_toolbar(ctx: &egui::Context, state: &mut UiState) {
                         )
                         .clicked()
                     {
-                        state.first_person = !state.first_person;
                         state.push_action(UiAction::ToggleCameraFp);
                     }
                     if ui
                         .selectable_label(state.demo_running, RichText::new("Demo").size(11.0))
                         .clicked()
                     {
-                        state.demo_running = !state.demo_running;
                         state.push_action(UiAction::ToggleDemo);
                     }
                     if ui
                         .selectable_label(state.replay_playing, RichText::new("Replay").size(11.0))
                         .clicked()
                     {
-                        state.replay_playing = !state.replay_playing;
                         state.push_action(UiAction::ToggleReplay);
                     }
                     if ui.button(RichText::new("Photo").size(11.0)).clicked() {
                         state.push_action(UiAction::TriggerPhoto);
-                        state.push_toast("Photo Booth", "Captured office photostrip");
                     }
                     if ui.button(RichText::new("Wrapped").size(11.0)).clicked() {
                         state.toggle_drawer(ActiveDrawer::Wrapped);

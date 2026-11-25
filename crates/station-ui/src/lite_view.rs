@@ -9,9 +9,9 @@ use bevy_egui::egui::{self, Color32, RichText, Stroke};
 
 fn draw_agent_card(ui: &mut egui::Ui, s: &SessionCard) {
     let dot = match s.status.as_str() {
-        "working" => STATUS_WORK,
-        "waiting" => STATUS_WAIT,
-        "error" => STATUS_ERR,
+        "work" | "working" => STATUS_WORK,
+        "wait" | "waiting" => STATUS_WAIT,
+        "error" | "denied" => STATUS_ERR,
         _ => STATUS_INFO,
     };
     card_frame().show(ui, |ui| {
