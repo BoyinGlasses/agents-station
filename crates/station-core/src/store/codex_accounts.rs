@@ -8,6 +8,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Strict account slot ID validation (`^[A-Za-z0-9_-]{1,64}$`) preventing path traversal.
+pub fn is_safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AiAccountSlot {
     pub slug: String,
@@ -151,10 +160,13 @@ impl CodexAccounts {
     pub fn load_with_seat(data_dir: &Path, seat_dir: PathBuf) -> Self {
         let file = data_dir.join("codex-accounts.json");
         let copies_dir = data_dir.join("codex-accounts");
-        let data = std::fs::read_to_string(&file)
+        let mut data = std::fs::read_to_string(&file)
             .ok()
             .and_then(|s| serde_json::from_str::<AccountsFile>(&s).ok())
             .unwrap_or_default();
+        data.accounts.retain(|a| is_safe_id(&a.slug));
+        data.tenure
+            .retain(|t| t.id.as_deref().is_none_or(is_safe_id));
         let seat_id = data
             .accounts
             .iter()
@@ -175,12 +187,14 @@ impl CodexAccounts {
         self.seat_dir.join("auth.json")
     }
 
-    fn copy_auth_file(&self, id: &str) -> PathBuf {
-        self.copies_dir.join(id).join("auth.json")
+    fn copy_auth_file(&self, id: &str) -> Option<PathBuf> {
+        is_safe_id(id).then(|| self.copies_dir.join(id).join("auth.json"))
     }
 
     fn keep_copy(&self, id: &str, text: &str) {
-        let path = self.copy_auth_file(id);
+        let Some(path) = self.copy_auth_file(id) else {
+            return;
+        };
         let prev = std::fs::read_to_string(&path).ok();
         if prev.as_deref() != Some(text) {
             let _ = write_bytes_atomic(&path, text.as_bytes());
@@ -370,6 +384,9 @@ impl CodexAccounts {
             }
             "use" => {
                 let target = Self::target_id(body).to_owned();
+                if !is_safe_id(&target) {
+                    return json!({ "ok": false, "code": "badId" });
+                }
                 self.sync_seat();
                 if !self.data.accounts.iter().any(|a| a.slug == target) {
                     return json!({ "ok": false, "code": "noAccount" });
@@ -377,17 +394,20 @@ impl CodexAccounts {
                 if self.seat_id.as_deref() == Some(target.as_str()) {
                     return json!({ "ok": true, "same": true, "id": target });
                 }
-                let copy_path = self.copy_auth_file(&target);
-                if copy_path.is_file() {
-                    let Ok(text) = std::fs::read_to_string(&copy_path) else {
-                        return json!({ "ok": false, "code": "noCopy" });
-                    };
-                    if write_bytes_atomic(&self.seat_auth_file(), text.as_bytes()).is_err() {
-                        return json!({ "ok": false, "code": "seatFailed" });
-                    }
-                    self.seat_text = Some(text);
-                    self.seat_note.clear();
+                let Some(copy_path) = self.copy_auth_file(&target) else {
+                    return json!({ "ok": false, "code": "badId" });
+                };
+                if !copy_path.is_file() {
+                    return json!({ "ok": false, "code": "noCopy" });
                 }
+                let Ok(text) = std::fs::read_to_string(&copy_path) else {
+                    return json!({ "ok": false, "code": "noCopy" });
+                };
+                if write_bytes_atomic(&self.seat_auth_file(), text.as_bytes()).is_err() {
+                    return json!({ "ok": false, "code": "seatFailed" });
+                }
+                self.seat_text = Some(text);
+                self.seat_note.clear();
                 let from = self.seat_id.clone();
                 self.seat_id = Some(target.clone());
                 for a in &mut self.data.accounts {
@@ -399,6 +419,9 @@ impl CodexAccounts {
             }
             "rename" => {
                 let target = Self::target_id(body);
+                if !is_safe_id(target) {
+                    return json!({ "ok": false, "code": "badId" });
+                }
                 let label: String = one_line(body.get("label").and_then(Value::as_str).unwrap_or(""))
                     .chars()
                     .take(24)
@@ -415,6 +438,9 @@ impl CodexAccounts {
             }
             "remove" => {
                 let target = Self::target_id(body);
+                if !is_safe_id(target) {
+                    return json!({ "ok": false, "code": "badId" });
+                }
                 if !self.data.accounts.iter().any(|a| a.slug == target) {
                     return json!({ "ok": false, "code": "noAccount" });
                 }
@@ -538,5 +564,51 @@ mod tests {
         assert_eq!(mgr.mutate("remove", &json!({ "id": alice_id }))["code"], "inSeat");
         assert_eq!(mgr.mutate("remove", &json!({ "id": bob_id }))["ok"], true);
         assert!(!data_dir.join("codex-accounts").join(&bob_id).exists());
+    }
+
+    #[test]
+    fn codex_accounts_rejects_unsnapshotted_switch_and_unsafe_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let seat_dir = dir.path().join("codex-seat");
+        let victim_dir = dir.path().join("victim-outside");
+        std::fs::create_dir_all(&seat_dir).unwrap();
+        std::fs::create_dir_all(&victim_dir).unwrap();
+
+        let alice_auth = auth_json("alice@example.com", "u1", "acc-1", "plus", "ref-alice-1");
+        std::fs::write(seat_dir.join("auth.json"), &alice_auth).unwrap();
+
+        let mut mgr = CodexAccounts::load_with_seat(&data_dir, seat_dir.clone());
+        mgr.sync_seat();
+        let alice_id = mgr.view()["now"].as_str().unwrap().to_owned();
+
+        // Add an unsnapshotted slot manually and try switching to it -> must fail with noCopy
+        let added = mgr.mutate("add", &json!({ "label": "Empty" }));
+        let empty_id = added["id"].as_str().unwrap().to_owned();
+        let sw = mgr.mutate("use", &json!({ "id": empty_id }));
+        assert_eq!(sw["ok"], false);
+        assert_eq!(sw["code"], "noCopy");
+        assert_eq!(mgr.view()["now"].as_str(), Some(alice_id.as_str()));
+        assert!(std::fs::read_to_string(seat_dir.join("auth.json")).unwrap().contains("ref-alice-1"));
+
+        // Crafted state file with traversal slug must be stripped on load and rejected on mutate
+        std::fs::write(
+            data_dir.join("codex-accounts.json"),
+            json!({
+                "auto": false,
+                "accounts": [
+                    { "slug": "../../victim-outside", "label": "bad", "email": "", "active": false, "later": false }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut reloaded = CodexAccounts::load_with_seat(&data_dir, seat_dir);
+        assert!(reloaded.view()["accounts"].as_array().unwrap().is_empty());
+        assert_eq!(
+            reloaded.mutate("remove", &json!({ "id": "../../victim-outside" }))["ok"],
+            false
+        );
+        assert!(victim_dir.is_dir(), "outside directory must never be deleted");
     }
 }
