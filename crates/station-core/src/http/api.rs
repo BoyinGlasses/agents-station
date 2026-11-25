@@ -6,7 +6,7 @@ use crate::http::guard::{
 use crate::shared::timeline::build_timeline;
 use crate::state::loops::LoopConfig;
 use crate::state::models::{default_claude_models, models_of, with_models};
-use crate::state::sessions::{now_ms, read_replay_range};
+use crate::state::sessions::{PermDecision, now_ms, one_line, read_replay_range};
 use crate::store::prompt_report::build_prompt_report;
 use crate::store::push::{PushKeys, PushSubscription};
 use crate::store::wrapped::week_summary;
@@ -676,6 +676,109 @@ pub async fn post_presence(
     Ok(Json(json!({ "ok": true, "focused": focused })))
 }
 
+fn parse_answers_map(
+    body: &Value,
+    tool_input: Option<&Value>,
+) -> Option<serde_json::Map<String, Value>> {
+    let raw = body.get("answers")?;
+    if let Some(obj) = raw.as_object() {
+        return (!obj.is_empty()).then(|| obj.clone());
+    }
+    let arr = raw.as_array()?;
+    let qs = tool_input
+        .and_then(|i| i.get("questions"))
+        .and_then(Value::as_array)?;
+    let mut out = serde_json::Map::new();
+    for item in arr {
+        let Some(q_idx) = item.get("q").and_then(Value::as_u64).map(|n| n as usize) else {
+            continue;
+        };
+        let Some(q_obj) = qs.get(q_idx) else {
+            continue;
+        };
+        let Some(q_text) = q_obj.get("question").and_then(Value::as_str) else {
+            continue;
+        };
+        let multi = q_obj
+            .get("multiSelect")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let opts = q_obj.get("options").and_then(Value::as_array);
+        let mut parts: Vec<String> = item
+            .get("pick")
+            .and_then(Value::as_array)
+            .map(|picks| {
+                picks
+                    .iter()
+                    .filter_map(Value::as_u64)
+                    .filter_map(|idx| opts.and_then(|o| o.get(idx as usize)))
+                    .filter_map(|o| o.get("label").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !multi && parts.len() > 1 {
+            parts.truncate(1);
+        }
+        if let Some(other) = item.get("other").and_then(Value::as_str) {
+            let clean: String = one_line(other).chars().take(500).collect();
+            if !clean.is_empty() {
+                parts.push(clean);
+            }
+        }
+        let val = parts.join(", ");
+        if !val.is_empty() {
+            out.insert(q_text.to_owned(), Value::String(val));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+enum ParsedPermAction {
+    Skip,
+    Decide(PermDecision),
+}
+
+fn parse_perm_action(
+    body: &Value,
+    perm_kind: &str,
+    tool_input: Option<&Value>,
+) -> Result<ParsedPermAction, StatusCode> {
+    let choice = body
+        .get("choice")
+        .or_else(|| body.get("decision"))
+        .and_then(Value::as_str);
+    if choice == Some("skip") {
+        return Ok(ParsedPermAction::Skip);
+    }
+    if body.get("answers").is_some() || choice == Some("answer") {
+        let Some(map) = parse_answers_map(body, tool_input) else {
+            return Err(StatusCode::BAD_REQUEST);
+        };
+        return Ok(ParsedPermAction::Decide(PermDecision::Answers(map)));
+    }
+    match choice {
+        Some("deny" | "revise") => {
+            let reason = body
+                .get("reason")
+                .or_else(|| body.get("note"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            Ok(ParsedPermAction::Decide(PermDecision::Deny { reason }))
+        }
+        Some("retry") => Ok(ParsedPermAction::Decide(PermDecision::Retry)),
+        Some("keep") => Ok(ParsedPermAction::Decide(PermDecision::Keep)),
+        Some("allow" | "always" | "approve") | None => {
+            if perm_kind == "ask" {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            Ok(ParsedPermAction::Decide(PermDecision::Allow))
+        }
+        Some(_) => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
 pub async fn post_perm(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -712,8 +815,90 @@ pub async fn post_perm(
     {
         return Err(StatusCode::FORBIDDEN);
     }
-    let removed = office.pending_perms.remove(id).is_some();
-    Ok(Json(json!({ "ok": removed })))
+    let perm_kind = office
+        .pending_perms
+        .get(id)
+        .map(|p| p.kind.clone())
+        .unwrap_or_else(|| "perm".to_owned());
+    let action = parse_perm_action(&body, &perm_kind, office.hold_tool_input(id))?;
+    let resolved = match action {
+        ParsedPermAction::Skip => office.cancel_hold(id),
+        ParsedPermAction::Decide(decision) => office.resolve_hold(id, decision).is_some(),
+    };
+    Ok(Json(json!({ "ok": resolved })))
+}
+
+pub async fn post_panel_answer(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    let perm_kind = office
+        .pending_perms
+        .get(id)
+        .map(|p| p.kind.clone())
+        .unwrap_or_else(|| "perm".to_owned());
+    let action = parse_perm_action(&body, &perm_kind, office.hold_tool_input(id))?;
+    if matches!(action, ParsedPermAction::Decide(PermDecision::Allow))
+        && office
+            .pending_perms
+            .get(id)
+            .is_some_and(|p| p.danger.is_some())
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let resolved = match action {
+        ParsedPermAction::Skip => office.cancel_hold(id),
+        ParsedPermAction::Decide(decision) => office.resolve_hold(id, decision).is_some(),
+    };
+    Ok(Json(json!({ "ok": resolved })))
+}
+
+pub async fn post_denied(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if !local {
+        let phone_approve = state
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("phoneApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !phone_approve {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let op = body
+        .get("op")
+        .or_else(|| body.get("choice"))
+        .and_then(Value::as_str)
+        .unwrap_or("keep");
+    let decision = match op {
+        "retry" => PermDecision::Retry,
+        "keep" => PermDecision::Keep,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    let resolved = office.resolve_hold(id, decision).is_some();
+    Ok(Json(json!({ "ok": resolved })))
 }
 
 pub async fn get_push(

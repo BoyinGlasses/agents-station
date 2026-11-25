@@ -1,8 +1,14 @@
 use crate::http::AppState;
 use crate::http::guard::{OptionalPeer, ViaTunnel, enforce_hook_loopback};
+use crate::redact::redact;
 use crate::shared::cache_clock::cache_from_status;
+use crate::shared::danger::danger_key;
+use crate::state::mac_hold::{
+    BAR_ALIVE_MS, DENY_HOLD_MS, HoldInput, PHONE_HOLD_MS, effective_bar_hold_ms, effective_hold_ms,
+    hold_plan, wait_header_ms,
+};
 use crate::state::overlap::{file_of, is_edit_tool};
-use crate::state::sessions::now_ms;
+use crate::state::sessions::{PendingPerm, classify_tool, clip, now_ms, one_line};
 use crate::store::otel::day_key;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -11,6 +17,8 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::oneshot;
 
 pub async fn post_event(
     State(state): State<Arc<AppState>>,
@@ -241,22 +249,169 @@ pub async fn post_hook_start(
     Ok(Json(json!({})))
 }
 
+fn compute_hold_ms(state: &AppState, headers: &HeaderMap, normal_ms: u64) -> u64 {
+    let now = now_ms();
+    let (focused, bar_last_seen_ms) = {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        (office.presence_focused, office.bar_last_seen_ms)
+    };
+    let (mac_approve, phone_approve) = {
+        let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let mac = prefs
+            .get("macApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let phone = prefs
+            .get("phoneApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        (mac, phone)
+    };
+    let push_count = state.push.lock().unwrap_or_else(|e| e.into_inner()).count();
+    let bar_alive = bar_last_seen_ms > 0 && now.saturating_sub(bar_last_seen_ms) < BAR_ALIVE_MS;
+    let phone = phone_approve && push_count > 0;
+    let idle_sec = if phone || bar_alive {
+        state.sys.platform().idle_seconds().unwrap_or(f64::INFINITY)
+    } else {
+        f64::INFINITY
+    };
+
+    let header_ms = wait_header_ms(headers.get("x-office-wait").and_then(|v| v.to_str().ok()));
+    let phone_ms = header_ms.unwrap_or(normal_ms).min(PHONE_HOLD_MS);
+    let plan = hold_plan(HoldInput {
+        focused,
+        bar_alive,
+        idle_sec,
+        pref: mac_approve,
+        normal_ms,
+        bar_ms: effective_bar_hold_ms(),
+        phone,
+        phone_ms,
+    });
+    match header_ms {
+        Some(w) => plan.ms.min(w),
+        None => plan.ms,
+    }
+}
+
+struct HoldCleanupGuard {
+    state: Arc<AppState>,
+    id: String,
+    active: bool,
+}
+
+impl Drop for HoldCleanupGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let mut office = self.state.office.lock().unwrap_or_else(|e| e.into_inner());
+            office.cancel_hold(&self.id);
+        }
+    }
+}
+
+async fn await_hold(
+    state: Arc<AppState>,
+    perm_id: String,
+    hold_ms: u64,
+    rx: oneshot::Receiver<Value>,
+) -> Value {
+    let mut guard = HoldCleanupGuard {
+        state,
+        id: perm_id,
+        active: true,
+    };
+    match tokio::time::timeout(Duration::from_millis(hold_ms), rx).await {
+        Ok(Ok(val)) => {
+            guard.active = false;
+            val
+        }
+        _ => json!({}),
+    }
+}
+
+fn perm_detail(tool_input: &Value) -> String {
+    let raw = tool_input
+        .get("command")
+        .or_else(|| tool_input.get("file_path"))
+        .or_else(|| tool_input.get("url"))
+        .or_else(|| tool_input.get("pattern"))
+        .or_else(|| tool_input.get("query"))
+        .or_else(|| tool_input.get("prompt"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| tool_input.to_string());
+    clip(&redact(&raw), 400)
+}
+
+fn is_no_verdict_reason(reason: &str) -> bool {
+    let lower = reason.trim().to_ascii_lowercase();
+    lower.starts_with("auto mode could not evaluate")
+        || lower.starts_with("classifier unavailable")
+}
+
 pub async fn post_hook_permission(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     enforce_hook_loopback(peer, via_tunnel, &headers)?;
-    if let Some(obj) = body.as_object_mut() {
-        obj.entry("hook_event_name")
-            .or_insert_with(|| Value::String("PermissionRequest".to_owned()));
+    let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let tool_name = body.get("tool_name").and_then(Value::as_str).unwrap_or("tool");
+    if sid.is_empty() || matches!(tool_name, "AskUserQuestion" | "ExitPlanMode") {
+        return Ok(Json(json!({})));
     }
-    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
-    office.ingest_raw_event(body);
-    // Non-blocking fast return when no interactive hold is active so Claude Code falls back safely.
-    Ok(Json(json!({})))
+
+    let hold_ms = compute_hold_ms(&state, &headers, effective_hold_ms());
+    if hold_ms == 0 {
+        return Ok(Json(json!({})));
+    }
+
+    let ts = now_ms();
+    let tool_input = body.get("tool_input").unwrap_or(&Value::Null);
+    let summary = classify_tool(tool_name, tool_input);
+    let detail = perm_detail(tool_input);
+    let dk = danger_key(Some("perm"), Some(&summary.kind), Some(&detail)).map(str::to_owned);
+    let cwd_name = body
+        .get("cwd")
+        .and_then(Value::as_str)
+        .and_then(|c| Path::new(c).file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_owned);
+    let agent = body
+        .get("agent")
+        .and_then(Value::as_str)
+        .unwrap_or("claude")
+        .to_owned();
+
+    let (tx, rx) = oneshot::channel();
+    let perm_id = {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let perm_id = format!("p_{}_{}", ts, office.next_seq());
+        let name = office
+            .sessions
+            .get(sid)
+            .map(|s| s.name.clone())
+            .or(cwd_name)
+            .unwrap_or(agent);
+        let perm = PendingPerm {
+            id: perm_id.clone(),
+            sess: sid.to_owned(),
+            name,
+            kind: "perm".to_owned(),
+            tool_type: summary.kind,
+            label: summary.label,
+            detail,
+            danger: dk,
+            created_at: ts,
+        };
+        office.register_hold(perm, tx);
+        perm_id
+    };
+
+    let response = await_hold(state, perm_id, hold_ms, rx).await;
+    Ok(Json(response))
 }
 
 pub async fn post_hook_question(
@@ -267,9 +422,79 @@ pub async fn post_hook_question(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     enforce_hook_loopback(peer, via_tunnel, &headers)?;
-    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
-    office.ingest_raw_event(body);
-    Ok(Json(json!({})))
+    let sid = body.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let tool_name = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    if sid.is_empty() || !matches!(tool_name, "AskUserQuestion" | "ExitPlanMode") {
+        return Ok(Json(json!({})));
+    }
+
+    let tool_input = body
+        .get("tool_input")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let (kind, tool_type, label, detail) = if tool_name == "AskUserQuestion" {
+        let Some(qs) = tool_input.get("questions").and_then(Value::as_array) else {
+            return Ok(Json(json!({})));
+        };
+        if qs.is_empty() {
+            return Ok(Json(json!({})));
+        }
+        let detail = qs
+            .iter()
+            .take(4)
+            .filter_map(|q| q.get("question").and_then(Value::as_str))
+            .map(|q| clip(&redact(&one_line(q)), 400))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ("ask", "ask", "Question", detail)
+    } else {
+        let plan = tool_input
+            .get("plan")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        ("plan", "plan", "Plan", clip(&redact(&one_line(plan)), 200))
+    };
+
+    let hold_ms = compute_hold_ms(&state, &headers, effective_hold_ms());
+    if hold_ms == 0 {
+        return Ok(Json(json!({})));
+    }
+
+    let ts = now_ms();
+    let cwd_name = body
+        .get("cwd")
+        .and_then(Value::as_str)
+        .and_then(|c| Path::new(c).file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_owned);
+
+    let (tx, rx) = oneshot::channel();
+    let perm_id = {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let perm_id = format!("q_{}_{}", ts, office.next_seq());
+        let name = office
+            .sessions
+            .get(sid)
+            .map(|s| s.name.clone())
+            .or(cwd_name)
+            .unwrap_or_else(|| "claude".to_owned());
+        let perm = PendingPerm {
+            id: perm_id.clone(),
+            sess: sid.to_owned(),
+            name,
+            kind: kind.to_owned(),
+            tool_type: tool_type.to_owned(),
+            label: label.to_owned(),
+            detail,
+            danger: None,
+            created_at: ts,
+        };
+        office.register_hold_with_input(perm, tx, Some(tool_input));
+        perm_id
+    };
+
+    let response = await_hold(state, perm_id, hold_ms, rx).await;
+    Ok(Json(response))
 }
 
 pub async fn post_hook_denied(
@@ -286,11 +511,68 @@ pub async fn post_hook_denied(
         .and_then(Value::as_str)
         .unwrap_or("claude")
         .to_owned();
-    let redacted = crate::redact::redact_json_value(&body);
-    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
-    office.chat.deny_card(&sid, &sid, redacted, ts);
-    let _ = office.save_chat();
-    Ok(Json(json!({ "ok": true })))
+    let reason = body.get("reason").and_then(Value::as_str).unwrap_or("");
+    let can_retry = !is_no_verdict_reason(reason);
+    let hold_ms = if can_retry {
+        compute_hold_ms(&state, &headers, DENY_HOLD_MS.min(effective_hold_ms()))
+    } else {
+        0
+    };
+
+    let mut redacted = crate::redact::redact_json_value(&body);
+    if let Some(obj) = redacted.as_object_mut() {
+        obj.insert(
+            "state".to_owned(),
+            Value::String(if hold_ms > 0 { "held" } else { "kept" }.to_owned()),
+        );
+        obj.insert("retry".to_owned(), Value::Bool(can_retry));
+        obj.insert(
+            "until".to_owned(),
+            Value::from(if hold_ms > 0 { ts.saturating_add(hold_ms) } else { 0 }),
+        );
+    }
+
+    let tool_name = body.get("tool_name").and_then(Value::as_str).unwrap_or("tool");
+    let tool_input = body.get("tool_input").unwrap_or(&Value::Null);
+    let summary = classify_tool(tool_name, tool_input);
+    let detail = perm_detail(tool_input);
+
+    let hold_rx = {
+        let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        let sname = office
+            .sessions
+            .get(&sid)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| sid.clone());
+        let card = office.chat.deny_card(&sid, &sname, redacted, ts);
+        let _ = office.save_chat();
+        if hold_ms > 0 {
+            let (tx, rx) = oneshot::channel();
+            let card_id = card.id.clone();
+            let perm = PendingPerm {
+                id: card_id.clone(),
+                sess: sid,
+                name: sname,
+                kind: "denied".to_owned(),
+                tool_type: summary.kind,
+                label: summary.label,
+                detail,
+                danger: None,
+                created_at: ts,
+            };
+            office.register_hold(perm, tx);
+            Some((card_id, rx))
+        } else {
+            None
+        }
+    };
+
+    if let Some((card_id, rx)) = hold_rx {
+        let response = await_hold(state, card_id, hold_ms, rx).await;
+        Ok(Json(response))
+    } else {
+        Ok(Json(json!({})))
+    }
 }
 
 #[cfg(test)]
@@ -466,5 +748,364 @@ mod tests {
             list.iter().any(|p| p.name == "persist-me" && p.turns == 1),
             "tenure.json must record Stop turn before shutdown: {list:?}"
         );
+    }
+
+    async fn read_json_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn wait_for_pending_id(state: &Arc<AppState>) -> String {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(id) = state.office.lock().unwrap().pending_perms.keys().next().cloned() {
+                return id;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for pending_perms hold registration"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn post_hook_permission_unfocused_returns_empty_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state.clone());
+
+        let payload = json!({
+            "session_id": "s-unfocused",
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo hello" }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/hook/permission")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .header("x-office-wait", "30")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let resp = app.oneshot(req).await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "unfocused /hook/permission must return immediately (< 50 ms), took {elapsed:?}"
+        );
+        let body = read_json_body(resp).await;
+        assert_eq!(body, json!({}));
+        assert!(
+            state.office.lock().unwrap().pending_perms.is_empty(),
+            "unfocused /hook/permission must not leave a dangling pending_perm"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_hook_permission_focused_holds_until_api_perm_resolves_and_caps_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        state.office.lock().unwrap().presence_focused = true;
+        let app = build_router(state.clone());
+
+        // 1. Focused hook holds until POST /api/perm resolves it with choice: "allow".
+        let payload = json!({
+            "session_id": "s-focused",
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo test" }
+        });
+        let app_hook = app.clone();
+        let hook_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/permission")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            app_hook.oneshot(req).await.unwrap()
+        });
+
+        let perm_id = wait_for_pending_id(&state).await;
+        assert!(
+            !hook_task.is_finished(),
+            "/hook/permission must remain blocked while waiting for user decision"
+        );
+
+        let decide_req = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": perm_id, "choice": "allow" }).to_string()))
+            .unwrap();
+        let decide_resp = app.clone().oneshot(decide_req).await.unwrap();
+        assert_eq!(decide_resp.status(), StatusCode::OK);
+
+        let hook_resp = tokio::time::timeout(std::time::Duration::from_secs(2), hook_task)
+            .await
+            .expect("hook must unblock promptly after /api/perm")
+            .unwrap();
+        assert_eq!(hook_resp.status(), StatusCode::OK);
+        let hook_json = read_json_body(hook_resp).await;
+        assert_eq!(
+            hook_json["hookSpecificOutput"]["permissionDecision"],
+            "allow",
+            "expected Claude hookSpecificOutput.permissionDecision == allow, got {hook_json}"
+        );
+        assert_eq!(
+            hook_json["hookSpecificOutput"]["hookEventName"],
+            "PermissionRequest"
+        );
+        assert_eq!(
+            hook_json["hookSpecificOutput"]["decision"]["behavior"],
+            "allow"
+        );
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
+
+        // 2. X-Office-Wait caps the hold window below normal_ms (45_000 ms) and cleans up on timeout.
+        let cap_req = Request::builder()
+            .method("POST")
+            .uri("/hook/permission")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .header("x-office-wait", "0.15")
+            .body(Body::from(
+                json!({
+                    "session_id": "s-focused",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "echo timeout" }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let started = std::time::Instant::now();
+        let cap_resp = app.oneshot(cap_req).await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(cap_resp.status(), StatusCode::OK);
+        assert_eq!(read_json_body(cap_resp).await, json!({}));
+        assert!(
+            elapsed >= std::time::Duration::from_millis(100)
+                && elapsed < std::time::Duration::from_millis(1500),
+            "expected hold capped near 150ms by X-Office-Wait, elapsed={elapsed:?}"
+        );
+        assert!(
+            state.office.lock().unwrap().pending_perms.is_empty(),
+            "expired hold must be cleaned from pending_perms"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_hook_question_holds_until_answered_via_perm_or_panel_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        state.office.lock().unwrap().presence_focused = true;
+        let app = build_router(state.clone());
+
+        let q_payload = json!({
+            "session_id": "s-ask",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [{
+                    "question": "Which database?",
+                    "header": "DB",
+                    "options": [
+                        { "label": "Postgres", "description": "Relational" },
+                        { "label": "SQLite", "description": "Embedded" }
+                    ]
+                }]
+            }
+        });
+
+        // 1. Answer via POST /api/perm
+        let app_q1 = app.clone();
+        let p1 = q_payload.clone();
+        let q1_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/question")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(p1.to_string()))
+                .unwrap();
+            app_q1.oneshot(req).await.unwrap()
+        });
+
+        let q1_id = wait_for_pending_id(&state).await;
+        assert!(!q1_task.is_finished());
+
+        let ans1_req = Request::builder()
+            .method("POST")
+            .uri("/api/perm")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "id": q1_id,
+                    "choice": "answer",
+                    "answers": { "Which database?": "Postgres" }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(ans1_req).await.unwrap().status(), StatusCode::OK);
+
+        let q1_resp = tokio::time::timeout(std::time::Duration::from_secs(2), q1_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(q1_resp.status(), StatusCode::OK);
+        let q1_json = read_json_body(q1_resp).await;
+        assert_eq!(q1_json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(q1_json["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            q1_json["hookSpecificOutput"]["updatedInput"]["answers"]["Which database?"],
+            "Postgres"
+        );
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
+
+        // 2. Answer via POST /api/panel/answer
+        let app_q2 = app.clone();
+        let p2 = q_payload;
+        let q2_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/question")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(p2.to_string()))
+                .unwrap();
+            app_q2.oneshot(req).await.unwrap()
+        });
+
+        let q2_id = wait_for_pending_id(&state).await;
+        assert!(!q2_task.is_finished());
+
+        let ans2_req = Request::builder()
+            .method("POST")
+            .uri("/api/panel/answer")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "id": q2_id,
+                    "answers": { "Which database?": "SQLite" }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(ans2_req).await.unwrap().status(), StatusCode::OK);
+
+        let q2_resp = tokio::time::timeout(std::time::Duration::from_secs(2), q2_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(q2_resp.status(), StatusCode::OK);
+        let q2_json = read_json_body(q2_resp).await;
+        assert_eq!(q2_json["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(q2_json["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert_eq!(
+            q2_json["hookSpecificOutput"]["updatedInput"]["answers"]["Which database?"],
+            "SQLite"
+        );
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_hook_denied_holds_for_retry_and_resolves_via_api_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        state.office.lock().unwrap().presence_focused = true;
+        let app = build_router(state.clone());
+
+        let deny_payload = json!({
+            "session_id": "s-deny",
+            "tool_name": "Bash",
+            "reason": "Auto mode blocked potentially destructive command",
+            "tool_input": { "command": "rm -rf /tmp/scratch" }
+        });
+
+        // 1. Resolve with op: "retry" -> returns hookSpecificOutput { hookEventName: "PermissionDenied", retry: true }
+        let app_d1 = app.clone();
+        let p1 = deny_payload.clone();
+        let d1_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/denied")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(p1.to_string()))
+                .unwrap();
+            app_d1.oneshot(req).await.unwrap()
+        });
+
+        let d1_id = wait_for_pending_id(&state).await;
+        assert!(!d1_task.is_finished());
+
+        let retry_req = Request::builder()
+            .method("POST")
+            .uri("/api/denied")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": d1_id, "op": "retry" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(retry_req).await.unwrap().status(), StatusCode::OK);
+
+        let d1_resp = tokio::time::timeout(std::time::Duration::from_secs(2), d1_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d1_resp.status(), StatusCode::OK);
+        let d1_json = read_json_body(d1_resp).await;
+        assert_eq!(d1_json["hookSpecificOutput"]["hookEventName"], "PermissionDenied");
+        assert_eq!(d1_json["hookSpecificOutput"]["retry"], true);
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
+
+        // 2. Resolve with op: "keep" -> returns {}
+        let app_d2 = app.clone();
+        let p2 = deny_payload;
+        let d2_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/denied")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(p2.to_string()))
+                .unwrap();
+            app_d2.oneshot(req).await.unwrap()
+        });
+
+        let d2_id = wait_for_pending_id(&state).await;
+        assert!(!d2_task.is_finished());
+
+        let keep_req = Request::builder()
+            .method("POST")
+            .uri("/api/denied")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": d2_id, "op": "keep" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(keep_req).await.unwrap().status(), StatusCode::OK);
+
+        let d2_resp = tokio::time::timeout(std::time::Duration::from_secs(2), d2_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(d2_resp.status(), StatusCode::OK);
+        let d2_json = read_json_body(d2_resp).await;
+        assert_eq!(d2_json, json!({}));
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
     }
 }
