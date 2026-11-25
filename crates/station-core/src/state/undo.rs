@@ -417,6 +417,63 @@ impl UndoManager {
             undone: t.undone,
         })
     }
+
+    pub fn prune_stale_disk(&mut self) -> usize {
+        while self.turns.len() > self.max_sessions {
+            let Some(oldest) = self.session_order.pop_front() else {
+                break;
+            };
+            let evicted_turns = self.turns.remove(&oldest);
+            let evicted_key = sid_disk_key(&oldest);
+            let key_still_used = self.turns.keys().any(|k| sid_disk_key(k) == evicted_key);
+            if !key_still_used {
+                let _ = std::fs::remove_dir_all(self.session_dir(&oldest));
+            } else if let Some(turns) = evicted_turns {
+                let old_dir = self.session_dir(&oldest);
+                for t in turns {
+                    let _ = std::fs::remove_dir_all(old_dir.join(&t.id));
+                }
+            }
+        }
+
+        let Ok(rd) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        let active_keys: std::collections::HashSet<String> =
+            self.turns.keys().map(|k| sid_disk_key(k)).collect();
+        let mut dirs: Vec<(bool, u64, String, PathBuf)> = rd
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let is_active = active_keys.contains(&name);
+                let mtime_ms = e
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                (is_active, mtime_ms, name, e.path())
+            })
+            .collect();
+
+        if dirs.len() <= self.max_sessions {
+            return 0;
+        }
+        dirs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+        let excess = dirs.len() - self.max_sessions;
+        let mut removed = 0usize;
+        for (is_active, _, _, path) in dirs.into_iter().take(excess) {
+            if is_active {
+                continue;
+            }
+            if std::fs::remove_dir_all(&path).is_ok() {
+                removed += 1;
+            }
+        }
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -620,5 +677,35 @@ mod tests {
         let res = u.apply("codex_a", 9000);
         assert_eq!(res.done.len(), 1);
         assert_eq!(std::fs::read_to_string(&file_b).unwrap(), "orig-b");
+    }
+
+    #[test]
+    fn undo_prune_stale_disk_removes_orphaned_folders_beyond_50_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let undo_root = dir.path().join("undo");
+        std::fs::create_dir_all(&undo_root).unwrap();
+
+        for i in 0..55usize {
+            let orphan = undo_root.join(format!("orphan_{i:03}"));
+            std::fs::create_dir_all(&orphan).unwrap();
+            std::fs::write(orphan.join("marker"), "stale").unwrap();
+        }
+
+        let target = dir.path().join("live.txt");
+        std::fs::write(&target, "orig").unwrap();
+        let mut u = UndoManager::new(undo_root.clone());
+        u.prompt("codex:live", "edit live", 5000);
+        u.before("codex:live", &target, Some(dir.path()));
+
+        let removed = u.prune_stale_disk();
+        assert!(removed >= 6, "expected >= 6 orphaned dirs removed, got {removed}");
+        assert!(undo_root.join("codex_live").exists(), "active session dir must survive");
+
+        let remaining = std::fs::read_dir(&undo_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .count();
+        assert!(remaining <= 50, "expected <= 50 undo dirs after prune, got {remaining}");
     }
 }
