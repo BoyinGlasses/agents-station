@@ -1,7 +1,45 @@
+use crate::state::git::CREATE_NO_WINDOW;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::path::Path;
+use std::process::Command;
 use std::sync::OnceLock;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BgProbeResult {
+    pub supported: bool,
+    pub version: Option<String>,
+}
+
+fn run_claude_probe(bin: &Path, arg: &str) -> String {
+    let mut cmd = Command::new(bin);
+    cmd.arg(arg);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match cmd.output() {
+        Ok(out) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+            if s.trim().is_empty() {
+                s = String::from_utf8_lossy(&out.stderr).into_owned();
+            }
+            s
+        }
+        Err(_) => String::new(),
+    }
+}
+
+pub fn probe_claude_bg(bin: &Path) -> BgProbeResult {
+    let help = run_claude_probe(bin, "--help");
+    let ver_out = run_claude_probe(bin, "--version");
+    BgProbeResult {
+        supported: has_bg(&help),
+        version: version_of(&ver_out),
+    }
+}
 
 pub const HOLD_S: u64 = 24 * 3600;
 
