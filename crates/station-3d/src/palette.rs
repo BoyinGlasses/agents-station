@@ -1,0 +1,332 @@
+use bevy::asset::RenderAssetUsages;
+use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use station_canvas2d::RgbaSurface;
+use std::collections::HashMap;
+
+/// Marker for every 3D world entity so layout changes, 2D mode, and Tray minimize
+/// can despawn and release the entire 3D scene cleanly.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WorldEntity;
+
+/// Shared unit-primitive mesh handles & deduplicated PBR material cache.
+/// Keeps 44 desks, walls, furniture, and 22 props down to ~6 GPU meshes and ~60 materials.
+#[derive(Resource)]
+pub struct WorldPalette {
+    pub unit_box: Handle<Mesh>,
+    pub unit_cyl: Handle<Mesh>,
+    pub unit_sphere: Handle<Mesh>,
+    pub unit_plane: Handle<Mesh>,
+    pub unit_cone: Handle<Mesh>,
+    pub unit_torus: Handle<Mesh>,
+    materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
+    owned_images: Vec<Handle<Image>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MaterialKey {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+    rough_q: u8,
+    metal_q: u8,
+    emissive: bool,
+    unlit: bool,
+}
+
+pub fn parse_hex_rgb(hex: &str) -> (u8, u8, u8) {
+    let s = hex.trim().trim_start_matches('#');
+    if s.len() == 6
+        && let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&s[0..2], 16),
+            u8::from_str_radix(&s[2..4], 16),
+            u8::from_str_radix(&s[4..6], 16),
+        )
+    {
+        return (r, g, b);
+    }
+    (220, 220, 220)
+}
+
+pub fn srgb_hex(hex: &str) -> Color {
+    let (r, g, b) = parse_hex_rgb(hex);
+    Color::srgb_u8(r, g, b)
+}
+
+impl WorldPalette {
+    pub fn new(meshes: &mut Assets<Mesh>) -> Self {
+        Self {
+            unit_box: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+            unit_cyl: meshes.add(Cylinder::new(0.5, 1.0)),
+            unit_sphere: meshes.add(Sphere::new(0.5)),
+            unit_plane: meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(0.5))),
+            unit_cone: meshes.add(Cone::new(0.5, 1.0)),
+            unit_torus: meshes.add(Torus::new(0.32, 0.5)),
+            materials: HashMap::new(),
+            owned_images: Vec::new(),
+        }
+    }
+
+    pub fn mat(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+        roughness: f32,
+        metallic: f32,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        let key = MaterialKey {
+            r,
+            g,
+            b,
+            a: 255,
+            rough_q: (roughness.clamp(0.0, 1.0) * 100.0).round() as u8,
+            metal_q: (metallic.clamp(0.0, 1.0) * 100.0).round() as u8,
+            emissive: false,
+            unlit: false,
+        };
+        if let Some(h) = self.materials.get(&key) {
+            return h.clone();
+        }
+        let h = assets.add(StandardMaterial {
+            base_color: Color::srgb_u8(r, g, b),
+            perceptual_roughness: roughness.clamp(0.05, 1.0),
+            metallic: metallic.clamp(0.0, 1.0),
+            ..default()
+        });
+        self.materials.insert(key, h.clone());
+        h
+    }
+
+    pub fn matte(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+    ) -> Handle<StandardMaterial> {
+        self.mat(assets, hex, 0.78, 0.0)
+    }
+
+    pub fn glass(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+        alpha: f32,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        let a = (alpha.clamp(0.02, 0.98) * 255.0).round() as u8;
+        let key = MaterialKey {
+            r,
+            g,
+            b,
+            a,
+            rough_q: 8,
+            metal_q: 25,
+            emissive: false,
+            unlit: false,
+        };
+        if let Some(h) = self.materials.get(&key) {
+            return h.clone();
+        }
+        let h = assets.add(StandardMaterial {
+            base_color: Color::srgba_u8(r, g, b, a),
+            alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.08,
+            metallic: 0.25,
+            ..default()
+        });
+        self.materials.insert(key, h.clone());
+        h
+    }
+
+    pub fn emissive(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+        strength: f32,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        let key = MaterialKey {
+            r,
+            g,
+            b,
+            a: (strength.clamp(0.1, 4.0) * 50.0).round() as u8,
+            rough_q: 30,
+            metal_q: 0,
+            emissive: true,
+            unlit: false,
+        };
+        if let Some(h) = self.materials.get(&key) {
+            return h.clone();
+        }
+        let lin = Color::srgb_u8(r, g, b).to_linear();
+        let h = assets.add(StandardMaterial {
+            base_color: Color::srgb_u8(r, g, b),
+            emissive: LinearRgba::new(
+                lin.red * strength,
+                lin.green * strength,
+                lin.blue * strength,
+                1.0,
+            ),
+            perceptual_roughness: 0.3,
+            ..default()
+        });
+        self.materials.insert(key, h.clone());
+        h
+    }
+
+    /// Uploads a `station-canvas2d` RGBA8 surface directly to GPU with `RenderAssetUsages::RENDER_WORLD`,
+    /// dropping the CPU buffer immediately after upload for minimum RAM usage.
+    pub fn upload_surface(
+        &mut self,
+        images: &mut Assets<Image>,
+        surface: RgbaSurface,
+    ) -> Handle<Image> {
+        let img = Image::new(
+            Extent3d {
+                width: surface.width.max(1),
+                height: surface.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            surface.rgba,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        let handle = images.add(img);
+        self.owned_images.push(handle.clone());
+        handle
+    }
+
+    pub fn textured_unlit(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        surface: RgbaSurface,
+    ) -> Handle<StandardMaterial> {
+        let tex = self.upload_surface(images, surface);
+        materials.add(StandardMaterial {
+            base_color_texture: Some(tex),
+            unlit: true,
+            ..default()
+        })
+    }
+
+    pub fn textured_lit(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        surface: RgbaSurface,
+        roughness: f32,
+    ) -> Handle<StandardMaterial> {
+        let tex = self.upload_surface(images, surface);
+        materials.add(StandardMaterial {
+            base_color_texture: Some(tex),
+            perceptual_roughness: roughness,
+            ..default()
+        })
+    }
+
+    pub fn material_count(&self) -> usize {
+        self.materials.len()
+    }
+
+    pub fn purge_transient_images(&mut self, images: &mut Assets<Image>) {
+        for h in self.owned_images.drain(..) {
+            images.remove(&h);
+        }
+    }
+}
+
+/// Spawns a scaled unit box tagged with `WorldEntity`.
+pub fn spawn_box(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    size: Vec3,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_box.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos).with_scale(size),
+        ))
+        .id()
+}
+
+pub fn spawn_box_rot(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    size: Vec3,
+    rot: Quat,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_box.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos)
+                .with_rotation(rot)
+                .with_scale(size),
+        ))
+        .id()
+}
+
+pub fn spawn_cyl(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    diameter: f32,
+    height: f32,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_cyl.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos).with_scale(Vec3::new(diameter, height, diameter)),
+        ))
+        .id()
+}
+
+pub fn spawn_sphere(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    scale: Vec3,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_sphere.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos).with_scale(scale),
+        ))
+        .id()
+}
+
+pub fn spawn_quad(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    size: Vec2,
+    rot: Quat,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_plane.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos)
+                .with_rotation(rot)
+                .with_scale(Vec3::new(size.x, size.y, 1.0)),
+        ))
+        .id()
+}

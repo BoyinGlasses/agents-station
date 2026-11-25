@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 bevy.workspace = true
+station-canvas2d = { path = "../station-canvas2d" }
 station-core = { path = "../station-core" }

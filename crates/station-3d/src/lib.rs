@@ -1,4 +1,11 @@
+pub mod camera;
+pub mod layout;
+pub mod lights;
+pub mod palette;
+
 use bevy::prelude::*;
+pub use layout::{LayoutSpec, OfficeLayout};
+pub use palette::{WorldEntity, WorldPalette};
 
 pub struct SmokeScenePlugin;
 
@@ -58,4 +65,45 @@ fn setup_smoke_scene(
 
 pub fn world3d_ready() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layouts_match_oracle_desk_counts_and_bounds() {
+        let cozy = LayoutSpec::for_layout(OfficeLayout::Cozy);
+        assert_eq!(cozy.desks.len(), 9);
+        assert!(cozy.inside(0.0, 0.0, 0.4));
+        assert!(!cozy.inside(10.0, 0.0, 0.4));
+        assert!(cozy.game_tv.is_none());
+
+        let pro = LayoutSpec::for_layout(OfficeLayout::Pro);
+        assert_eq!(pro.desks.len(), 12);
+        assert_eq!(pro.pods.len(), 3);
+        assert!(pro.game_tv.is_some());
+        assert!(pro.ktv.is_some());
+        assert!(pro.bil.is_some());
+
+        let hq = LayoutSpec::for_layout(OfficeLayout::Hq);
+        assert_eq!(hq.desks.len(), 44);
+        assert_eq!(hq.depts.len(), 4);
+        assert_eq!(hq.pods.len(), 11);
+        assert!(hq.inside(3.0, 20.0, 0.4));
+    }
+
+    #[test]
+    fn world_palette_deduplicates_materials_for_low_memory() {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut mats = Assets::<StandardMaterial>::default();
+        let mut pal = WorldPalette::new(&mut meshes);
+
+        let a = pal.matte(&mut mats, "#F4F0E8");
+        let b = pal.matte(&mut mats, "#F4F0E8");
+        let c = pal.matte(&mut mats, "#2C323C");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(pal.material_count(), 2);
+    }
 }
