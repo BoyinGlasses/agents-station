@@ -5,6 +5,7 @@ pub mod antigravity_runs;
 pub mod cli_command;
 pub mod codex_accounts;
 pub mod codex_history;
+pub mod images;
 pub mod otel;
 pub mod otel_setup;
 pub mod prompt_report;
