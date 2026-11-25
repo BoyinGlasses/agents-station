@@ -1,0 +1,31 @@
+{
+  "source": "D:\\mystation\\my-station",
+  "fonts": [
+    "BeVietnamPro-400-latin-ext.ttf",
+    "BeVietnamPro-400-latin.ttf",
+    "BeVietnamPro-400-vietnamese.ttf",
+    "BeVietnamPro-500-latin-ext.ttf",
+    "BeVietnamPro-500-latin.ttf",
+    "BeVietnamPro-500-vietnamese.ttf",
+    "BeVietnamPro-600-latin-ext.ttf",
+    "BeVietnamPro-600-latin.ttf",
+    "BeVietnamPro-600-vietnamese.ttf",
+    "BeVietnamPro-700-latin-ext.ttf",
+    "BeVietnamPro-700-latin.ttf",
+    "BeVietnamPro-700-vietnamese.ttf",
+    "BeVietnamPro-800-latin-ext.ttf",
+    "BeVietnamPro-800-latin.ttf",
+    "BeVietnamPro-800-vietnamese.ttf",
+    "JetBrainsMono-400-latin-ext.ttf",
+    "JetBrainsMono-400-latin.ttf",
+    "JetBrainsMono-400-vietnamese.ttf",
+    "JetBrainsMono-600-latin-ext.ttf",
+    "JetBrainsMono-600-latin.ttf",
+    "JetBrainsMono-600-vietnamese.ttf",
+    "PlexThaiLooped-400-thai.ttf",
+    "PlexThaiLooped-500-thai.ttf",
+    "PlexThaiLooped-600-thai.ttf",
+    "PlexThaiLooped-700-thai.ttf"
+  ],
+  "copiedFiles": 119
+}
