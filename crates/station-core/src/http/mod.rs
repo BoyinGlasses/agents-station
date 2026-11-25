@@ -29,6 +29,7 @@ use crate::store::otel::OtelStore;
 use crate::store::push::PushStore;
 use crate::store::rewrite::Rewriter;
 use crate::store::trophies::TrophyStore;
+use crate::store::tunnel::TunnelManager;
 use crate::store::usage::UsageScanner;
 use crate::store::vault::VaultStore;
 use crate::system::SystemMonitor;
@@ -70,6 +71,7 @@ pub struct AppState {
     pub tasks: Arc<Mutex<TaskManager>>,
     pub steer_queue: Mutex<SteerQueue>,
     pub push: Mutex<PushStore>,
+    pub tunnel: Arc<TunnelManager>,
     pub rewriter: Arc<Mutex<Rewriter>>,
     pub claude_accounts: Mutex<ClaudeAccounts>,
     pub codex_accounts: Mutex<CodexAccounts>,
@@ -110,6 +112,7 @@ impl AppState {
         let tasks = Arc::new(Mutex::new(TaskManager::new()));
         let steer_queue = Mutex::new(SteerQueue::default());
         let push = PushStore::load(&data_dir);
+        let tunnel = Arc::new(TunnelManager::new(data_dir.clone()));
         let rewriter = Arc::new(Mutex::new(Rewriter::default()));
         let claude_accounts = ClaudeAccounts::load(&data_dir, &claude_dir);
         let codex_accounts = CodexAccounts::load(&data_dir);
@@ -142,6 +145,7 @@ impl AppState {
             tasks,
             steer_queue,
             push: Mutex::new(push),
+            tunnel,
             rewriter,
             claude_accounts: Mutex::new(claude_accounts),
             codex_accounts: Mutex::new(codex_accounts),
@@ -161,6 +165,9 @@ impl AppState {
     }
 
     pub fn allowed_tunnel_host(&self) -> Option<String> {
+        if let Some(active) = self.tunnel.active_host() {
+            return Some(active);
+        }
         self.prefs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -274,6 +281,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/image", get(api::get_image))
         .route("/api/macapprove", get(api::get_macapprove).post(api::post_macapprove))
         .route("/api/tunnel", get(api::get_tunnel_status).post(api::post_tunnel_toggle))
+        .route("/api/tunnel/start", post(api::post_tunnel_start))
+        .route("/api/tunnel/stop", post(api::post_tunnel_stop))
         .route("/api/tunnel/domain", post(api::post_tunnel_domain))
         .route("/api/presence", post(api::post_presence))
         .route("/api/perm", post(api::post_perm))
@@ -382,6 +391,7 @@ pub async fn start_http_server(
                 let _ = rx.changed().await;
             })
             .await;
+        state.tunnel.stop();
         let _ = state.flush_all();
     });
 

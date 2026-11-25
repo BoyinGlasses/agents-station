@@ -2644,22 +2644,29 @@ fn is_valid_tunnel_hostname(host: &str) -> bool {
 }
 
 fn tunnel_status_json(state: &AppState) -> Value {
-    let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
-    let on = prefs
-        .get("tunnel")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let domain = prefs
-        .get("tunnelDomain")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
+    let (on, domain) = {
+        let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let on = prefs
+            .get("tunnel")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let domain = prefs
+            .get("tunnelDomain")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        (on, domain)
+    };
+    let snap = state.tunnel.snapshot();
     json!({
         "ok": true,
         "on": on,
-        "state": if on { "configured" } else { "off" },
+        "state": snap.state,
         "domain": domain,
-        "url": Value::Null,
+        "url": snap.url,
+        "host": snap.host,
+        "port": snap.port,
+        "error": snap.error,
     })
 }
 
@@ -2690,6 +2697,41 @@ pub async fn post_tunnel_toggle(
         let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
         let _ = prefs.set("tunnel", if on { Some(Value::Bool(true)) } else { None });
     }
+    if on {
+        let _ = state.tunnel.start(Arc::clone(&state)).await;
+    } else {
+        let _ = state.tunnel.stop();
+    }
+    Ok(Json(tunnel_status_json(&state)))
+}
+
+pub async fn post_tunnel_start(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set("tunnel", Some(Value::Bool(true)));
+    }
+    let _ = state.tunnel.start(Arc::clone(&state)).await;
+    Ok(Json(tunnel_status_json(&state)))
+}
+
+pub async fn post_tunnel_stop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set("tunnel", None);
+    }
+    let _ = state.tunnel.stop();
     Ok(Json(tunnel_status_json(&state)))
 }
 
@@ -4851,10 +4893,31 @@ mod tests {
         assert_eq!(tun_body["on"], true);
         assert_eq!(tun_body["domain"], "office.example.com");
 
-        // 3. Remote ViaTunnel rejected on GET /api/accounts & GET /api/tunnel
+        // 2b. /api/tunnel/stop disables tunnel cleanly
+        let stop_tun = Request::builder()
+            .method("POST")
+            .uri("/api/tunnel/stop")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let stop_resp = app.clone().oneshot(stop_tun).await.unwrap();
+        assert_eq!(stop_resp.status(), StatusCode::OK);
+        let stop_body: Value =
+            serde_json::from_slice(&to_bytes(stop_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(stop_body["on"], false);
+        assert_eq!(stop_body["state"], "off");
+
+        // 3. Remote ViaTunnel rejected on GET /api/accounts, GET /api/tunnel, POST /api/tunnel/start, POST /api/tunnel/stop
         let loopback_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52280);
-        for uri in ["/api/accounts", "/api/tunnel"] {
+        for (method, uri) in [
+            ("GET", "/api/accounts"),
+            ("GET", "/api/tunnel"),
+            ("POST", "/api/tunnel/start"),
+            ("POST", "/api/tunnel/stop"),
+        ] {
             let mut tun_req = Request::builder()
+                .method(method)
                 .uri(uri)
                 .header("host", "127.0.0.1:4310")
                 .header("cookie", &cookie)
@@ -4865,7 +4928,7 @@ mod tests {
             assert_eq!(
                 app.clone().oneshot(tun_req).await.unwrap().status(),
                 StatusCode::FORBIDDEN,
-                "ViaTunnel must be 403 on {uri}"
+                "ViaTunnel must be 403 on {method} {uri}"
             );
         }
     }
