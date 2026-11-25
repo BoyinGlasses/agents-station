@@ -5,12 +5,16 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const MAX_IN: usize = 2000;
 const MAX_OUT: usize = 4000;
+const REWRITE_TIMEOUT: Duration = Duration::from_secs(45);
+const MAX_CLI_STDOUT_BYTES: u64 = 1024 * 1024;
 
 pub type RewriteTransport =
     Arc<dyn Fn(&str, &str, usize) -> anyhow::Result<String> + Send + Sync>;
@@ -79,6 +83,9 @@ pub fn run_claude_cli_transport(
         "--system-prompt",
         sys_prompt,
     ])
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
     .env("CLAUDE_CODE_SAFE_MODE", "1")
     .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1")
     .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1");
@@ -90,12 +97,37 @@ pub fn run_claude_cli_transport(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut child = cmd.spawn()?;
+    let stdout_handle = child.stdout.take().map(|out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.take(MAX_CLI_STDOUT_BYTES).read_to_end(&mut buf);
+            buf
+        })
+    });
+    let deadline = Instant::now() + REWRITE_TIMEOUT;
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => break st,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(h) = stdout_handle {
+                    let _ = h.join();
+                }
+                anyhow::bail!("timeout");
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    };
+    let out_bytes = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&out_bytes);
     if let Some(cleaned) = parse_claude_json_output(&stdout) {
         Ok(cleaned)
     } else {
-        anyhow::bail!("claude rewrite failed (exit {:?})", out.status.code())
+        anyhow::bail!("claude rewrite failed (exit {:?})", status.code())
     }
 }
 
@@ -221,7 +253,8 @@ impl Rewriter {
     }
 
     /// Runs the configured transport (or real `claude -p --model haiku` CLI) without
-    /// holding the `Mutex` while the subprocess runs.
+    /// holding the `Mutex` while the subprocess runs. Uses an RAII `Drop` guard so a
+    /// panic inside a transport can never wedge `busy = true`.
     pub fn execute_blocking(
         rewriter: Arc<Mutex<Self>>,
         work_dir: PathBuf,
@@ -230,12 +263,33 @@ impl Rewriter {
         photos: usize,
         now_ms: u64,
     ) -> RewriteResult {
-        let (redacted, sys_prompt, clamped_photos, custom_transport) = {
-            let mut g = rewriter.lock().unwrap_or_else(|e| e.into_inner());
-            let trimmed: String = text.trim().chars().take(MAX_IN).collect();
-            if trimmed.is_empty() {
-                return RewriteResult { ok: false, text: None, code: Some("empty") };
+        struct BusyResetGuard(Arc<Mutex<Rewriter>>);
+        impl Drop for BusyResetGuard {
+            fn drop(&mut self) {
+                let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                g.busy = false;
             }
+        }
+
+        let trimmed: String = text.trim().chars().take(MAX_IN).collect();
+        if trimmed.is_empty() {
+            return RewriteResult { ok: false, text: None, code: Some("empty") };
+        }
+        let custom_transport = {
+            let g = rewriter.lock().unwrap_or_else(|e| e.into_inner());
+            g.transport.clone()
+        };
+        let resolved_bin = if custom_transport.is_none() {
+            match resolve_agent_cli("claude") {
+                Some(cli) => Some(cli.file),
+                None => return RewriteResult { ok: false, text: None, code: Some("noClaude") },
+            }
+        } else {
+            None
+        };
+
+        let (redacted, sys_prompt, clamped_photos) = {
+            let mut g = rewriter.lock().unwrap_or_else(|e| e.into_inner());
             if g.busy {
                 return RewriteResult { ok: false, text: None, code: Some("busy") };
             }
@@ -251,27 +305,19 @@ impl Rewriter {
             }
             let redacted = redact(&trimmed);
             let sys_prompt = rewrite_system(&lang);
-            let custom = g.transport.clone();
-            if custom.is_none() && resolve_agent_cli("claude").is_none() {
-                return RewriteResult { ok: false, text: None, code: Some("noClaude") };
-            }
             g.busy = true;
             g.recent.push_back(now_ms);
-            (redacted, sys_prompt, photos.min(4), custom)
+            (redacted, sys_prompt, photos.min(4))
         };
+        let _busy_guard = BusyResetGuard(Arc::clone(&rewriter));
 
         let result = if let Some(t) = custom_transport {
             t(&redacted, &sys_prompt, clamped_photos)
-        } else if let Some(cli) = resolve_agent_cli("claude") {
-            run_claude_cli_transport(&cli.file, &work_dir, &redacted, &sys_prompt, clamped_photos)
+        } else if let Some(bin) = resolved_bin {
+            run_claude_cli_transport(&bin, &work_dir, &redacted, &sys_prompt, clamped_photos)
         } else {
             Err(anyhow::anyhow!("noClaude"))
         };
-
-        {
-            let mut g = rewriter.lock().unwrap_or_else(|e| e.into_inner());
-            g.busy = false;
-        }
 
         match result {
             Ok(out) => {
@@ -281,6 +327,9 @@ impl Rewriter {
                 } else {
                     RewriteResult { ok: true, text: Some(cleaned), code: None }
                 }
+            }
+            Err(e) if e.to_string() == "timeout" => {
+                RewriteResult { ok: false, text: None, code: Some("timeout") }
             }
             Err(_) => RewriteResult { ok: false, text: None, code: Some("failed") },
         }
@@ -309,5 +358,36 @@ mod tests {
         assert_eq!(seen_by_transport, "fix key •••");
         assert!(!seen_by_transport.contains("sk-secret123456"));
         assert_eq!(res.text.as_deref(), Some("Goal: fix key •••"));
+    }
+
+    #[test]
+    fn rewriter_resets_busy_flag_even_when_transport_panics() {
+        let dir = tempfile::tempdir().unwrap();
+        let rw = Arc::new(Mutex::new(Rewriter::default()));
+        rw.lock().unwrap().set_transport(Arc::new(|_r, _s, _p| {
+            panic!("simulated transport panic");
+        }));
+
+        let rw_clone = Arc::clone(&rw);
+        let wd = dir.path().to_path_buf();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            Rewriter::execute_blocking(rw_clone, wd, "hello".into(), "en".into(), 0, 1000)
+        }));
+        assert!(panicked.is_err(), "transport should have panicked");
+
+        // Replace transport with healthy one; busy flag MUST have been cleared by RAII Drop guard!
+        rw.lock()
+            .unwrap()
+            .set_transport(Arc::new(|r, _s, _p| Ok(format!("Goal: {r}"))));
+        let res = Rewriter::execute_blocking(
+            Arc::clone(&rw),
+            dir.path().to_path_buf(),
+            "hello again".into(),
+            "en".into(),
+            0,
+            2000,
+        );
+        assert!(res.ok, "busy flag must not stay wedged after panic: {res:?}");
+        assert_eq!(res.text.as_deref(), Some("Goal: hello again"));
     }
 }
