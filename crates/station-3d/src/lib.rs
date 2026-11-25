@@ -6,6 +6,7 @@ pub mod entrance;
 pub mod furniture;
 pub mod interact;
 pub mod layout;
+pub mod life;
 pub mod lights;
 pub mod palette;
 pub mod people;
