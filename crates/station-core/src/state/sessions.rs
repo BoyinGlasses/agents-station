@@ -162,6 +162,8 @@ pub struct FeedItem {
     pub label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,6 +613,7 @@ impl OfficeState {
             kind: feed_kind,
             label: feed_label,
             desc: None,
+            image: None,
         };
         if self.feed.len() >= FEED_MAX {
             self.feed.pop_front();

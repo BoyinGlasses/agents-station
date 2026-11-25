@@ -16,6 +16,7 @@ use crate::state::tasks::TaskManager;
 use crate::state::tenure::TenureStore;
 use crate::store::antigravity_accounts::AntigravityAccounts;
 use crate::store::codex_accounts::CodexAccounts;
+use crate::store::images::ImageStore;
 use crate::store::otel::OtelStore;
 use crate::store::push::PushStore;
 use crate::store::rewrite::Rewriter;
@@ -62,6 +63,7 @@ pub struct AppState {
     pub codex_accounts: Mutex<CodexAccounts>,
     pub ag_accounts: Mutex<AntigravityAccounts>,
     pub claude_version: Mutex<ClaudeVersionWatcher>,
+    pub images: Mutex<ImageStore>,
     pub lift: LiftService,
     pub harnesses: Option<Arc<dyn HarnessApi>>,
 }
@@ -84,6 +86,7 @@ impl AppState {
         let codex_accounts = CodexAccounts::load(&data_dir);
         let ag_accounts = AntigravityAccounts::load(&data_dir);
         let claude_version = ClaudeVersionWatcher::load(&data_dir, home_dir());
+        let images = ImageStore::load(&data_dir);
         let lift = LiftService::init(&data_dir, env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_VERSION"), now);
 
         Ok(Self {
@@ -103,6 +106,7 @@ impl AppState {
             codex_accounts: Mutex::new(codex_accounts),
             ag_accounts: Mutex::new(ag_accounts),
             claude_version: Mutex::new(claude_version),
+            images: Mutex::new(images),
             lift,
             harnesses,
         })

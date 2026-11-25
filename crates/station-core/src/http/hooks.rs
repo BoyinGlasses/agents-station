@@ -61,6 +61,30 @@ pub async fn post_event(
             let _ = trophies.flush();
         }
         match ev.hook_event_name.as_str() {
+            "PreToolUse" | "PostToolUse" => {
+                let tn = ev.tool_name.as_deref().unwrap_or("");
+                if matches!(tn, "Read" | "Write" | "Edit" | "MultiEdit") {
+                    let cwd = ev.cwd.as_deref().unwrap_or("");
+                    let fp = file_of(&ev.tool_input, cwd);
+                    if !fp.is_empty() {
+                        let img_id = state
+                            .images
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .register(Path::new(&fp));
+                        if let Some(id) = img_id {
+                            let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(last) = office
+                                .feed
+                                .back_mut()
+                                .filter(|f| f.sess == ev.session_id)
+                            {
+                                last.image = Some(id);
+                            }
+                        }
+                    }
+                }
+            }
             "UserPromptSubmit" => {
                 if let Some(prompt) = &ev.prompt {
                     let mut vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());

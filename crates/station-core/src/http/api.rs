@@ -1042,15 +1042,43 @@ pub async fn get_image(
     if require_auth(&state, peer, via_tunnel, &headers, &q).is_err() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    (
-        StatusCode::NOT_FOUND,
-        [
-            (header::CONTENT_SECURITY_POLICY, "sandbox"),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-        ],
-        "not found",
-    )
-        .into_response()
+    let sec_headers = [
+        (header::CONTENT_SECURITY_POLICY, "sandbox"),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+    ];
+    if q.contains_key("file") || q.contains_key("path") {
+        return (StatusCode::BAD_REQUEST, sec_headers, "bad request").into_response();
+    }
+    let Some(id) = q.get("id").map(String::as_str) else {
+        return (StatusCode::NOT_FOUND, sec_headers, "not found").into_response();
+    };
+    if id.is_empty() {
+        return (StatusCode::BAD_REQUEST, sec_headers, "bad request").into_response();
+    }
+    let resolved = {
+        let store = state.images.lock().unwrap_or_else(|e| e.into_inner());
+        store.resolve(id)
+    };
+    match resolved {
+        Err(crate::store::images::ImageResolveError::InvalidId) => {
+            (StatusCode::BAD_REQUEST, sec_headers, "invalid id").into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, sec_headers, "not found").into_response(),
+        Ok((path, mime)) => match tokio::fs::read(&path).await {
+            Ok(bytes) => (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CONTENT_SECURITY_POLICY, "sandbox"),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                    (header::CACHE_CONTROL, "private, max-age=30"),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, sec_headers, "not found").into_response(),
+        },
+    }
 }
 
 pub async fn get_claude_version(
@@ -1583,5 +1611,96 @@ mod tests {
             assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
         }
         assert!(state.office.lock().unwrap().pending_perms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_image_serves_registered_image_with_sandbox_headers_and_rejects_traversal() {
+        use axum::body::to_bytes;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let work_dir = dir.path().join("work");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let png_path = work_dir.join("shot.png");
+        let png_bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        std::fs::write(&png_path, png_bytes).unwrap();
+        let secret_path = dir.path().join("secret.txt");
+        std::fs::write(&secret_path, "top-secret").unwrap();
+
+        let state = Arc::new(AppState::new(data_dir, None).unwrap());
+        let app = build_router(state.clone());
+
+        // Trigger Read event on an image file so ImageStore registers it and FeedItem exposes its id.
+        let ev = json!({
+            "session_id": "s-img",
+            "hook_event_name": "PreToolUse",
+            "cwd": work_dir.to_string_lossy(),
+            "tool_name": "Read",
+            "tool_input": { "file_path": png_path.to_string_lossy() }
+        });
+        let ev_req = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(ev.to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(ev_req).await.unwrap().status(), StatusCode::OK);
+
+        // Fetch /api/log to obtain the registered image id from the feed item.
+        let log_req = Request::builder()
+            .uri("/api/log")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let log_resp = app.clone().oneshot(log_req).await.unwrap();
+        let log_json: serde_json::Value =
+            serde_json::from_slice(&to_bytes(log_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        let img_id = log_json["feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|f| f.get("image").and_then(serde_json::Value::as_str))
+            .expect("feed item for Read on .png must include registered image id")
+            .to_owned();
+
+        // Valid registered id -> 200 + sandbox CSP + nosniff + image/png + exact bytes
+        let ok_req = Request::builder()
+            .uri(format!("/api/image?id={img_id}"))
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let ok_resp = app.clone().oneshot(ok_req).await.unwrap();
+        assert_eq!(ok_resp.status(), StatusCode::OK);
+        assert_eq!(ok_resp.headers().get("content-security-policy").unwrap(), "sandbox");
+        assert_eq!(ok_resp.headers().get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(ok_resp.headers().get("content-type").unwrap(), "image/png");
+        let got_bytes = to_bytes(ok_resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(got_bytes.as_ref(), png_bytes);
+
+        // Path traversal / invalid ids -> 400 or 403 with sandbox + nosniff headers
+        for bad_uri in [
+            "/api/image?id=../../secret.txt",
+            "/api/image?id=../shot.png",
+            "/api/image?id=sub/shot.png",
+            "/api/image?id=sub\\shot.png",
+            "/api/image?id=..%2fsecret.txt",
+        ] {
+            let req = Request::builder()
+                .uri(bad_uri)
+                .header("host", "127.0.0.1:4310")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert!(
+                matches!(resp.status(), StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN),
+                "expected 400/403 for {bad_uri}, got {}",
+                resp.status()
+            );
+            assert_eq!(resp.headers().get("content-security-policy").unwrap(), "sandbox");
+            assert_eq!(resp.headers().get("x-content-type-options").unwrap(), "nosniff");
+        }
     }
 }
