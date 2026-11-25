@@ -7,24 +7,28 @@ pub mod gpu;
 pub mod instance;
 pub mod tray;
 
+use bevy::app::AppExit;
 use bevy::pbr::{DirectionalLightShadowMap, PointLightShadowMap};
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::{Backends, InstanceFlags, MemoryHints, RenderCreation, WgpuSettings};
+use bevy::window::WindowCloseRequested;
 use bevy_egui::EguiPlugin;
 use clap::Parser;
 use std::path::PathBuf;
-
-const GUI_MUTEX_NAME: &str = "Local\\agents-station-gui";
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 fn resolve_assets_dir() -> PathBuf {
     let candidates = [
-        PathBuf::from("assets"),
+        commands::resolve_install_root().join("assets"),
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("assets")))
             .unwrap_or_default(),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets"),
+        PathBuf::from("assets"),
     ];
     for c in candidates {
         if c.join("fonts").exists() {
@@ -44,6 +48,29 @@ fn spawn_lite_2d_camera(mut commands: Commands) {
     ));
 }
 
+fn handle_window_close_requests(
+    mut close_events: EventReader<WindowCloseRequested>,
+    worker_mode: Res<bridge::GuiWorkerMode>,
+    ui: Option<Res<station_ui::UiState>>,
+    mut app_exit: EventWriter<AppExit>,
+) {
+    if close_events.read().next().is_none() {
+        return;
+    }
+    let close_to_tray = ui.as_ref().map(|u| u.auto_close_tray).unwrap_or(true);
+    if worker_mode.0 {
+        if close_to_tray {
+            let _ = tray::show_native_tray_toast(
+                "Agents Station running in Tray",
+                "GUI closed · HTTP daemon active on 127.0.0.1:4310",
+            );
+        } else {
+            let _ = tray::request_parent_quit();
+        }
+    }
+    app_exit.write(AppExit::Success);
+}
+
 fn build_gui_app(cli: &cli::Cli) -> App {
     let mut app = App::new();
     let capture_mode = cli.capture_scene.is_some();
@@ -60,6 +87,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 resolution: (1280.0_f32, 720.0_f32).into(),
                 ..default()
             }),
+            close_when_requested: false,
             ..default()
         })
         .set(RenderPlugin {
@@ -83,7 +111,9 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         enable_multipass_for_primary_context: true,
     })
     .add_plugins(fps::AdaptiveFpsPlugin { capture_mode })
-    .add_plugins(tray::TrayPlugin);
+    .add_plugins(tray::TrayPlugin)
+    .insert_resource(bridge::GuiWorkerMode(cli.gui_worker))
+    .add_systems(Update, handle_window_close_requests);
 
     let assets_dir = resolve_assets_dir();
     let scene = cli.capture_scene.as_deref();
@@ -187,6 +217,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 station_3d::BackdropKind::City,
                 false,
             );
+            ui_state.server_port = cli.port;
             let data_dir = commands::resolve_runtime_data_dir();
             if is_lite_2d {
                 ui_state.view_mode = station_ui::ViewMode::Lite2D;
@@ -230,21 +261,149 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     app
 }
 
+struct ParentHttpGuard {
+    shutdown: tokio::sync::watch::Sender<bool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ParentHttpGuard {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+        if let Some(handle) = self.thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn start_parent_http_if_needed(cli: &cli::Cli) -> Option<ParentHttpGuard> {
+    if bridge::probe_local_health(cli.port) {
+        return None;
+    }
+
+    let data_dir = commands::resolve_runtime_data_dir();
+    let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agents-station.exe"));
+    let harnesses: Arc<dyn station_core::http::HarnessApi> =
+        Arc::new(station_launcher::HarnessService::new_win32(
+            data_dir.clone(),
+            bin_path,
+            cli.port,
+        ));
+    let Ok(state) = station_core::http::AppState::new(data_dir, Some(harnesses)) else {
+        return None;
+    };
+    let state = Arc::new(state);
+    let host = cli.host.clone();
+    let port = cli.port;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<bool>(1);
+
+    let thread = std::thread::Builder::new()
+        .name("station-parent-http".to_owned())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            else {
+                let _ = ready_tx.send(false);
+                return;
+            };
+            rt.block_on(async move {
+                match station_core::http::start_http_server(state.clone(), &host, port).await {
+                    Ok(handle) => {
+                        let _ = ready_tx.send(true);
+                        while !*shutdown_rx.borrow() {
+                            if shutdown_rx.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                        let _ = handle.shutdown.send(true);
+                        let _ = state.flush_all();
+                    }
+                    Err(_) => {
+                        let _ = ready_tx.send(false);
+                    }
+                }
+            });
+        })
+        .ok()?;
+
+    let bound = ready_rx
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap_or(false);
+    if bound {
+        Some(ParentHttpGuard {
+            shutdown: shutdown_tx,
+            thread: Some(thread),
+        })
+    } else {
+        let _ = shutdown_tx.send(true);
+        let _ = thread.join();
+        None
+    }
+}
+
+/// Runs the lightweight parent process hosting `:4310` HTTP daemon (or attaching to an
+/// existing external service) + persistent Win32 `TrayDaemon` (<= 45 MB Private WS),
+/// spawning `--gui-worker` on demand for the Bevy window.
+fn run_tray_parent(cli: &cli::Cli) -> anyhow::Result<()> {
+    let Some(_lock) = instance::InstanceLock::try_acquire(instance::GUI_MUTEX_NAME)? else {
+        let _ = instance::signal_show_event(instance::SHOW_EVENT_NAME);
+        return Ok(());
+    };
+
+    let _http_guard = start_parent_http_if_needed(cli);
+
+    let worker_cfg = tray::TrayWorkerConfig {
+        host: cli.host.clone(),
+        port: cli.port,
+        gpu: cli.gpu,
+        default_lite: cli.lite,
+    };
+    let mut daemon = tray::TrayDaemon::new(cli.port, worker_cfg)?;
+    let hwnd_raw = daemon.hwnd_raw();
+
+    let stop_listener = Arc::new(AtomicBool::new(false));
+    let show_thread = match instance::ShowEventListener::create(instance::SHOW_EVENT_NAME) {
+        Ok(listener) => {
+            let stop_bg = stop_listener.clone();
+            std::thread::Builder::new()
+                .name("station-show-event".to_owned())
+                .spawn(move || {
+                    while !stop_bg.load(Ordering::Relaxed) {
+                        if listener.wait_timeout(200) && !stop_bg.load(Ordering::Relaxed) {
+                            let _ = tray::post_show_gui(hwnd_raw);
+                        }
+                    }
+                })
+                .ok()
+        }
+        Err(_) => None,
+    };
+
+    daemon.spawn_initial_worker();
+    daemon.run_message_loop();
+
+    stop_listener.store(true, Ordering::Relaxed);
+    let _ = instance::signal_show_event(instance::SHOW_EVENT_NAME);
+    if let Some(handle) = show_thread {
+        let _ = handle.join();
+    }
+    daemon.cleanup();
+    // `_http_guard` drops here: shuts down HTTP listener and runs `state.flush_all()`.
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     let is_gui = matches!(cli.command, None | Some(cli::Command::Gui))
         && cli.capture_scene.is_none();
 
-    let _lock = if is_gui {
-        match instance::InstanceLock::try_acquire(GUI_MUTEX_NAME)? {
-            Some(lock) => Some(lock),
-            None => return Ok(()),
-        }
-    } else {
-        None
-    };
+    if is_gui && !cli.gui_worker {
+        return run_tray_parent(&cli);
+    }
 
-    if cli.capture_scene.is_some() || matches!(cli.command, None | Some(cli::Command::Gui)) {
+    if cli.capture_scene.is_some() || is_gui {
         let mut app = build_gui_app(&cli);
         app.run();
         return Ok(());
@@ -252,11 +411,42 @@ fn main() -> anyhow::Result<()> {
 
     let data_dir = commands::resolve_runtime_data_dir();
     let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agents-station.exe"));
-    let harnesses: std::sync::Arc<dyn station_core::http::HarnessApi> =
-        std::sync::Arc::new(station_launcher::HarnessService::new_win32(
+    let harnesses: Arc<dyn station_core::http::HarnessApi> =
+        Arc::new(station_launcher::HarnessService::new_win32(
             data_dir,
             bin_path,
             cli.port,
         ));
     commands::run_cli_command(&cli, Some(harnesses))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::app::AppExit;
+    use bevy::window::WindowCloseRequested;
+
+    #[test]
+    fn worker_window_close_with_close_to_tray_exits_only_worker_cleanly() {
+        let mut app = App::new();
+        let mut ui = station_ui::UiState::default();
+        ui.auto_close_tray = true;
+        app.add_event::<WindowCloseRequested>()
+            .add_event::<AppExit>()
+            .insert_resource(bridge::GuiWorkerMode(true))
+            .insert_resource(ui)
+            .add_systems(Update, handle_window_close_requests);
+
+        app.world_mut()
+            .send_event(WindowCloseRequested {
+                window: Entity::PLACEHOLDER,
+            });
+        app.update();
+
+        let exits = app.world().resource::<Events<AppExit>>();
+        let mut reader = exits.get_cursor();
+        let emitted: Vec<&AppExit> = reader.read(exits).collect();
+        assert_eq!(emitted.len(), 1);
+        assert!(matches!(emitted[0], AppExit::Success));
+    }
 }
