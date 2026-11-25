@@ -2,14 +2,108 @@ pub mod camera;
 pub mod desks;
 pub mod entrance;
 pub mod furniture;
+pub mod interact;
 pub mod layout;
 pub mod lights;
 pub mod palette;
+pub mod props;
 pub mod rooms;
 
 use bevy::prelude::*;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
+use station_canvas2d::FontEngine;
+use std::path::PathBuf;
+
+pub struct OfficeWorldPlugin {
+    pub layout: OfficeLayout,
+    pub assets_dir: PathBuf,
+    pub night: bool,
+}
+
+impl Plugin for OfficeWorldPlugin {
+    fn build(&self, app: &mut App) {
+        let layout = self.layout;
+        let assets_dir = self.assets_dir.clone();
+        let night = self.night;
+
+        app.insert_resource(layout)
+            .insert_resource(lights::LightingState { night })
+            .insert_resource(interact::PlaceCardState::default())
+            .add_event::<interact::PropActivated>()
+            .add_systems(
+                Startup,
+                move |mut commands: Commands,
+                      mut meshes: ResMut<Assets<Mesh>>,
+                      mut materials: ResMut<Assets<StandardMaterial>>,
+                      mut images: ResMut<Assets<Image>>| {
+                    let spec = LayoutSpec::for_layout(layout);
+                    let mut pal = WorldPalette::new(&mut meshes);
+                    let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+
+                    lights::spawn_office_lights(&mut commands, &spec, night);
+                    camera::spawn_office_camera(&mut commands, &spec);
+                    rooms::spawn_office_shell(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &mut images,
+                        &mut fonts,
+                        &spec,
+                    );
+                    entrance::spawn_entrance(&mut commands, &mut pal, &mut materials, &spec);
+                    let scr_mats = desks::spawn_desks(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &mut images,
+                        &mut fonts,
+                        &spec,
+                    );
+                    furniture::spawn_furniture(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &mut images,
+                        &mut fonts,
+                        &spec,
+                    );
+                    props::spawn_all_props(
+                        &mut commands,
+                        &mut pal,
+                        &mut materials,
+                        &mut images,
+                        &mut fonts,
+                        &spec,
+                    );
+                    interact::spawn_hover_ring(&mut commands, &mut pal, &mut materials);
+
+                    commands.insert_resource(scr_mats);
+                    commands.insert_resource(pal);
+                },
+            )
+            .add_systems(
+                Update,
+                (camera::camera_control_system, props::animate_props_system),
+            );
+    }
+}
+
+/// True Unload helper: despawns every `WorldEntity` and purges transient GPU images.
+/// Used when minimizing to System Tray, switching 3D -> 2D Lite, or rebuilding layouts.
+pub fn unload_office_world(
+    mut commands: Commands,
+    q: Query<Entity, With<WorldEntity>>,
+    mut pal: Option<ResMut<WorldPalette>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    for ent in &q {
+        commands.entity(ent).despawn();
+    }
+    if let Some(p) = pal.as_mut() {
+        p.purge_transient_images(&mut images);
+    }
+}
 
 pub struct SmokeScenePlugin;
 
