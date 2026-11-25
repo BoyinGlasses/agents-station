@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RepoInfo {
     pub root: String,
@@ -21,13 +23,17 @@ pub struct RepoInfo {
 }
 
 fn run_git(args: &[&str], cwd: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(cwd)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .output()
-        .ok()?;
+        .env("LC_ALL", "C");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -126,6 +132,10 @@ impl GitTracker {
     pub fn repo_of(&self, cwd: &str) -> Option<&RepoInfo> {
         let root = self.roots.get(cwd)?;
         self.repos.get(root)
+    }
+
+    pub fn all_repos(&self) -> Vec<RepoInfo> {
+        self.repos.values().cloned().collect()
     }
 }
 
