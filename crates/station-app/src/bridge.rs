@@ -1715,6 +1715,7 @@ mod tests {
             kind: "error".to_owned(),
             label: "command failed".to_owned(),
             desc: None,
+            image: None,
         });
 
         let snap = office.snapshot_json(true, "en");
