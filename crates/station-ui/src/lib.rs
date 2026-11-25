@@ -58,6 +58,7 @@ impl Plugin for StationUiPlugin {
             .insert_resource(CachedFontBundle(bundle))
             .insert_resource(i18n)
             .insert_resource(self.initial_state.clone())
+            .init_resource::<station_3d::UiInputCapture>()
             .add_systems(Update, tick_ui_timers)
             .add_systems(EguiContextPass, render_primary_station_ui)
             .add_systems(CaptureUiPass, render_capture_station_ui);
@@ -110,6 +111,7 @@ fn draw_full_station_ui(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSto
     drawers::draw_active_drawer(ctx, state, i18n);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_primary_station_ui(
     mut contexts: EguiContexts,
     mut initialized: Local<bool>,
@@ -117,6 +119,7 @@ fn render_primary_station_ui(
     assets_dir: Res<HudAssetsDir>,
     mut state: ResMut<UiState>,
     i18n: Res<I18nStore>,
+    mut ui_capture: ResMut<station_3d::UiInputCapture>,
     capture_q: Query<(), With<EguiRenderToImage>>,
 ) {
     let Some(ctx) = contexts.try_ctx_mut() else {
@@ -135,6 +138,8 @@ fn render_primary_station_ui(
         *initialized = true;
     }
     draw_full_station_ui(ctx, &mut state, &i18n);
+    ui_capture.wants_keyboard = ctx.wants_keyboard_input();
+    ui_capture.wants_pointer = ctx.wants_pointer_input();
 }
 
 fn render_capture_station_ui(
