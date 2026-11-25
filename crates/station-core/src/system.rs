@@ -77,8 +77,13 @@ fn dev_label(p: &ProcRow) -> String {
 
 fn descendants(kids: &HashMap<u32, Vec<u32>>, root: u32) -> Vec<u32> {
     let mut out = Vec::new();
+    let mut visited = HashSet::new();
+    visited.insert(root);
     let mut stack = kids.get(&root).cloned().unwrap_or_default();
     while let Some(c) = stack.pop() {
+        if !visited.insert(c) {
+            continue;
+        }
         out.push(c);
         if let Some(ch) = kids.get(&c) {
             stack.extend_from_slice(ch);
@@ -524,5 +529,29 @@ mod tests {
         };
         let label = redact(&dev_label(&fake_proc));
         assert!(!label.contains("sk-1234567890abcdef"), "label leaked secret: {label}");
+    }
+
+    #[test]
+    fn descendants_terminates_cleanly_on_cyclic_pid_map() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
+        kids.insert(10, vec![20]);
+        kids.insert(20, vec![30, 10]);
+        kids.insert(30, vec![20, 30]);
+
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let out = descendants(&kids, 10);
+            let _ = tx.send(out);
+        });
+
+        let mut found = rx
+            .recv_timeout(Duration::from_millis(250))
+            .expect("descendants did not terminate on cyclic PID map");
+        handle.join().unwrap();
+        found.sort_unstable();
+        assert_eq!(found, vec![20, 30]);
     }
 }
