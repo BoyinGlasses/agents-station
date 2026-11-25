@@ -264,23 +264,26 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus>
     }
 }
 
+fn sqlite_read_args() -> [&'static str; 4] {
+    ["-readonly", "-json", "-cmd", ".timeout 2000"]
+}
+
+fn sqlite_write_args() -> [&'static str; 2] {
+    ["-cmd", ".timeout 2000"]
+}
+
 fn sqlite_read_keys(vscdb: &Path, keys: &[&str]) -> Option<HashMap<String, String>> {
     let key_list = keys.iter().map(|k| sql_quote(k)).collect::<Vec<_>>().join(", ");
     let query = format!(
         "SELECT key, CAST(value AS TEXT) AS value FROM ItemTable WHERE key IN ({key_list})"
     );
     let mut cmd = Command::new("sqlite3");
-    cmd.args([
-        "-readonly",
-        "-json",
-        "-cmd",
-        "PRAGMA busy_timeout=2000;",
-    ])
-    .arg(vscdb)
-    .arg(&query)
-    .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    cmd.args(sqlite_read_args())
+        .arg(vscdb)
+        .arg(&query)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
 
@@ -317,7 +320,7 @@ fn sqlite_read_keys(vscdb: &Path, keys: &[&str]) -> Option<HashMap<String, Strin
 
 fn sqlite_write_keys(vscdb: &Path, set: &[(&str, &str)]) -> bool {
     use std::io::Write;
-    let mut sql = String::from("PRAGMA busy_timeout=2000;\nBEGIN;\n");
+    let mut sql = String::from("BEGIN;\n");
     for (k, v) in set {
         sql.push_str(&format!(
             "INSERT OR REPLACE INTO ItemTable (key, value) VALUES ({}, {});\n",
@@ -328,7 +331,8 @@ fn sqlite_write_keys(vscdb: &Path, set: &[(&str, &str)]) -> bool {
     sql.push_str("COMMIT;\n");
 
     let mut cmd = Command::new("sqlite3");
-    cmd.arg(vscdb)
+    cmd.args(sqlite_write_args())
+        .arg(vscdb)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -896,5 +900,23 @@ mod tests {
         let fake_sq = dir.path().join("fake.vscdb");
         std::fs::write(&fake_sq, b"SQLite format 3\0extra-bytes").unwrap();
         assert!(has_sqlite_magic(&fake_sq));
+    }
+
+    #[test]
+    fn sqlite_cli_uses_silent_dot_timeout_without_pragma_json_pollution() {
+        let read_args = sqlite_read_args();
+        assert!(read_args.contains(&"-json"));
+        assert!(read_args.contains(&".timeout 2000"));
+        assert!(
+            !read_args.iter().any(|a| a.to_ascii_uppercase().contains("PRAGMA")),
+            "PRAGMA emits extra row breaking -json output: {read_args:?}"
+        );
+
+        let write_args = sqlite_write_args();
+        assert!(write_args.contains(&".timeout 2000"));
+        assert!(
+            !write_args.iter().any(|a| a.to_ascii_uppercase().contains("PRAGMA")),
+            "write args should use silent .timeout: {write_args:?}"
+        );
     }
 }
