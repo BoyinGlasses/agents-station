@@ -241,7 +241,7 @@ impl SystemMonitor {
     pub fn track_owners(&self) {
         let est = self.platform.established();
         let now = now_ms();
-        let mut inner = self.inner.lock().expect("SystemMonitor lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for &port in est.keys() {
             inner.port_seen.insert(port, now);
         }
@@ -280,7 +280,7 @@ impl SystemMonitor {
             }
         }
         items.sort_by(|a, b| b.size.cmp(&a.size));
-        let mut inner = self.inner.lock().expect("SystemMonitor lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.cleanups = items.clone();
         inner.cleanups_at = now_ms();
         items
@@ -295,7 +295,7 @@ impl SystemMonitor {
         let est = self.platform.established();
         let guard = protected_pids(&snap);
 
-        let mut inner = self.inner.lock().expect("SystemMonitor lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         for &port in est.keys() {
             inner.port_seen.insert(port, now);
         }

@@ -53,7 +53,7 @@ impl Win32Platform {
     }
 
     fn refresh_if_stale(&self) -> (HashMap<u32, ProcRow>, HashMap<u32, HashSet<u16>>, HashMap<u16, u32>) {
-        let mut guard = self.inner.lock().expect("Win32Platform lock poisoned");
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(c) = &guard.cached
             && c.at.elapsed() < CACHE_TTL
         {
