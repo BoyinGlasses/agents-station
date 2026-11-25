@@ -7,6 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+const STATUSLINE_CHAIN_ENV: &str = "AGENTS_STATION_STATUSLINE_CHAIN";
+const MAX_STATUSLINE_STDOUT: u64 = 64 * 1024;
+
 #[derive(Debug, Clone, Default)]
 pub struct HookArgs {
     pub url: String,
@@ -156,11 +159,15 @@ fn format_fallback_status_line(doc: &serde_json::Value) -> String {
     format!("{}\n", parts.join(" · "))
 }
 
+fn is_recursive_status_cmd(cmd: &str) -> bool {
+    cmd.to_ascii_lowercase().contains("status-line")
+}
+
 async fn run_chained_status_cmd(cmd: &str, stdin_bytes: &[u8]) -> String {
     #[cfg(windows)]
     let mut command = {
         let mut c = tokio::process::Command::new("cmd");
-        c.args(["/C", cmd]);
+        c.raw_arg(format!("/D /S /C \"{cmd}\""));
         c.creation_flags(CREATE_NO_WINDOW);
         c
     };
@@ -172,6 +179,7 @@ async fn run_chained_status_cmd(cmd: &str, stdin_bytes: &[u8]) -> String {
     };
 
     command
+        .env(STATUSLINE_CHAIN_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -192,8 +200,8 @@ async fn run_chained_status_cmd(cmd: &str, stdin_bytes: &[u8]) -> String {
         };
         let read_fut = async {
             let mut buf = Vec::new();
-            if let Some(mut o) = stdout.take() {
-                let _ = o.read_to_end(&mut buf).await;
+            if let Some(o) = stdout.take() {
+                let _ = o.take(MAX_STATUSLINE_STDOUT).read_to_end(&mut buf).await;
             }
             buf
         };
@@ -236,11 +244,20 @@ pub async fn run_status_line(port: u16, data_dir: &Path, stdin_bytes: &[u8]) -> 
         }
     };
 
-    let prev_cmd = std::fs::read_to_string(data_dir.join("statusline-prev.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("command").and_then(serde_json::Value::as_str).map(str::to_owned))
-        .filter(|s| !s.trim().is_empty());
+    let already_chained = std::env::var_os(STATUSLINE_CHAIN_ENV).is_some();
+    let prev_cmd = if already_chained {
+        None
+    } else {
+        std::fs::read_to_string(data_dir.join("statusline-prev.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|s| !s.trim().is_empty() && !is_recursive_status_cmd(s))
+    };
 
     let chained = async {
         match prev_cmd.as_deref() {
@@ -473,5 +490,47 @@ mod tests {
         assert!(fallback.contains("7%"), "fallback={fallback:?}");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn run_status_line_blocks_recursive_cmd_and_runs_quoted_windows_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let payload = serde_json::json!({
+            "model": { "display_name": "Claude Sonnet" },
+            "context_window": { "used_percentage": 15.0 }
+        })
+        .to_string();
+
+        // 1. Recursive status-line prev command must be skipped (never fork-bomb), returning fallback.
+        std::fs::write(
+            dir.path().join("statusline-prev.json"),
+            r#"{"type":"command","command":"\"D:/app/agents-station.exe\" status-line --port 4310"}"#,
+        )
+        .unwrap();
+        let out = run_status_line(closed_port, dir.path(), payload.as_bytes()).await;
+        assert!(
+            out.contains("Claude Sonnet") && out.contains("15%"),
+            "recursive prev_cmd should fall back cleanly, got {out:?}"
+        );
+
+        // 2. Quoted command string executes cleanly on Windows (cmd /D /S /C raw_arg) and Unix.
+        #[cfg(windows)]
+        let quoted_cmd = r#""cmd.exe" /C echo "QUOTED_ARG_OK""#;
+        #[cfg(not(windows))]
+        let quoted_cmd = r#"sh -c 'echo "QUOTED_ARG_OK"'"#;
+        std::fs::write(
+            dir.path().join("statusline-prev.json"),
+            serde_json::json!({ "type": "command", "command": quoted_cmd }).to_string(),
+        )
+        .unwrap();
+        let quoted_out = run_status_line(closed_port, dir.path(), payload.as_bytes()).await;
+        assert!(
+            quoted_out.contains("QUOTED_ARG_OK"),
+            "quoted prev_cmd must execute cleanly, got {quoted_out:?}"
+        );
     }
 }
