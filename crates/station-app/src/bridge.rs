@@ -164,6 +164,34 @@ pub fn probe_local_health(port: u16) -> bool {
     status_ok && body.trim() == "ok"
 }
 
+/// Fast synchronous loopback `POST /api/presence { "focused": false }` used before exiting
+/// `--gui-worker` so an attached HTTP daemon immediately releases focus without waiting for async queues.
+pub fn post_presence_unfocused_sync(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let body = r#"{"focused":false}"#;
+    let req = format!(
+        "POST /api/presence HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    let Ok(n) = stream.read(&mut buf) else {
+        return false;
+    };
+    let resp = std::str::from_utf8(&buf[..n]).unwrap_or("");
+    resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200")
+}
+
 fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
     let Some(arr) = val.get("sessions").and_then(Value::as_array) else {
         return Vec::new();
@@ -550,6 +578,7 @@ fn spawn_attached_sse_client(
 pub struct LiveServerBridge {
     backend: BridgeBackend,
     pub assets_dir: PathBuf,
+    port: u16,
     sync_timer: Timer,
     banner_pushed: bool,
     seen_perm_ids: HashSet<String>,
@@ -578,6 +607,7 @@ impl LiveServerBridge {
                     _shutdown: shutdown,
                 },
                 assets_dir,
+                port,
                 sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
@@ -603,6 +633,7 @@ impl LiveServerBridge {
                         harnesses,
                     },
                     assets_dir,
+                    port,
                     sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
@@ -619,6 +650,7 @@ impl LiveServerBridge {
                     _shutdown: None,
                 },
                 assets_dir,
+                port,
                 sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
@@ -680,6 +712,7 @@ impl LiveServerBridge {
                     _shutdown: Some(tx),
                 },
                 assets_dir,
+                port,
                 sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
@@ -700,6 +733,7 @@ impl LiveServerBridge {
                             _shutdown: shutdown,
                         },
                         assets_dir,
+                        port,
                         sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
@@ -714,6 +748,7 @@ impl LiveServerBridge {
                             harnesses,
                         },
                         assets_dir,
+                        port,
                         sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
@@ -736,6 +771,22 @@ impl LiveServerBridge {
         match &self.backend {
             BridgeBackend::BindError { message, .. } => Some(message.as_str()),
             _ => None,
+        }
+    }
+
+    /// Immediately clears `presence_focused = false` on the active daemon (in-process or attached HTTP)
+    /// so closing or minimizing the GUI never leaves hooks holding for 45s.
+    pub fn notify_presence_unfocused(&self) {
+        match &self.backend {
+            BridgeBackend::InProcess { app_state, .. } => {
+                if let Ok(mut office) = app_state.office.lock() {
+                    office.presence_focused = false;
+                }
+            }
+            BridgeBackend::AttachedHttp { .. } => {
+                let _ = post_presence_unfocused_sync(self.port);
+            }
+            BridgeBackend::BindError { .. } => {}
         }
     }
 
@@ -811,14 +862,15 @@ impl Plugin for LiveServerBridgePlugin {
     }
 }
 
-fn parse_ui_perm_decision(decision: &str) -> PermDecision {
+fn parse_ui_perm_decision(decision: &str) -> Option<PermDecision> {
     match decision {
-        "deny" | "revise" => PermDecision::Deny {
+        "allow" | "always" | "approve" => Some(PermDecision::Allow),
+        "deny" | "revise" => Some(PermDecision::Deny {
             reason: String::new(),
-        },
-        "retry" => PermDecision::Retry,
-        "keep" => PermDecision::Keep,
-        _ => PermDecision::Allow,
+        }),
+        "retry" => Some(PermDecision::Retry),
+        "keep" => Some(PermDecision::Keep),
+        _ => None,
     }
 }
 
@@ -842,21 +894,26 @@ fn sync_live_state_to_ui(
     let unfocused_or_tray = in_tray || !window_focused;
 
     if has_window && bridge.last_window_focused != Some(window_focused) {
-        bridge.last_window_focused = Some(window_focused);
-        match &bridge.backend {
+        let sent = match &bridge.backend {
             BridgeBackend::InProcess { app_state, .. } => {
                 if let Ok(mut office) = app_state.office.lock() {
                     office.presence_focused = window_focused;
+                    true
+                } else {
+                    false
                 }
             }
-            BridgeBackend::AttachedHttp { action_tx, .. } => {
-                let _ = action_tx.try_send(RemoteActionCmd {
+            BridgeBackend::AttachedHttp { action_tx, .. } => action_tx
+                .try_send(RemoteActionCmd {
                     path: "/api/presence",
                     body: json!({ "focused": window_focused }),
                     refresh: RefreshKind::None,
-                });
-            }
-            BridgeBackend::BindError { .. } => {}
+                })
+                .is_ok(),
+            BridgeBackend::BindError { .. } => true,
+        };
+        if sent {
+            bridge.last_window_focused = Some(window_focused);
         }
     }
 
@@ -1216,6 +1273,9 @@ fn process_ui_actions(
                 }
             }
             UiAction::DecidePermission { id, decision } => {
+                let Some(parsed) = parse_ui_perm_decision(&decision) else {
+                    continue;
+                };
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { action_tx, .. } => {
                         let _ = action_tx.try_send(RemoteActionCmd {
@@ -1226,7 +1286,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::InProcess { app_state, .. } => {
                         if let Ok(mut office) = app_state.office.lock() {
-                            office.resolve_hold(&id, parse_ui_perm_decision(&decision));
+                            office.resolve_hold(&id, parsed);
                         }
                     }
                     BridgeBackend::BindError { .. } => {}
@@ -1235,6 +1295,7 @@ fn process_ui_actions(
             }
             UiAction::MinimizeToTray => {
                 let is_worker = tray_params.worker_mode.as_ref().is_some_and(|m| m.0);
+                bridge.notify_presence_unfocused();
                 let _ = notify_parent_in_tray(false);
                 if is_worker {
                     // Exit only the heavy Bevy `--gui-worker` so resident RAM drops to the
@@ -2149,5 +2210,171 @@ mod tests {
             .advance_by(Duration::from_secs(2));
         app.update();
         assert_eq!(app.world().resource::<TrayState>().notifications_sent, 1);
+    }
+
+    #[test]
+    fn unknown_ui_perm_decision_fails_closed_without_resolving_hold() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        {
+            let mut office = state.office.lock().unwrap();
+            office.register_hold(
+                PendingPerm {
+                    id: "perm-failclosed".to_owned(),
+                    sess: "s1".to_owned(),
+                    name: "proj".to_owned(),
+                    kind: "perm".to_owned(),
+                    tool_type: "bash".to_owned(),
+                    label: "rm".to_owned(),
+                    detail: "rm -rf /".to_owned(),
+                    danger: Some("rmRf".to_owned()),
+                    created_at: 1,
+                },
+                tx,
+            );
+        }
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(UiState::default())
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::DecidePermission {
+                id: "perm-failclosed".to_owned(),
+                decision: "unknown_typo".to_owned(),
+            });
+        }
+        app.update();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "unknown UI decision string must fail closed and NOT resolve the hold"
+        );
+        assert!(
+            state
+                .office
+                .lock()
+                .unwrap()
+                .pending_perms
+                .contains_key("perm-failclosed")
+        );
+    }
+
+    #[test]
+    fn minimize_to_tray_resets_presence_focused_in_process() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+        state.office.lock().unwrap().presence_focused = true;
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(UiState::default())
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(TrayState::default())
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::MinimizeToTray);
+        }
+        app.update();
+
+        assert!(
+            !state.office.lock().unwrap().presence_focused,
+            "MinimizeToTray must reset presence_focused = false"
+        );
+    }
+
+    #[test]
+    fn post_presence_unfocused_sync_clears_presence_on_live_http_daemon() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let srv_state = Arc::new(AppState::new(tmp.path().to_path_buf(), None).unwrap());
+        srv_state.office.lock().unwrap().presence_focused = true;
+        let handle = rt
+            .block_on(start_http_server(srv_state.clone(), "127.0.0.1", 0))
+            .unwrap();
+        let port = handle.addr.port();
+
+        assert!(post_presence_unfocused_sync(port));
+        assert!(
+            !srv_state.office.lock().unwrap().presence_focused,
+            "sync loopback POST /api/presence must clear presence_focused on running daemon"
+        );
+
+        let _ = handle.shutdown.send(true);
+        drop(rt);
+    }
+
+    #[test]
+    fn full_attached_action_queue_does_not_cache_last_window_focused() {
+        let (action_tx, _action_rx) = mpsc::channel::<RemoteActionCmd>(1);
+        action_tx
+            .try_send(RemoteActionCmd {
+                path: "/api/prefs",
+                body: json!({}),
+                refresh: RefreshKind::None,
+            })
+            .unwrap();
+        let (shutdown, _rx) = watch::channel(false);
+        let bridge = LiveServerBridge {
+            backend: BridgeBackend::AttachedHttp {
+                snapshot: Arc::new(Mutex::new(RemoteSnapshot::default())),
+                action_tx,
+                _shutdown: shutdown,
+            },
+            assets_dir: PathBuf::from("assets"),
+            port: 4310,
+            sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            banner_pushed: true,
+            seen_perm_ids: HashSet::new(),
+            last_window_focused: None,
+        };
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(UiState::default())
+            .insert_resource(bridge)
+            .add_systems(Update, sync_live_state_to_ui);
+        let mut win = Window::default();
+        win.focused = true;
+        app.world_mut().spawn(win);
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<LiveServerBridge>().last_window_focused,
+            None,
+            "failed try_send must NOT update last_window_focused so presence retries next frame"
+        );
     }
 }
