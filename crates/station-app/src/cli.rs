@@ -9,6 +9,16 @@ pub enum GpuPreference {
     Discrete,
 }
 
+impl GpuPreference {
+    pub fn as_cli_arg(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Integrated => "integrated",
+            Self::Discrete => "discrete",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct HookCliArgs {
     pub url: String,
@@ -45,6 +55,9 @@ pub struct Cli {
 
     #[arg(long)]
     pub lite: bool,
+
+    #[arg(long, hide = true)]
+    pub gui_worker: bool,
 
     #[arg(long)]
     pub capture_scene: Option<String>,
@@ -135,5 +148,15 @@ mod tests {
 
         let serve = Cli::try_parse_from(["agents-station", "serve", "--lan"]).unwrap();
         assert!(matches!(serve.command, Some(Command::Serve { lan: true })));
+    }
+
+    #[test]
+    fn cli_parses_hidden_gui_worker_flag() {
+        let default = Cli::try_parse_from(["agents-station"]).unwrap();
+        assert!(!default.gui_worker);
+
+        let worker = Cli::try_parse_from(["agents-station", "--gui-worker", "--lite"]).unwrap();
+        assert!(worker.gui_worker);
+        assert!(worker.lite);
     }
 }
