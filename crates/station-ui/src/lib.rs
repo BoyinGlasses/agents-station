@@ -1,7 +1,9 @@
+pub mod drawers;
 pub mod fonts;
 pub mod hud;
 pub mod i18n;
 pub mod launcher_dock;
+pub mod lite_view;
 pub mod state;
 pub mod theme;
 
@@ -10,6 +12,9 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContext, EguiContextPass, EguiContexts, EguiRenderToImage, egui};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+pub use i18n::I18nStore;
+pub use state::{ActiveDrawer, UiAction, UiState, ViewMode};
 
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CaptureUiPass;
@@ -23,6 +28,7 @@ struct CachedFontBundle(Option<fonts::FontBundle>);
 #[derive(Component)]
 struct FontsApplied;
 
+/// Minimal P0 smoke HUD plugin (kept for `--capture-scene smoke` backward compatibility).
 pub struct SmokeHudPlugin {
     pub assets_dir: PathBuf,
 }
@@ -34,6 +40,82 @@ impl Plugin for SmokeHudPlugin {
             .insert_resource(CachedFontBundle(bundle))
             .add_systems(EguiContextPass, render_primary_smoke_hud)
             .add_systems(CaptureUiPass, render_capture_smoke_hud);
+    }
+}
+
+/// Full native Agents Station HUD, 2D Lite board, Drawers, and Harness Launcher Dock plugin.
+pub struct StationUiPlugin {
+    pub assets_dir: PathBuf,
+    pub initial_state: UiState,
+    pub initial_lang: String,
+}
+
+impl Plugin for StationUiPlugin {
+    fn build(&self, app: &mut App) {
+        let bundle = fonts::load_font_bundle(&self.assets_dir).ok();
+        let i18n = I18nStore::load_from_assets(&self.assets_dir, &self.initial_lang);
+        app.insert_resource(HudAssetsDir(self.assets_dir.clone()))
+            .insert_resource(CachedFontBundle(bundle))
+            .insert_resource(i18n)
+            .insert_resource(self.initial_state.clone())
+            .add_systems(Update, tick_ui_timers)
+            .add_systems(EguiContextPass, render_primary_station_ui)
+            .add_systems(CaptureUiPass, render_capture_station_ui);
+    }
+}
+
+fn tick_ui_timers(time: Res<Time>, mut state: ResMut<UiState>) {
+    state.tick_toasts(time.delta_secs());
+}
+
+fn draw_full_station_ui(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
+    match state.view_mode {
+        ViewMode::Mode3D => hud::draw_hud(ctx, state, i18n),
+        ViewMode::Lite2D | ViewMode::PanelCompact => lite_view::draw_lite_2d_view(ctx, state, i18n),
+    }
+    drawers::draw_active_drawer(ctx, state, i18n);
+}
+
+fn render_primary_station_ui(
+    mut contexts: EguiContexts,
+    mut initialized: Local<bool>,
+    cached: Res<CachedFontBundle>,
+    assets_dir: Res<HudAssetsDir>,
+    mut state: ResMut<UiState>,
+    i18n: Res<I18nStore>,
+) {
+    let Some(ctx) = contexts.try_ctx_mut() else {
+        return;
+    };
+    if !*initialized {
+        if let Some(bundle) = cached.0.as_ref() {
+            install_egui_fonts(ctx, bundle);
+        } else if let Ok(bundle) = fonts::load_font_bundle(&assets_dir.0) {
+            install_egui_fonts(ctx, &bundle);
+        }
+        theme::apply_station_theme(ctx);
+        *initialized = true;
+    }
+    draw_full_station_ui(ctx, &mut state, &i18n);
+}
+
+fn render_capture_station_ui(
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut EguiContext, Has<FontsApplied>), With<EguiRenderToImage>>,
+    cached: Res<CachedFontBundle>,
+    mut state: ResMut<UiState>,
+    i18n: Res<I18nStore>,
+) {
+    for (entity, mut ctx, applied) in &mut query {
+        let egui_ctx = ctx.get_mut();
+        if !applied {
+            if let Some(bundle) = cached.0.as_ref() {
+                install_egui_fonts(egui_ctx, bundle);
+            }
+            theme::apply_station_theme(egui_ctx);
+            commands.entity(entity).insert(FontsApplied);
+        }
+        draw_full_station_ui(egui_ctx, &mut state, &i18n);
     }
 }
 
