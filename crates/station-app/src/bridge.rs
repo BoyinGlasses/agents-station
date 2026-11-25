@@ -5,7 +5,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde_json::{Value, json};
 use station_3d::{BackdropAssets, BackdropEntity, WorldEntity, WorldPalette};
-use station_canvas2d::{BrandRegistry, FontEngine};
+use station_canvas2d::BrandRegistry;
 use station_core::http::{AppState, HarnessApi, start_http_server};
 use station_launcher::focus_launch::Win32WindowLauncher;
 use station_launcher::{HarnessService, HarnessStatus};
@@ -899,6 +899,21 @@ fn sync_live_state_to_ui(
 }
 
 #[derive(SystemParam)]
+struct WorldActionParams<'w, 's> {
+    world_q: Query<'w, 's, Entity, With<WorldEntity>>,
+    backdrop_q: Query<'w, 's, Entity, With<BackdropEntity>>,
+    lite_cam_q: Query<'w, 's, Entity, With<station_3d::Lite2dCamera>>,
+    pal: Option<ResMut<'w, WorldPalette>>,
+    backdrop_assets: Option<ResMut<'w, BackdropAssets>>,
+    meshes: Option<ResMut<'w, Assets<Mesh>>>,
+    materials: Option<ResMut<'w, Assets<StandardMaterial>>>,
+    images: Option<ResMut<'w, Assets<Image>>>,
+    shared_fonts: Option<ResMut<'w, station_3d::SharedFontEngine>>,
+    clear_color: ResMut<'w, ClearColor>,
+    lighting: Option<ResMut<'w, station_3d::lights::LightingState>>,
+}
+
+#[derive(SystemParam)]
 struct TrayActionParams<'w, 's> {
     worker_mode: Option<Res<'w, GuiWorkerMode>>,
     app_exit: EventWriter<'w, AppExit>,
@@ -907,22 +922,64 @@ struct TrayActionParams<'w, 's> {
     tray: Option<ResMut<'w, TrayState>>,
 }
 
-#[allow(clippy::too_many_arguments)]
+fn rebuild_3d_office_world(
+    commands: &mut Commands,
+    wp: &mut WorldActionParams<'_, '_>,
+    assets_dir: &std::path::Path,
+    ui: &UiState,
+    has_world: &mut bool,
+    has_lite_cam: &mut bool,
+) {
+    for ent in &wp.lite_cam_q {
+        commands.entity(ent).try_despawn();
+    }
+    *has_lite_cam = false;
+
+    if let (Some(meshes), Some(mats), Some(imgs), Some(shared_fonts)) = (
+        wp.meshes.as_deref_mut(),
+        wp.materials.as_deref_mut(),
+        wp.images.as_deref_mut(),
+        wp.shared_fonts.as_deref_mut(),
+    ) {
+        if *has_world {
+            station_3d::unload_full_office_world(
+                commands,
+                wp.world_q.iter(),
+                wp.pal.as_deref_mut(),
+                wp.backdrop_assets.as_deref_mut(),
+                meshes,
+                mats,
+                imgs,
+            );
+        }
+        let fonts = shared_fonts.get_or_init();
+        station_3d::spawn_full_office_world(
+            commands,
+            meshes,
+            mats,
+            imgs,
+            fonts,
+            assets_dir,
+            ui.layout,
+            ui.backdrop,
+            ui.chibi_look,
+            ui.night,
+        );
+        *has_world = true;
+    }
+}
+
 fn process_ui_actions(
     mut commands: Commands,
     mut ui: ResMut<UiState>,
     mut i18n: ResMut<I18nStore>,
     bridge: Res<LiveServerBridge>,
-    world_q: Query<Entity, With<WorldEntity>>,
-    backdrop_q: Query<Entity, With<BackdropEntity>>,
-    mut pal: Option<ResMut<WorldPalette>>,
-    mut backdrop_assets: Option<ResMut<BackdropAssets>>,
-    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut images: Option<ResMut<Assets<Image>>>,
-    mut clear_color: ResMut<ClearColor>,
-    mut lighting: Option<ResMut<station_3d::lights::LightingState>>,
+    mut world_params: WorldActionParams,
     mut tray_params: TrayActionParams,
 ) {
+    let mut has_world = !world_params.world_q.is_empty();
+    let mut has_lite_cam = !world_params.lite_cam_q.is_empty();
+
     let actions = ui.drain_actions();
     for action in actions {
         match action {
@@ -989,32 +1046,95 @@ fn process_ui_actions(
                 }
             }
             UiAction::SetViewMode(ViewMode::Lite2D | ViewMode::PanelCompact) => {
-                for ent in &world_q {
-                    commands.entity(ent).despawn();
+                if has_world {
+                    if let (Some(meshes), Some(mats), Some(imgs)) = (
+                        world_params.meshes.as_deref_mut(),
+                        world_params.materials.as_deref_mut(),
+                        world_params.images.as_deref_mut(),
+                    ) {
+                        station_3d::unload_full_office_world(
+                            &mut commands,
+                            world_params.world_q.iter(),
+                            world_params.pal.as_deref_mut(),
+                            world_params.backdrop_assets.as_deref_mut(),
+                            meshes,
+                            mats,
+                            imgs,
+                        );
+                    } else {
+                        for ent in &world_params.world_q {
+                            commands.entity(ent).try_despawn();
+                        }
+                    }
+                    has_world = false;
                 }
-                if let Some(imgs) = images.as_mut() {
-                    if let Some(p) = pal.as_mut() {
-                        p.purge_transient_images(imgs);
-                    }
-                    if let (Some(ba), Some(mats)) = (backdrop_assets.as_mut(), materials.as_mut()) {
-                        ba.purge(mats, imgs);
-                    }
+                if !has_lite_cam {
+                    station_3d::camera::spawn_lite_2d_camera(&mut commands);
+                    has_lite_cam = true;
+                }
+                world_params.clear_color.0 = Color::srgb(0.06, 0.075, 0.105);
+            }
+            UiAction::SetViewMode(ViewMode::Mode3D) => {
+                ui.view_mode = ViewMode::Mode3D;
+                for ent in &world_params.lite_cam_q {
+                    commands.entity(ent).try_despawn();
+                }
+                has_lite_cam = false;
+                if !has_world {
+                    rebuild_3d_office_world(
+                        &mut commands,
+                        &mut world_params,
+                        &bridge.assets_dir,
+                        &ui,
+                        &mut has_world,
+                        &mut has_lite_cam,
+                    );
+                }
+            }
+            UiAction::SwitchLayout(lay) => {
+                ui.layout = lay;
+                ui.view_mode = ViewMode::Mode3D;
+                rebuild_3d_office_world(
+                    &mut commands,
+                    &mut world_params,
+                    &bridge.assets_dir,
+                    &ui,
+                    &mut has_world,
+                    &mut has_lite_cam,
+                );
+            }
+            UiAction::SetChibiLook(look) => {
+                ui.chibi_look = look;
+                if ui.view_mode == ViewMode::Mode3D || has_world {
+                    rebuild_3d_office_world(
+                        &mut commands,
+                        &mut world_params,
+                        &bridge.assets_dir,
+                        &ui,
+                        &mut has_world,
+                        &mut has_lite_cam,
+                    );
                 }
             }
             UiAction::SwitchBackdrop(bk) => {
-                if let (Some(p), Some(ba), Some(mats), Some(imgs)) = (
-                    pal.as_mut(),
-                    backdrop_assets.as_mut(),
-                    materials.as_mut(),
-                    images.as_mut(),
+                ui.backdrop = bk;
+                if let (Some(p), Some(ba), Some(mats), Some(imgs), Some(shared_fonts)) = (
+                    world_params.pal.as_deref_mut(),
+                    world_params.backdrop_assets.as_deref_mut(),
+                    world_params.materials.as_deref_mut(),
+                    world_params.images.as_deref_mut(),
+                    world_params.shared_fonts.as_deref_mut(),
                 ) {
-                    for ent in &backdrop_q {
-                        commands.entity(ent).despawn();
-                    }
-                    ba.purge(mats, imgs);
+                    station_3d::backdrops::unload_backdrop(
+                        &mut commands,
+                        &world_params.backdrop_q,
+                        ba,
+                        mats,
+                        imgs,
+                    );
                     let spec = station_3d::LayoutSpec::for_layout(ui.layout);
                     let mut brands = BrandRegistry::new(bridge.assets_dir.clone());
-                    let mut fonts = FontEngine::from_assets_dir(&bridge.assets_dir);
+                    let fonts = shared_fonts.get_or_init();
                     station_3d::backdrops::spawn_backdrop(
                         &mut commands,
                         p,
@@ -1022,7 +1142,7 @@ fn process_ui_actions(
                         imgs,
                         ba,
                         &mut brands,
-                        &mut fonts,
+                        fonts,
                         &spec,
                         bk,
                     );
@@ -1030,10 +1150,10 @@ fn process_ui_actions(
                 }
             }
             UiAction::ToggleNight(night) => {
-                if let Some(l) = lighting.as_mut() {
+                if let Some(l) = world_params.lighting.as_mut() {
                     l.night = night;
                 }
-                clear_color.0 = if night {
+                world_params.clear_color.0 = if night {
                     Color::srgb(0.06, 0.08, 0.13)
                 } else {
                     Color::srgb(0.75, 0.85, 0.94)
@@ -1075,18 +1195,27 @@ fn process_ui_actions(
                     // lightweight parent TrayDaemon + :4310 process (<= 45 MB).
                     tray_params.app_exit.write(AppExit::Success);
                 } else {
-                    for ent in &world_q {
-                        commands.entity(ent).despawn();
-                    }
-                    if let Some(imgs) = images.as_mut() {
-                        if let Some(p) = pal.as_mut() {
-                            p.purge_transient_images(imgs);
+                    if has_world {
+                        if let (Some(meshes), Some(mats), Some(imgs)) = (
+                            world_params.meshes.as_deref_mut(),
+                            world_params.materials.as_deref_mut(),
+                            world_params.images.as_deref_mut(),
+                        ) {
+                            station_3d::unload_full_office_world(
+                                &mut commands,
+                                world_params.world_q.iter(),
+                                world_params.pal.as_deref_mut(),
+                                world_params.backdrop_assets.as_deref_mut(),
+                                meshes,
+                                mats,
+                                imgs,
+                            );
+                        } else {
+                            for ent in &world_params.world_q {
+                                commands.entity(ent).try_despawn();
+                            }
                         }
-                        if let (Some(ba), Some(mats)) =
-                            (backdrop_assets.as_mut(), materials.as_mut())
-                        {
-                            ba.purge(mats, imgs);
-                        }
+                        has_world = false;
                     }
                     for mut win in &mut tray_params.windows {
                         win.visible = false;
@@ -1100,9 +1229,7 @@ fn process_ui_actions(
                     }
                 }
             }
-            UiAction::SwitchLayout(_)
-            | UiAction::SetChibiLook(_)
-            | UiAction::SetWeatherCity(_)
+            UiAction::SetWeatherCity(_)
             | UiAction::SetSound(_)
             | UiAction::ToggleCameraFp
             | UiAction::TriggerPhoto
@@ -1110,8 +1237,7 @@ fn process_ui_actions(
             | UiAction::ToggleReplay
             | UiAction::SendPrompt { .. }
             | UiAction::PostGroupChat(_)
-            | UiAction::SaveWhiteboard(_)
-            | UiAction::SetViewMode(ViewMode::Mode3D) => {}
+            | UiAction::SaveWhiteboard(_) => {}
         }
     }
 }
@@ -1378,5 +1504,290 @@ mod tests {
             .expect("bind error must expose visible banner message");
         assert!(msg.contains(&blocked_port.to_string()));
         drop(_blocker);
+    }
+
+    #[test]
+    fn view_mode_3d_lite_3d_layout_hq_chibi_look_and_3x_backdrop_switch() {
+        use bevy::input::mouse::{MouseMotion, MouseWheel};
+        use station_3d::{BackdropKind, ChibiLook, Lite2dCamera, OfficeLayout, SharedFontEngine};
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut app = App::new();
+        app.insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .add_event::<MouseMotion>()
+            .add_event::<MouseWheel>()
+            .add_event::<AppExit>()
+            .add_plugins(station_3d::OfficeWorldPlugin {
+                layout: OfficeLayout::Pro,
+                backdrop: BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            })
+            .insert_resource(UiState::with_demo_seed(
+                OfficeLayout::Pro,
+                BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(LiveServerBridge::connect_or_start(
+                tmp.path().to_path_buf(),
+                assets_dir,
+                "127.0.0.1".to_owned(),
+                0,
+                false,
+                false,
+            ))
+            .add_systems(Update, process_ui_actions);
+
+        // Initial 3D Pro state.
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Camera3d>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<station_3d::camera::MainOfficeCamera>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Lite2dCamera>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(station_3d::desks::count_desks_in_world(app.world_mut()), 12);
+        assert_eq!(app.world().resource::<SharedFontEngine>().load_count(), 1);
+
+        // 1. 3D -> Lite2D: unload 3D world and spawn Lite2dCamera (never tagged WorldEntity).
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.view_mode = ViewMode::Lite2D;
+            ui.push_action(UiAction::SetViewMode(ViewMode::Lite2D));
+        }
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<WorldEntity>>()
+                .iter(app.world())
+                .count(),
+            0,
+            "Lite2D must despawn all WorldEntity entities"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Camera3d>>()
+                .iter(app.world())
+                .count(),
+            1,
+            "Lite2D must keep exactly 1 active Camera3d (Lite2dCamera)"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Lite2dCamera>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);
+        assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 0);
+        assert_eq!(app.world().resource::<Assets<Image>>().len(), 0);
+
+        // 2. Lite2D -> Mode3D: despawn Lite2dCamera and rebuild 3D world.
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.view_mode = ViewMode::Mode3D;
+            ui.push_action(UiAction::SetViewMode(ViewMode::Mode3D));
+        }
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Camera3d>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<station_3d::camera::MainOfficeCamera>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Lite2dCamera>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert!(
+            app.world_mut()
+                .query_filtered::<Entity, With<WorldEntity>>()
+                .iter(app.world())
+                .count()
+                > 50
+        );
+        assert_eq!(station_3d::desks::count_desks_in_world(app.world_mut()), 12);
+
+        // 3. SwitchLayout(Hq): rebuild 44-desk HQ layout with exactly 1 active camera.
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.layout = OfficeLayout::Hq;
+            ui.push_action(UiAction::SwitchLayout(OfficeLayout::Hq));
+        }
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Camera3d>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(station_3d::desks::count_desks_in_world(app.world_mut()), 44);
+
+        // 4. SetChibiLook(Toy): rebuild cleanly with 1 active camera.
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.chibi_look = ChibiLook::Toy;
+            ui.push_action(UiAction::SetChibiLook(ChibiLook::Toy));
+        }
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Camera3d>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(station_3d::desks::count_desks_in_world(app.world_mut()), 44);
+
+        // 5. 3x backdrop switch: 0 leaked StandardMaterials, 0 leaked Images, 1 FontEngine load total.
+        let city_mats = app.world().resource::<Assets<StandardMaterial>>().len();
+        let city_imgs = app.world().resource::<Assets<Image>>().len();
+        for _ in 0..3 {
+            for bk in [BackdropKind::Countryside, BackdropKind::Beach, BackdropKind::City] {
+                {
+                    let mut ui = app.world_mut().resource_mut::<UiState>();
+                    ui.backdrop = bk;
+                    ui.push_action(UiAction::SwitchBackdrop(bk));
+                }
+                app.update();
+            }
+            assert_eq!(
+                app.world().resource::<Assets<StandardMaterial>>().len(),
+                city_mats,
+                "3x backdrop switch must leak 0 StandardMaterials"
+            );
+            assert_eq!(
+                app.world().resource::<Assets<Image>>().len(),
+                city_imgs,
+                "3x backdrop switch must leak 0 Images"
+            );
+        }
+        assert_eq!(
+            app.world().resource::<SharedFontEngine>().load_count(),
+            1,
+            "SharedFontEngine must never reload 24 TTF files on layout/backdrop switches"
+        );
+    }
+
+    #[test]
+    fn lite_startup_switches_to_3d_cleanly() {
+        use bevy::input::mouse::{MouseMotion, MouseWheel};
+        use station_3d::{BackdropKind, Lite2dCamera, OfficeLayout, SharedFontEngine};
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut ui = UiState::with_demo_seed(OfficeLayout::Pro, BackdropKind::City, false);
+        ui.view_mode = ViewMode::Lite2D;
+
+        let mut app = App::new();
+        app.insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .add_event::<MouseMotion>()
+            .add_event::<MouseWheel>()
+            .add_event::<AppExit>()
+            .add_plugins(station_3d::OfficeWorldRuntimePlugin {
+                assets_dir: assets_dir.clone(),
+            })
+            .add_systems(Startup, |mut commands: Commands| {
+                station_3d::camera::spawn_lite_2d_camera(&mut commands);
+            })
+            .insert_resource(ui)
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(LiveServerBridge::connect_or_start(
+                tmp.path().to_path_buf(),
+                assets_dir,
+                "127.0.0.1".to_owned(),
+                0,
+                false,
+                false,
+            ))
+            .add_systems(Update, process_ui_actions);
+
+        app.update();
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Lite2dCamera>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<WorldEntity>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(app.world().resource::<SharedFontEngine>().load_count(), 0);
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.view_mode = ViewMode::Mode3D;
+            ui.push_action(UiAction::SetViewMode(ViewMode::Mode3D));
+        }
+        app.update();
+
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Lite2dCamera>>()
+                .iter(app.world())
+                .count(),
+            0
+        );
+        assert_eq!(
+            app.world_mut()
+                .query_filtered::<Entity, With<Camera3d>>()
+                .iter(app.world())
+                .count(),
+            1
+        );
+        assert_eq!(station_3d::desks::count_desks_in_world(app.world_mut()), 12);
+        assert_eq!(app.world().resource::<SharedFontEngine>().load_count(), 1);
     }
 }
