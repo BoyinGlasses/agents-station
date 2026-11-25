@@ -18,11 +18,175 @@ pub mod rooms;
 
 use bevy::prelude::*;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
+pub use camera::Lite2dCamera;
 pub use chibi::ChibiLook;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
 use station_canvas2d::{BrandRegistry, FontEngine};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Lazily loaded, single shared `FontEngine` resource reused across all layout, look,
+/// and backdrop switches so the 24 TTF files are never re-read from disk.
+#[derive(Resource)]
+pub struct SharedFontEngine {
+    assets_dir: PathBuf,
+    engine: Option<FontEngine>,
+    loads: usize,
+}
+
+impl SharedFontEngine {
+    pub fn new(assets_dir: PathBuf) -> Self {
+        Self {
+            assets_dir,
+            engine: None,
+            loads: 0,
+        }
+    }
+
+    pub fn get_or_init(&mut self) -> &mut FontEngine {
+        if self.engine.is_none() {
+            self.engine = Some(FontEngine::from_assets_dir(&self.assets_dir));
+            self.loads += 1;
+        }
+        self.engine.as_mut().expect("FontEngine just initialized")
+    }
+
+    pub fn load_count(&self) -> usize {
+        self.loads
+    }
+}
+
+/// Registers the shared 3D runtime resources, lazy `SharedFontEngine`, and update systems
+/// without spawning 3D geometry on startup (used by `--lite` so switching `2D Lite -> 3D`
+/// immediately has live camera controls and animations).
+pub struct OfficeWorldRuntimePlugin {
+    pub assets_dir: PathBuf,
+}
+
+impl Plugin for OfficeWorldRuntimePlugin {
+    fn build(&self, app: &mut App) {
+        register_office_runtime(
+            app,
+            OfficeLayout::Pro,
+            BackdropKind::City,
+            self.assets_dir.clone(),
+            false,
+        );
+    }
+}
+
+fn register_office_runtime(
+    app: &mut App,
+    layout: OfficeLayout,
+    backdrop: BackdropKind,
+    assets_dir: PathBuf,
+    night: bool,
+) {
+    app.insert_resource(layout)
+        .insert_resource(backdrop)
+        .insert_resource(lights::LightingState { night })
+        .insert_resource(life::OfficeLifeState::default())
+        .insert_resource(replay::ReplayState::default())
+        .insert_resource(audio::SfxEngine::new(true))
+        .insert_resource(interact::PlaceCardState::default())
+        .insert_resource(SharedFontEngine::new(assets_dir))
+        .add_event::<interact::PropActivated>()
+        .add_systems(
+            Update,
+            (
+                camera::camera_control_system,
+                props::animate_props_system,
+                people::animate_chibis_system,
+                backdrops::animate_backdrop_traffic_system,
+                life::update_rain_system,
+            ),
+        );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_full_office_world(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    fonts: &mut FontEngine,
+    assets_dir: &Path,
+    layout: OfficeLayout,
+    backdrop: BackdropKind,
+    look: ChibiLook,
+    night: bool,
+) {
+    let spec = LayoutSpec::for_layout(layout);
+    let mut pal = WorldPalette::new(meshes);
+    let mut brands = BrandRegistry::new(assets_dir.to_path_buf());
+    let mut backdrop_assets = BackdropAssets::default();
+    let life_state = life::OfficeLifeState::default();
+
+    lights::spawn_office_lights(commands, &spec, night);
+    camera::spawn_office_camera(commands, &spec);
+    rooms::spawn_office_shell(commands, &mut pal, materials, images, fonts, &spec);
+    entrance::spawn_entrance(commands, &mut pal, materials, &spec);
+    let scr_mats = desks::spawn_desks(commands, &mut pal, materials, images, fonts, &spec);
+    furniture::spawn_furniture(commands, &mut pal, materials, images, fonts, &spec);
+    props::spawn_all_props(commands, &mut pal, materials, images, fonts, &spec);
+    people::spawn_office_cast(commands, &mut pal, materials, &spec, look);
+    life::spawn_life_elements(
+        commands,
+        &mut pal,
+        materials,
+        images,
+        fonts,
+        &spec,
+        &life_state,
+    );
+    backdrops::spawn_backdrop(
+        commands,
+        &mut pal,
+        materials,
+        images,
+        &mut backdrop_assets,
+        &mut brands,
+        fonts,
+        &spec,
+        backdrop,
+    );
+    brands.clear();
+    interact::spawn_hover_ring(commands, &mut pal, materials);
+
+    commands.insert_resource(layout);
+    commands.insert_resource(backdrop);
+    commands.insert_resource(lights::LightingState { night });
+    commands.insert_resource(scr_mats);
+    commands.insert_resource(backdrop_assets);
+    commands.insert_resource(pal);
+}
+
+/// True Unload helper: despawns every `WorldEntity` and purges every `WorldPalette`
+/// mesh/material/image and `BackdropAssets` material/image so switching `3D -> 2D Lite`,
+/// rebuilding layouts, or minimizing to System Tray leaks zero GPU/CPU assets.
+pub fn unload_full_office_world(
+    commands: &mut Commands,
+    world_entities: impl IntoIterator<Item = Entity>,
+    pal: Option<&mut WorldPalette>,
+    backdrop_assets: Option<&mut BackdropAssets>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) {
+    for ent in world_entities {
+        commands.entity(ent).try_despawn();
+    }
+    if let Some(p) = pal {
+        p.purge_all(meshes, materials, images);
+    }
+    if let Some(ba) = backdrop_assets {
+        ba.purge(materials, images);
+    }
+    commands.remove_resource::<WorldPalette>();
+    commands.remove_resource::<BackdropAssets>();
+    commands.remove_resource::<desks::ScreenMaterials>();
+    commands.remove_resource::<camera::CameraRig>();
+}
 
 pub struct OfficeWorldPlugin {
     pub layout: OfficeLayout,
@@ -38,112 +202,33 @@ impl Plugin for OfficeWorldPlugin {
         let assets_dir = self.assets_dir.clone();
         let night = self.night;
 
-        app.insert_resource(layout)
-            .insert_resource(backdrop)
-            .insert_resource(lights::LightingState { night })
-            .insert_resource(life::OfficeLifeState::default())
-            .insert_resource(replay::ReplayState::default())
-            .insert_resource(audio::SfxEngine::new(true))
-            .insert_resource(interact::PlaceCardState::default())
-            .add_event::<interact::PropActivated>()
-            .add_systems(
-                Startup,
-                move |mut commands: Commands,
-                      mut meshes: ResMut<Assets<Mesh>>,
-                      mut materials: ResMut<Assets<StandardMaterial>>,
-                      mut images: ResMut<Assets<Image>>,
-                      life_state: Res<life::OfficeLifeState>| {
-                    let spec = LayoutSpec::for_layout(layout);
-                    let mut pal = WorldPalette::new(&mut meshes);
-                    let mut fonts = FontEngine::from_assets_dir(&assets_dir);
-                    let mut brands = BrandRegistry::new(assets_dir.clone());
-                    let mut backdrop_assets = BackdropAssets::default();
-
-                    lights::spawn_office_lights(&mut commands, &spec, night);
-                    camera::spawn_office_camera(&mut commands, &spec);
-                    rooms::spawn_office_shell(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &mut images,
-                        &mut fonts,
-                        &spec,
-                    );
-                    entrance::spawn_entrance(&mut commands, &mut pal, &mut materials, &spec);
-                    let scr_mats = desks::spawn_desks(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &mut images,
-                        &mut fonts,
-                        &spec,
-                    );
-                    furniture::spawn_furniture(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &mut images,
-                        &mut fonts,
-                        &spec,
-                    );
-                    props::spawn_all_props(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &mut images,
-                        &mut fonts,
-                        &spec,
-                    );
-                    people::spawn_office_cast(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &spec,
-                        ChibiLook::Pixar,
-                    );
-                    life::spawn_life_elements(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &mut images,
-                        &mut fonts,
-                        &spec,
-                        &life_state,
-                    );
-                    backdrops::spawn_backdrop(
-                        &mut commands,
-                        &mut pal,
-                        &mut materials,
-                        &mut images,
-                        &mut backdrop_assets,
-                        &mut brands,
-                        &mut fonts,
-                        &spec,
-                        backdrop,
-                    );
-                    brands.clear();
-                    interact::spawn_hover_ring(&mut commands, &mut pal, &mut materials);
-
-                    commands.insert_resource(scr_mats);
-                    commands.insert_resource(backdrop_assets);
-                    commands.insert_resource(pal);
-                },
-            )
-            .add_systems(
-                Update,
-                (
-                    camera::camera_control_system,
-                    props::animate_props_system,
-                    people::animate_chibis_system,
-                    backdrops::animate_backdrop_traffic_system,
-                    life::update_rain_system,
-                ),
-            );
+        register_office_runtime(app, layout, backdrop, assets_dir.clone(), night);
+        app.add_systems(
+            Startup,
+            move |mut commands: Commands,
+                  mut meshes: ResMut<Assets<Mesh>>,
+                  mut materials: ResMut<Assets<StandardMaterial>>,
+                  mut images: ResMut<Assets<Image>>,
+                  mut shared_fonts: ResMut<SharedFontEngine>| {
+                let fonts = shared_fonts.get_or_init();
+                spawn_full_office_world(
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                    fonts,
+                    &assets_dir,
+                    layout,
+                    backdrop,
+                    ChibiLook::Pixar,
+                    night,
+                );
+            },
+        );
     }
 }
 
-/// True Unload helper: despawns every `WorldEntity` and purges transient GPU images.
-/// Used when minimizing to System Tray, switching 3D -> 2D Lite, or rebuilding layouts.
+/// Legacy system wrapper kept for callers that only have `WorldPalette` and `Assets<Image>`.
 pub fn unload_office_world(
     mut commands: Commands,
     q: Query<Entity, With<WorldEntity>>,
@@ -151,7 +236,7 @@ pub fn unload_office_world(
     mut images: ResMut<Assets<Image>>,
 ) {
     for ent in &q {
-        commands.entity(ent).despawn();
+        commands.entity(ent).try_despawn();
     }
     if let Some(p) = pal.as_mut() {
         p.purge_transient_images(&mut images);
@@ -256,5 +341,121 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(pal.material_count(), 2);
+    }
+
+    #[test]
+    fn full_office_world_unload_and_rebuild_purges_all_assets_and_preserves_single_camera() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+
+        // 1. Spawn full Pro 3D office world.
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Pro,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        assert!(world.query_filtered::<Entity, With<WorldEntity>>().iter(&world).count() > 50);
+        assert_eq!(world.query_filtered::<Entity, With<Camera3d>>().iter(&world).count(), 1);
+        assert_eq!(world.query_filtered::<Entity, With<camera::MainOfficeCamera>>().iter(&world).count(), 1);
+        assert_eq!(world.query_filtered::<Entity, With<Lite2dCamera>>().iter(&world).count(), 0);
+        assert_eq!(desks::count_desks_in_world(&mut world), 12);
+        assert!(world.resource::<Assets<Mesh>>().len() >= 6);
+        assert!(world.resource::<Assets<StandardMaterial>>().len() > 20);
+        assert!(world.resource::<Assets<Image>>().len() > 10);
+
+        // 2. Unload full 3D world and spawn Lite2dCamera (never tagged WorldEntity).
+        let world_ents: Vec<Entity> = world
+            .query_filtered::<Entity, With<WorldEntity>>()
+            .iter(&world)
+            .collect();
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = world.remove_resource::<WorldPalette>();
+                    let mut ba = world.remove_resource::<BackdropAssets>();
+                    let mut cmds = world.commands();
+                    unload_full_office_world(
+                        &mut cmds,
+                        world_ents,
+                        pal.as_mut(),
+                        ba.as_mut(),
+                        &mut meshes,
+                        &mut mats,
+                        &mut imgs,
+                    );
+                    camera::spawn_lite_2d_camera(&mut cmds);
+                });
+            });
+        });
+        world.flush();
+
+        assert_eq!(world.query_filtered::<Entity, With<WorldEntity>>().iter(&world).count(), 0);
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
+        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 0);
+        assert_eq!(world.query_filtered::<Entity, With<Camera3d>>().iter(&world).count(), 1);
+        assert_eq!(world.query_filtered::<Entity, With<Lite2dCamera>>().iter(&world).count(), 1);
+        assert_eq!(world.query_filtered::<Entity, (With<Lite2dCamera>, With<WorldEntity>)>().iter(&world).count(), 0);
+
+        // 3. Despawn Lite2dCamera and rebuild HQ 3D world with 44 desks.
+        let lite_cams: Vec<Entity> = world
+            .query_filtered::<Entity, With<Lite2dCamera>>()
+            .iter(&world)
+            .collect();
+        for e in lite_cams {
+            world.despawn(e);
+        }
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Hq,
+                            BackdropKind::Beach,
+                            ChibiLook::Toy,
+                            true,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        assert_eq!(world.query_filtered::<Entity, With<Camera3d>>().iter(&world).count(), 1);
+        assert_eq!(world.query_filtered::<Entity, With<camera::MainOfficeCamera>>().iter(&world).count(), 1);
+        assert_eq!(world.query_filtered::<Entity, With<Lite2dCamera>>().iter(&world).count(), 0);
+        assert_eq!(desks::count_desks_in_world(&mut world), 44);
+        assert_eq!(world.resource::<SharedFontEngine>().load_count(), 1);
     }
 }

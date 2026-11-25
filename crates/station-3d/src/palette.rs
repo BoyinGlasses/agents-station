@@ -20,6 +20,7 @@ pub struct WorldPalette {
     pub unit_cone: Handle<Mesh>,
     pub unit_torus: Handle<Mesh>,
     materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
+    owned_materials: Vec<Handle<StandardMaterial>>,
     owned_images: Vec<Handle<Image>>,
 }
 
@@ -81,6 +82,7 @@ impl WorldPalette {
             unit_cone: meshes.add(Cone::new(0.5, 1.0)),
             unit_torus: meshes.add(Torus::new(0.32, 0.5)),
             materials: HashMap::new(),
+            owned_materials: Vec::new(),
             owned_images: Vec::new(),
         }
     }
@@ -211,11 +213,13 @@ impl WorldPalette {
         surface: RgbaSurface,
     ) -> Handle<StandardMaterial> {
         let tex = self.upload_surface(images, surface);
-        materials.add(StandardMaterial {
+        let mat = materials.add(StandardMaterial {
             base_color_texture: Some(tex),
             unlit: true,
             ..default()
-        })
+        });
+        self.owned_materials.push(mat.clone());
+        mat
     }
 
     pub fn textured_lit(
@@ -226,11 +230,13 @@ impl WorldPalette {
         roughness: f32,
     ) -> Handle<StandardMaterial> {
         let tex = self.upload_surface(images, surface);
-        materials.add(StandardMaterial {
+        let mat = materials.add(StandardMaterial {
             base_color_texture: Some(tex),
             perceptual_roughness: roughness,
             ..default()
-        })
+        });
+        self.owned_materials.push(mat.clone());
+        mat
     }
 
     pub fn material_count(&self) -> usize {
@@ -241,6 +247,33 @@ impl WorldPalette {
         for h in self.owned_images.drain(..) {
             images.remove(&h);
         }
+    }
+
+    /// Removes every unit mesh, deduplicated material, textured material, and GPU image
+    /// allocated through this palette.
+    pub fn purge_all(
+        &mut self,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+    ) {
+        for h in [
+            &self.unit_box,
+            &self.unit_cyl,
+            &self.unit_sphere,
+            &self.unit_plane,
+            &self.unit_cone,
+            &self.unit_torus,
+        ] {
+            meshes.remove(h);
+        }
+        for (_, h) in self.materials.drain() {
+            materials.remove(&h);
+        }
+        for h in self.owned_materials.drain(..) {
+            materials.remove(&h);
+        }
+        self.purge_transient_images(images);
     }
 }
 

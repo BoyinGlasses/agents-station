@@ -7,6 +7,10 @@ use bevy::render::camera::ScalingMode;
 #[derive(Component)]
 pub struct MainOfficeCamera;
 
+/// Marker for the bare 2D Lite camera (never tagged `WorldEntity` so unloading 3D never strands a black screen).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Lite2dCamera;
+
 #[derive(Resource, Debug, Clone)]
 pub struct CameraRig {
     pub target: Vec3,
@@ -79,16 +83,36 @@ pub fn spawn_office_camera(commands: &mut Commands, spec: &LayoutSpec) {
     ));
 }
 
+/// Spawns the bare camera used in 2D Lite mode (never tagged `WorldEntity`).
+pub fn spawn_lite_2d_camera(commands: &mut Commands) -> Entity {
+    commands
+        .spawn((
+            Lite2dCamera,
+            Camera3d::default(),
+            bevy::core_pipeline::tonemapping::Tonemapping::None,
+            Msaa::Off,
+            Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ))
+        .id()
+}
+
 pub fn camera_control_system(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut motion_ev: EventReader<MouseMotion>,
     mut wheel_ev: EventReader<MouseWheel>,
-    mut rig: ResMut<CameraRig>,
+    rig: Option<ResMut<CameraRig>>,
     mut q: Query<(&mut Transform, &mut Projection), With<MainOfficeCamera>>,
 ) {
+    let Some(mut rig) = rig else {
+        motion_ev.clear();
+        wheel_ev.clear();
+        return;
+    };
     let Ok((mut tf, mut proj)) = q.single_mut() else {
+        motion_ev.clear();
+        wheel_ev.clear();
         return;
     };
 
