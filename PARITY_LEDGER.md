@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
+Status: 90 verified `[x]` | 313 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -22,7 +22,7 @@ Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [ ] server/antigravity-runs.mjs -> `crates/station-core/src/store/antigravity_runs.rs` (unit tested)
 - [ ] server/auto-resume.mjs -> `crates/station-core/src/state/auto_resume.rs` (unit tested)
 - [ ] server/bg-sessions.mjs -> `crates/station-core/src/state/bg_sessions.rs` (unit tested)
-- [x] server/claude-version.mjs -> `crates/station-core/src/state/claude_version.rs` (unit tested)
+- [~] server/claude-version.mjs -> `crates/station-core/src/state/claude_version.rs` (unit tested; `check()` unwired at runtime)
 - [ ] server/cli-command.mjs -> `crates/station-core/src/store/cli_command.rs` (unit tested)
 - [~] server/codex-accounts.mjs -> `crates/station-core/src/store/codex_accounts.rs` (unit tested)
 - [ ] server/codex-history.mjs -> `crates/station-core/src/store/codex_history.rs` (unit tested)
@@ -93,7 +93,7 @@ Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [x] public/assets/thumbs/layout-pro.jpg -> `assets/thumbs/layout-pro.jpg` + `crates/station-canvas2d/src/brands.rs` (tested)
 - [x] public/assets/vehicles/README.md -> `assets/vehicles/README.md` (synced)
 - [x] public/assets/vehicles/cars.json -> `assets/vehicles/cars.json` + `crates/station-canvas2d/src/brands.rs` (tested)
-- [x] public/assets/vendor/qrcode.min.js -> `crates/station-canvas2d/src/street_surfaces.rs::draw_qr_block` (native Rust QR rasterizer)
+- [~] public/assets/vendor/qrcode.min.js -> `crates/station-canvas2d/src/street_surfaces.rs::draw_qr_block` (LCG placeholder pattern; real QR encoding unported)
 - [x] public/icon-512.png -> `assets/icon-512.png` + `crates/station-canvas2d/src/brands.rs::load_app_icon` (tested)
 - [~] public/sw.js -> `crates/station-core/src/http/phone.rs::get_sw` (served natively)
 
@@ -496,7 +496,7 @@ Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [x] endpoint:POST /v1/logs -> `crates/station-core/src/http/otel_routes.rs::post_logs`
 - [~] endpoint:POST /hook/question -> `crates/station-core/src/http/hooks.rs::post_hook_question`
 - [x] endpoint:POST /hook/bind -> `crates/station-core/src/http/hooks.rs::post_hook_bind`
-- [x] endpoint:POST /hook/status -> `crates/station-core/src/http/hooks.rs::post_hook_status`
+- [~] endpoint:POST /hook/status -> `crates/station-core/src/http/hooks.rs::post_hook_status`
 - [x] endpoint:POST /hook/loop -> `crates/station-core/src/http/hooks.rs::post_hook_loop`
 - [x] endpoint:POST /hook/start -> `crates/station-core/src/http/hooks.rs::post_hook_start`
 - [~] endpoint:POST /hook/denied -> `crates/station-core/src/http/hooks.rs::post_hook_denied`
@@ -512,21 +512,21 @@ Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [~] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
 - [~] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
 - [x] endpoint:GET /api/pins -> `crates/station-core/src/http/api.rs::get_pins`
-- [x] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
-- [x] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
+- [~] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
+- [~] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
 - [~] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
 - [x] endpoint:GET /api/burn -> `crates/station-core/src/http/api.rs::get_burn`
-- [x] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
+- [~] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
 - [x] endpoint:GET /api/panel -> `crates/station-core/src/http/api.rs::get_panel`
 - [x] endpoint:GET /api/chat -> `crates/station-core/src/http/api.rs::get_chat`
 - [x] endpoint:GET /api/loop -> `crates/station-core/src/http/api.rs::get_loop`
-- [x] endpoint:GET /api/tenure -> `crates/station-core/src/http/api.rs::get_tenure`
+- [~] endpoint:GET /api/tenure -> `crates/station-core/src/http/api.rs::get_tenure`
 - [ ] endpoint:GET /api/cache -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [x] endpoint:GET /api/tasks -> `crates/station-core/src/http/api.rs::get_tasks`
-- [x] endpoint:GET /api/models -> `crates/station-core/src/http/api.rs::get_models`
+- [~] endpoint:GET /api/tasks -> `crates/station-core/src/http/api.rs::get_tasks`
+- [~] endpoint:GET /api/models -> `crates/station-core/src/http/api.rs::get_models`
 - [ ] endpoint:GET /api/quick -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [x] endpoint:GET /api/claude-version -> `crates/station-core/src/http/api.rs::get_claude_version`
-- [x] endpoint:GET /api/push -> `crates/station-core/src/http/api.rs::get_push`
+- [~] endpoint:GET /api/claude-version -> `crates/station-core/src/http/api.rs::get_claude_version`
+- [~] endpoint:GET /api/push -> `crates/station-core/src/http/api.rs::get_push`
 - [~] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
 - [ ] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_generic_ok`
 - [ ] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_generic_ok`
@@ -548,14 +548,14 @@ Status: 104 verified `[x]` | 299 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [ ] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [~] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
 - [~] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
-- [x] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
-- [x] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
+- [~] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
+- [~] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
 - [ ] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [ ] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [ ] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [ ] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [ ] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [x] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
+- [~] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
 - [ ] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
 - [x] endpoint:POST /api/pins -> `crates/station-core/src/http/api.rs::post_pins`
 - [~] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
