@@ -44,7 +44,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    #[arg(long, env = "OFFICE_PORT", default_value_t = DEFAULT_PORT)]
+    #[arg(long, global = true, env = "OFFICE_PORT", default_value_t = DEFAULT_PORT)]
     pub port: u16,
 
     #[arg(long, env = "OFFICE_HOST", default_value = DEFAULT_HOST)]
@@ -74,6 +74,7 @@ pub enum Command {
         lan: bool,
     },
     Hook(HookCliArgs),
+    StatusLine,
     Install {
         #[arg(long, default_value = "claude")]
         agent: String,
@@ -158,5 +159,17 @@ mod tests {
         let worker = Cli::try_parse_from(["agents-station", "--gui-worker", "--lite"]).unwrap();
         assert!(worker.gui_worker);
         assert!(worker.lite);
+    }
+
+    #[test]
+    fn cli_parses_status_line_subcommand_with_port() {
+        let parsed =
+            Cli::try_parse_from(["agents-station", "status-line", "--port", "4399"]).unwrap();
+        assert!(matches!(parsed.command, Some(Command::StatusLine)));
+        assert_eq!(parsed.port, 4399);
+
+        let default_port = Cli::try_parse_from(["agents-station", "status-line"]).unwrap();
+        assert!(matches!(default_port.command, Some(Command::StatusLine)));
+        assert_eq!(default_port.port, 4310);
     }
 }

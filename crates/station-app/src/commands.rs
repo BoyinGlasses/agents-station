@@ -1,10 +1,10 @@
 use crate::cli::{Cli, Command};
 use anyhow::Result;
 use station_core::config::resolve_data_dir;
-use station_core::hook_client::{HookArgs, run_hook_client};
+use station_core::hook_client::{HookArgs, run_hook_client, run_status_line};
 use station_core::hooks_cli::{
-    install_agent_hooks, install_windows_service, is_agent_hooked, uninstall_agent_hooks,
-    uninstall_windows_service_in, windows_startup_dir,
+    install_agent_hooks_with_data_dir, install_windows_service, is_agent_hooked,
+    uninstall_agent_hooks_with_data_dir, uninstall_windows_service_in, windows_startup_dir,
 };
 use station_core::http::{AppState, HarnessApi, start_http_server};
 use std::collections::HashMap;
@@ -124,8 +124,23 @@ async fn run_cli_async(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Res
             }
             Ok(())
         }
+        Some(Command::StatusLine) => {
+            let mut stdin_bytes = Vec::new();
+            let _ = std::io::stdin().read_to_end(&mut stdin_bytes);
+            let out = run_status_line(cli.port, &data_dir, &stdin_bytes).await;
+            if !out.is_empty() {
+                print!("{out}");
+            }
+            Ok(())
+        }
         Some(Command::Install { agent, settings }) => {
-            let rep = install_agent_hooks(agent, settings.as_deref(), &bin_path, cli.port)?;
+            let rep = install_agent_hooks_with_data_dir(
+                agent,
+                settings.as_deref(),
+                Some(&data_dir),
+                &bin_path,
+                cli.port,
+            )?;
             println!(
                 "{}: installed {} hook(s) in {}",
                 rep.agent,
@@ -135,7 +150,12 @@ async fn run_cli_async(cli: &Cli, harnesses: Option<Arc<dyn HarnessApi>>) -> Res
             Ok(())
         }
         Some(Command::Uninstall { agent, settings }) => {
-            let removed = uninstall_agent_hooks(agent, settings.as_deref(), cli.port)?;
+            let removed = uninstall_agent_hooks_with_data_dir(
+                agent,
+                settings.as_deref(),
+                Some(&data_dir),
+                cli.port,
+            )?;
             println!(
                 "{}: {}",
                 agent,
