@@ -13,6 +13,13 @@ const WM_TRAY_CALLBACK: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_AP
 const WM_APP_SHOW_GUI: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 #[cfg(windows)]
 const WM_APP_QUIT: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 3;
+#[cfg(windows)]
+const WM_APP_NOTIFY_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 4;
+
+#[cfg(windows)]
+const NOTIFY_REASON_CLOSED_TO_TRAY: usize = 0;
+#[cfg(windows)]
+const NOTIFY_REASON_MINIMIZED_TO_TRAY: usize = 1;
 
 #[cfg(windows)]
 const IDM_OPEN_3D: usize = 1001;
@@ -65,6 +72,8 @@ struct TrayController {
     nid: Option<windows_sys::Win32::UI::Shell::NOTIFYICONDATAW>,
     #[cfg(windows)]
     icon_installed: bool,
+    #[cfg(windows)]
+    notifications_dispatched: u32,
 }
 
 impl TrayController {
@@ -80,6 +89,8 @@ impl TrayController {
             nid: None,
             #[cfg(windows)]
             icon_installed: false,
+            #[cfg(windows)]
+            notifications_dispatched: 0,
         }
     }
 
@@ -203,7 +214,9 @@ fn focus_pid_window(target_pid: u32) -> bool {
 /// Builds a real 32x32 ARGB terracotta icon (`#D66440` badge with cream inner station dot)
 /// via `CreateDIBSection` + `CreateIconIndirect`, freeing temporary GDI bitmaps immediately.
 #[cfg(windows)]
-pub fn create_terracotta_icon(size: i32) -> Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
+pub fn create_terracotta_icon(
+    size: i32,
+) -> Option<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
     use windows_sys::Win32::Graphics::Gdi::{
         BI_BITFIELDS, BITMAPINFO, BITMAPV5HEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
         DeleteObject, GetDC, ReleaseDC,
@@ -336,6 +349,35 @@ unsafe fn show_tray_context_menu(hwnd: windows_sys::Win32::Foundation::HWND) {
 }
 
 #[cfg(windows)]
+unsafe fn emit_parent_tray_balloon(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    port: u16,
+    reason: usize,
+) -> bool {
+    use windows_sys::Win32::UI::Shell::{
+        NIF_INFO, NIIF_INFO, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
+    };
+
+    let body = if reason == NOTIFY_REASON_CLOSED_TO_TRAY {
+        format!("GUI closed · HTTP daemon active on 127.0.0.1:{port}")
+    } else {
+        format!("3D world unloaded · HTTP daemon active on 127.0.0.1:{port}")
+    };
+
+    unsafe {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = TRAY_ICON_UID;
+        nid.uFlags = NIF_INFO;
+        nid.dwInfoFlags = NIIF_INFO;
+        copy_wide(&mut nid.szInfoTitle, "Agents Station running in Tray");
+        copy_wide(&mut nid.szInfo, &body);
+        Shell_NotifyIconW(NIM_MODIFY, &nid) != 0
+    }
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn tray_wndproc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     msg: u32,
@@ -344,7 +386,7 @@ unsafe extern "system" fn tray_wndproc(
 ) -> windows_sys::Win32::Foundation::LRESULT {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, GWLP_USERDATA, GetWindowLongPtrW, PostQuitMessage, WM_COMMAND,
-        WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+        WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
     };
 
     unsafe {
@@ -359,6 +401,7 @@ unsafe extern "system" fn tray_wndproc(
                     return 0;
                 }
                 if mouse_msg == WM_RBUTTONUP || mouse_msg == WM_CONTEXTMENU {
+                    // Never hold `&mut TrayController` across modal `TrackPopupMenu`.
                     show_tray_context_menu(hwnd);
                     return 0;
                 }
@@ -391,19 +434,45 @@ unsafe extern "system" fn tray_wndproc(
                 }
                 return 0;
             }
+            WM_APP_NOTIFY_TRAY => {
+                if !ctrl_ptr.is_null() {
+                    let (port, installed) = {
+                        let ctrl = &mut *ctrl_ptr;
+                        ctrl.notifications_dispatched =
+                            ctrl.notifications_dispatched.saturating_add(1);
+                        (ctrl.cfg.port, ctrl.icon_installed)
+                    };
+                    if installed {
+                        let _ = emit_parent_tray_balloon(hwnd, port, wparam);
+                    }
+                }
+                return 0;
+            }
             WM_APP_QUIT => {
                 PostQuitMessage(0);
                 return 0;
             }
+            WM_DESTROY => {
+                // Only post quit if destroyed externally while still attached to a live controller.
+                if !ctrl_ptr.is_null() {
+                    PostQuitMessage(0);
+                }
+                return 0;
+            }
             _ => {
                 if !ctrl_ptr.is_null() {
-                    let ctrl = &mut *ctrl_ptr;
-                    if ctrl.taskbar_created_msg != 0 && msg == ctrl.taskbar_created_msg {
-                        if let Some(nid) = ctrl.nid.as_ref() {
-                            use windows_sys::Win32::UI::Shell::{NIM_ADD, Shell_NotifyIconW};
-                            if Shell_NotifyIconW(NIM_ADD, nid) != 0 {
-                                ctrl.icon_installed = true;
-                            }
+                    let maybe_nid = {
+                        let ctrl = &*ctrl_ptr;
+                        if ctrl.taskbar_created_msg != 0 && msg == ctrl.taskbar_created_msg {
+                            ctrl.nid
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(nid) = maybe_nid {
+                        use windows_sys::Win32::UI::Shell::{NIM_ADD, Shell_NotifyIconW};
+                        if Shell_NotifyIconW(NIM_ADD, &nid) != 0 {
+                            (*ctrl_ptr).icon_installed = true;
                         }
                         return 0;
                     }
@@ -432,6 +501,10 @@ pub fn has_shell_tray() -> bool {
 /// Persistent Win32 system tray daemon hosting a hidden message window
 /// (`"AgentsStationTrayHost"`), a real 32x32 ARGB terracotta `HICON`, right-click popup menu,
 /// and `--gui-worker` process lifecycle management.
+///
+/// Owns `TrayController` solely via a raw `Box::into_raw` pointer shared with `GWLP_USERDATA`
+/// under strict non-overlapping access rules (no `&mut TrayController` is ever held across
+/// `DispatchMessageW` or `TrackPopupMenu`).
 pub struct TrayDaemon {
     #[cfg(windows)]
     hwnd: windows_sys::Win32::Foundation::HWND,
@@ -440,7 +513,7 @@ pub struct TrayDaemon {
     #[cfg(windows)]
     nid: windows_sys::Win32::UI::Shell::NOTIFYICONDATAW,
     deleted: bool,
-    controller: Box<TrayController>,
+    controller: *mut TrayController,
 }
 
 impl TrayDaemon {
@@ -512,24 +585,32 @@ impl TrayDaemon {
             let taskbar_w = to_wide("TaskbarCreated");
             let taskbar_created_msg = unsafe { RegisterWindowMessageW(taskbar_w.as_ptr()) };
 
-            let mut controller = Box::new(TrayController::new(cfg));
+            let mut controller = TrayController::new(cfg);
             controller.taskbar_created_msg = taskbar_created_msg;
             controller.nid = Some(nid);
+            let controller_ptr = Box::into_raw(Box::new(controller));
+
+            // Install GWLP_USERDATA before Shell_NotifyIconW so any immediate callback sees it.
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, controller_ptr as isize);
+            }
 
             let icon_installed = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) != 0 };
             if !icon_installed && has_shell_tray() {
                 let err = unsafe { GetLastError() };
                 unsafe {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     DestroyWindow(hwnd);
                     DestroyIcon(hicon);
+                    drop(Box::from_raw(controller_ptr));
                 }
-                return Err(anyhow!("Shell_NotifyIconW(NIM_ADD) failed (Win32 err {err})"));
+                return Err(anyhow!(
+                    "Shell_NotifyIconW(NIM_ADD) failed (Win32 err {err})"
+                ));
             }
-            controller.icon_installed = icon_installed;
-
-            let ctrl_ptr: *mut TrayController = &mut *controller;
+            // SAFETY: single-threaded init on the owner thread; no message loop running yet.
             unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctrl_ptr as isize);
+                (*controller_ptr).icon_installed = icon_installed;
             }
 
             Ok(Self {
@@ -537,7 +618,7 @@ impl TrayDaemon {
                 hicon,
                 nid,
                 deleted: false,
-                controller,
+                controller: controller_ptr,
             })
         }
         #[cfg(not(windows))]
@@ -545,7 +626,7 @@ impl TrayDaemon {
             let _ = port;
             Ok(Self {
                 deleted: false,
-                controller: Box::new(TrayController::new(cfg)),
+                controller: Box::into_raw(Box::new(TrayController::new(cfg))),
             })
         }
     }
@@ -586,7 +667,11 @@ impl TrayDaemon {
     pub fn icon_installed(&self) -> bool {
         #[cfg(windows)]
         {
-            self.controller.icon_installed && !self.deleted
+            if self.deleted || self.controller.is_null() {
+                return false;
+            }
+            // SAFETY: non-overlapping read on owner thread outside DispatchMessageW.
+            unsafe { (*self.controller).icon_installed }
         }
         #[cfg(not(windows))]
         {
@@ -594,21 +679,39 @@ impl TrayDaemon {
         }
     }
 
+    #[cfg(all(test, windows))]
+    pub fn notifications_dispatched(&self) -> u32 {
+        if self.deleted || self.controller.is_null() {
+            return 0;
+        }
+        // SAFETY: non-overlapping read on owner thread outside DispatchMessageW.
+        unsafe { (*self.controller).notifications_dispatched }
+    }
+
     pub fn was_deleted(&self) -> bool {
         self.deleted
     }
 
-    pub fn spawn_initial_worker(&mut self) {
-        let lite = self.controller.cfg.default_lite;
-        self.controller.spawn_or_focus_worker(Some(lite));
+    pub fn spawn_initial_worker(&self) {
+        if self.deleted || self.controller.is_null() {
+            return;
+        }
+        // SAFETY: called on owner thread before entering `run_message_loop`.
+        unsafe {
+            let ctrl = &mut *self.controller;
+            let lite = ctrl.cfg.default_lite;
+            ctrl.spawn_or_focus_worker(Some(lite));
+        }
     }
 
-    pub fn run_message_loop(&mut self) {
+    pub fn run_message_loop(&self) {
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 DispatchMessageW, GetMessageW, MSG, TranslateMessage,
             };
+            // Note: `&self` does not borrow `*self.controller`, so `tray_wndproc` can
+            // exclusively access `GWLP_USERDATA` inside each dispatched message with zero UB.
             unsafe {
                 let mut msg: MSG = std::mem::zeroed();
                 while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -624,7 +727,6 @@ impl TrayDaemon {
             return;
         }
         self.deleted = true;
-        self.controller.stop_worker();
 
         #[cfg(windows)]
         {
@@ -632,12 +734,20 @@ impl TrayDaemon {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
                 DestroyIcon, DestroyWindow, GWLP_USERDATA, SetWindowLongPtrW,
             };
+
+            let was_installed = if !self.controller.is_null() {
+                // SAFETY: owner thread after message loop exit.
+                unsafe { (*self.controller).icon_installed }
+            } else {
+                false
+            };
+
             unsafe {
-                if self.controller.icon_installed {
+                if was_installed {
                     let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
-                    self.controller.icon_installed = false;
                 }
                 if !self.hwnd.is_null() {
+                    // Detach GWLP_USERDATA BEFORE DestroyWindow so wndproc cannot access controller.
                     SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
                     DestroyWindow(self.hwnd);
                     self.hwnd = std::ptr::null_mut();
@@ -647,6 +757,14 @@ impl TrayDaemon {
                     self.hicon = std::ptr::null_mut();
                 }
             }
+        }
+
+        let ptr = std::mem::replace(&mut self.controller, std::ptr::null_mut());
+        if !ptr.is_null() {
+            // SAFETY: GWLP_USERDATA has been cleared and hwnd destroyed; exclusive ownership reclaimed.
+            let mut ctrl = unsafe { Box::from_raw(ptr) };
+            ctrl.stop_worker();
+            drop(ctrl);
         }
     }
 }
@@ -696,35 +814,37 @@ pub fn request_parent_quit() -> bool {
     }
 }
 
-/// Sends a balloon toast via the existing persistent tray icon when running under `TrayDaemon`.
-#[cfg(windows)]
-pub fn show_native_tray_toast(title: &str, body: &str) -> bool {
-    use windows_sys::Win32::UI::Shell::{
-        NIF_INFO, NIIF_INFO, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
-    };
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
-
-    let class_w = to_wide(TRAY_WINDOW_CLASS);
-    unsafe {
-        let hwnd = FindWindowW(class_w.as_ptr(), std::ptr::null());
-        if hwnd.is_null() {
-            return false;
+/// Asks the parent `"AgentsStationTrayHost"` process to emit a tray balloon notification
+/// using its own `HWND` and configured HTTP port (cross-process `Shell_NotifyIconW` is rejected by Win32).
+pub fn notify_parent_in_tray(closed_window: bool) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+        let class_w = to_wide(TRAY_WINDOW_CLASS);
+        let reason = if closed_window {
+            NOTIFY_REASON_CLOSED_TO_TRAY
+        } else {
+            NOTIFY_REASON_MINIMIZED_TO_TRAY
+        };
+        unsafe {
+            let hwnd = FindWindowW(class_w.as_ptr(), std::ptr::null());
+            if hwnd.is_null() {
+                return false;
+            }
+            PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, reason, 0) != 0
         }
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = TRAY_ICON_UID;
-        nid.uFlags = NIF_INFO;
-        nid.dwInfoFlags = NIIF_INFO;
-        copy_wide(&mut nid.szInfoTitle, title);
-        copy_wide(&mut nid.szInfo, body);
-        Shell_NotifyIconW(NIM_MODIFY, &nid) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = closed_window;
+        false
     }
 }
 
-#[cfg(not(windows))]
+/// Delegates to `notify_parent_in_tray` so balloon toasts are always executed by the parent
+/// `TrayDaemon` that owns the persistent `HWND` and tray icon.
 pub fn show_native_tray_toast(_title: &str, _body: &str) -> bool {
-    false
+    notify_parent_in_tray(false)
 }
 
 #[cfg(test)]
@@ -751,7 +871,11 @@ mod tests {
 
         let daemon = TrayDaemon::new(4310, TrayWorkerConfig::default()).unwrap();
         assert_ne!(daemon.hwnd_raw(), 0, "expected valid hidden Win32 message HWND");
-        assert_ne!(daemon.hicon_raw(), 0, "expected valid Win32 HICON from CreateIconIndirect");
+        assert_ne!(
+            daemon.hicon_raw(),
+            0,
+            "expected valid Win32 HICON from CreateIconIndirect"
+        );
         assert_eq!(daemon.nid_flags(), NIF_ICON | NIF_MESSAGE | NIF_TIP);
         assert!(!daemon.was_deleted());
 
@@ -763,7 +887,10 @@ mod tests {
                 cls_buf.len() as i32,
             )
         } as usize;
-        assert_eq!(String::from_utf16_lossy(&cls_buf[..cls_len]), TRAY_WINDOW_CLASS);
+        assert_eq!(
+            String::from_utf16_lossy(&cls_buf[..cls_len]),
+            TRAY_WINDOW_CLASS
+        );
 
         let mut info: ICONINFO = unsafe { std::mem::zeroed() };
         let ok = unsafe { GetIconInfo(daemon.hicon_raw() as HICON, &mut info) };
@@ -783,5 +910,49 @@ mod tests {
                 "Shell_NotifyIconW(NIM_ADD) must stay installed without immediate NIM_DELETE"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tray_wndproc_handles_notify_tray_and_external_wm_destroy_cleanly() {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW, TranslateMessage,
+            WM_CLOSE, WM_QUIT,
+        };
+
+        let mut cfg = TrayWorkerConfig::default();
+        cfg.port = 4399;
+        let daemon = TrayDaemon::new(4399, cfg).unwrap();
+        let hwnd = daemon.hwnd_raw() as HWND;
+
+        // Post parent-owned tray notification (as --gui-worker does) and pump message.
+        assert!(unsafe { PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, NOTIFY_REASON_CLOSED_TO_TRAY, 0) != 0 });
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        assert_eq!(daemon.notifications_dispatched(), 1);
+
+        // Simulate external WM_CLOSE -> DefWindowProcW -> DestroyWindow -> WM_DESTROY -> PostQuitMessage(0).
+        assert!(unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0 });
+        let mut saw_quit = false;
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            for _ in 0..8 {
+                if PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    if msg.message == WM_QUIT {
+                        saw_quit = true;
+                        break;
+                    }
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+        }
+        assert!(saw_quit, "external WM_CLOSE/WM_DESTROY must post WM_QUIT to exit GetMessageW");
     }
 }
