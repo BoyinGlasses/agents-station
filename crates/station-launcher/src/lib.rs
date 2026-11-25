@@ -133,6 +133,21 @@ impl<L: WindowLauncher> HarnessService<L> {
             return Ok(LaunchOutcome::NotInstalled);
         };
 
+        // Re-validate persisted custom targets before any hook install, focus, or ShellExecuteW call.
+        if entry.custom {
+            match target {
+                LaunchTarget::Exe(p) | LaunchTarget::Shortcut(p) => {
+                    let raw = p
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("invalid custom executable path"))?;
+                    validate_custom_executable_path(raw)?;
+                }
+                LaunchTarget::MsixAumid { .. } => {
+                    bail!("custom MSIX AUMID targets are not allowed");
+                }
+            }
+        }
+
         // Auto-hook preflight before focusing or launching the native GUI desktop app.
         if let Some(agent) = &entry.hook_agent {
             let ov = self.settings_overrides.get(agent).map(PathBuf::as_path);
@@ -241,7 +256,11 @@ pub fn validate_custom_executable_path(raw: &str) -> Result<(PathBuf, Vec<String
     if trimmed.chars().any(char::is_control) {
         bail!("executable path contains control characters");
     }
-    if trimmed.starts_with("\\\\") || trimmed.starts_with("//") {
+    if trimmed.starts_with("\\\\")
+        || trimmed.starts_with("//")
+        || trimmed.starts_with("\\/")
+        || trimmed.starts_with("/\\")
+    {
         bail!("UNC and device paths are not allowed: {trimmed}");
     }
     if trimmed.contains("://") {
@@ -263,11 +282,18 @@ pub fn validate_custom_executable_path(raw: &str) -> Result<(PathBuf, Vec<String
             bail!("executable path must be absolute: {trimmed}");
         }
     }
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        bail!("parent directory traversal is not allowed: {trimmed}");
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                bail!("parent directory traversal is not allowed: {trimmed}");
+            }
+            std::path::Component::Normal(seg) => {
+                if seg.to_string_lossy().contains(':') {
+                    bail!("alternate data streams are not allowed: {trimmed}");
+                }
+            }
+            _ => {}
+        }
     }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     if !ext.eq_ignore_ascii_case("exe") && !ext.eq_ignore_ascii_case("lnk") {
@@ -484,5 +510,81 @@ mod tests {
             validate_custom_executable_path(temp_lnk.to_str().unwrap()).unwrap();
         assert_eq!(p_lnk, temp_lnk);
         assert_eq!(procs_lnk, vec!["shortcut.lnk".to_owned()]);
+    }
+
+    #[test]
+    fn rejects_ntfs_ads_mixed_slash_and_persisted_invalid_custom_targets_in_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let base_file = dir.path().join("note.txt");
+        std::fs::write(&base_file, b"hello").unwrap();
+
+        // Create a real NTFS Alternate Data Stream if supported so metadata().is_file() would succeed
+        let ads_str = format!("{}:evil.exe", base_file.to_string_lossy());
+        let _ = std::fs::write(&ads_str, b"MZ");
+
+        for bad in [
+            ads_str.as_str(),
+            "\\/evil\\share\\p.exe",
+            "/\\evil\\share\\p.exe",
+        ] {
+            assert!(
+                validate_custom_executable_path(bad).is_err(),
+                "expected Err for {bad}"
+            );
+        }
+
+        // Persist a tampered harnesses.json directly (bypassing mutate_custom) and verify open() blocks it
+        let tampered_json = json!({
+            "custom": [
+                {
+                    "id": "tampered_unc",
+                    "label": "Tampered UNC",
+                    "hook_agent": null,
+                    "target": { "kind": "exe", "value": "\\\\evil\\share\\p.exe" },
+                    "custom": true,
+                    "process_names": ["p.exe"]
+                },
+                {
+                    "id": "tampered_ads",
+                    "label": "Tampered ADS",
+                    "hook_agent": null,
+                    "target": { "kind": "exe", "value": ads_str },
+                    "custom": true,
+                    "process_names": ["evil.exe"]
+                }
+            ]
+        });
+        std::fs::write(
+            dir.path().join("harnesses.json"),
+            serde_json::to_string_pretty(&tampered_json).unwrap(),
+        )
+        .unwrap();
+
+        let mock = Arc::new(MockLauncher::default());
+        struct ArcL(Arc<MockLauncher>);
+        impl WindowLauncher for ArcL {
+            fn find_running_window(&self, p: &[String]) -> Option<(u32, isize)> {
+                self.0.find_running_window(p)
+            }
+            fn focus_window(&self, hwnd: isize) -> Result<()> {
+                self.0.focus_window(hwnd)
+            }
+            fn launch_target(&self, t: &LaunchTarget) -> Result<()> {
+                self.0.launch_target(t)
+            }
+        }
+
+        let svc = HarnessService::with_components(
+            HarnessCatalog::load_or_default(dir.path()),
+            vec![],
+            ArcL(mock.clone()),
+            PathBuf::from("D:/app/agents-station.exe"),
+            4310,
+            HashMap::new(),
+        );
+
+        assert!(svc.open("tampered_unc").is_err());
+        assert!(svc.open("tampered_ads").is_err());
+        assert!(mock.launched.lock().unwrap().is_empty());
     }
 }
