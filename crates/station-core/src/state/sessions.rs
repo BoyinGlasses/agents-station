@@ -259,7 +259,8 @@ impl OfficeState {
                 if is_edit_tool(tname) {
                     let f = file_of(&ev.tool_input, &scwd);
                     if !f.is_empty() {
-                        self.undo.before(&ev.session_id, Path::new(&f));
+                        let cwd_opt = (!scwd.is_empty()).then(|| Path::new(scwd.as_str()));
+                        self.undo.before(&ev.session_id, Path::new(&f), cwd_opt);
                     }
                 }
                 let k = summary.kind.clone();

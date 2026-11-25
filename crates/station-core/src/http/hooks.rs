@@ -86,11 +86,24 @@ pub async fn post_hook_loop(
     if let Some(sid) = body.get("session_id").and_then(Value::as_str) {
         let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
         let input = body.get("tool_input").unwrap_or(&Value::Null);
-        let cwd = body.get("cwd").and_then(Value::as_str).unwrap_or("");
+        let cwd = body
+            .get("cwd")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                office
+                    .sessions
+                    .get(sid)
+                    .map(|s| s.cwd.clone())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_default();
         if is_edit_tool(tool) {
-            let f = file_of(input, cwd);
+            let f = file_of(input, &cwd);
             if !f.is_empty() {
-                office.undo.before(sid, Path::new(&f));
+                let cwd_opt = (!cwd.is_empty()).then(|| Path::new(cwd.as_str()));
+                office.undo.before(sid, Path::new(&f), cwd_opt);
                 if let Some(warn) = office.overlap.before(sid, &f, ts) {
                     office.overlap.note(
                         sid,
