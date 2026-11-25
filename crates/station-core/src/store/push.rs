@@ -19,6 +19,8 @@ use std::time::Duration;
 const DEFAULT_VAPID_SUBJECT: &str = "mailto:agents-station@users.noreply.github.com";
 const VAPID_TTL_SECS: u64 = 12 * 3600;
 const RECORD_SIZE: u32 = 4096;
+/// RFC 8188 single-record plaintext cap: `rs - 1 (0x02 delimiter) - 16 (AES-GCM tag) = 4079`.
+const MAX_SINGLE_RECORD_PLAINTEXT: usize = (RECORD_SIZE as usize) - 17;
 const PUSH_TIMEOUT_SECS: u64 = 10;
 
 /// Strict SSRF guard for Web Push endpoints:
@@ -159,6 +161,13 @@ pub fn encrypt_aes128gcm_with_ephemeral(
     salt: [u8; 16],
     as_secret: &SecretKey,
 ) -> Result<Vec<u8>> {
+    if plaintext.len() > MAX_SINGLE_RECORD_PLAINTEXT {
+        return Err(anyhow!(
+            "plaintext length {} exceeds RFC 8188 single-record maximum of {} bytes",
+            plaintext.len(),
+            MAX_SINGLE_RECORD_PLAINTEXT
+        ));
+    }
     let ua_bytes = URL_SAFE_NO_PAD
         .decode(&keys.p256dh)
         .map_err(|_| anyhow!("invalid p256dh base64url"))?;
@@ -591,6 +600,25 @@ mod tests {
         assert!(
             vk.verify(signing_input.as_bytes(), &sig).is_ok(),
             "ES256 VAPID JWT must verify with VAPID public key"
+        );
+    }
+
+    #[test]
+    fn rfc8291_enforces_single_record_payload_limit() {
+        let (_, _, keys) = test_subscriber_keys();
+
+        // Exact RFC 8188 single-record boundary: 4079 bytes (+ 1 delimiter + 16 tag == 4096) succeeds
+        let max_plain = vec![b'a'; MAX_SINGLE_RECORD_PLAINTEXT];
+        assert_eq!(max_plain.len(), 4079);
+        let wire = encrypt_aes128gcm(&keys, &max_plain).expect("4079-byte payload must succeed");
+        assert_eq!(wire.len(), 86 + RECORD_SIZE as usize);
+
+        // 4080 bytes exceeds single-record rs=4096 and must return Err
+        let over_plain = vec![b'a'; MAX_SINGLE_RECORD_PLAINTEXT + 1];
+        assert_eq!(over_plain.len(), 4080);
+        assert!(
+            encrypt_aes128gcm(&keys, &over_plain).is_err(),
+            "4080-byte payload must be rejected"
         );
     }
 }
