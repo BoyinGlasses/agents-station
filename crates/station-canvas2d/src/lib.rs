@@ -1,9 +1,11 @@
 pub mod brands;
 pub mod canvas;
+pub mod office_surfaces;
 pub mod text;
 
 pub use brands::BrandRegistry;
 pub use canvas::{Canvas2d, RgbaSurface, hex, hex_rgba};
+pub use office_surfaces::{ALL_SCREEN_KINDS, ScreenKind, TvStatsInput};
 pub use text::{FontEngine, TextAlign};
 
 pub fn canvas2d_ready() -> bool {

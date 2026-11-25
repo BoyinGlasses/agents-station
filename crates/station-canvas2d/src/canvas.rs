@@ -91,15 +91,26 @@ impl Canvas2d {
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) {
-        if w <= 0.0 || h <= 0.0 {
+        if w <= 0.0 || h <= 0.0 || !x.is_finite() || !y.is_finite() || !w.is_finite() || !h.is_finite() {
             return;
         }
-        let Some(rect) = Rect::from_xywh(x, y, w, h) else {
+        let max_w = self.pixmap.width() as f32;
+        let max_h = self.pixmap.height() as f32;
+        let x0 = x.clamp(0.0, max_w);
+        let y0 = y.clamp(0.0, max_h);
+        let x1 = (x + w).clamp(0.0, max_w);
+        let y1 = (y + h).clamp(0.0, max_h);
+        let cw = x1 - x0;
+        let ch = y1 - y0;
+        if cw < 0.01 || ch < 0.01 {
+            return;
+        }
+        let Some(rect) = Rect::from_xywh(x0, y0, cw, ch) else {
             return;
         };
         let mut paint = Paint::default();
         paint.set_color(to_color(color));
-        paint.anti_alias = true;
+        paint.anti_alias = false;
         self.pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
 
