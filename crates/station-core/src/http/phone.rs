@@ -13,6 +13,59 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn render_phone_html(state: &AppState) -> String {
+    let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sessions: Vec<_> = office.sessions.values().collect();
+    sessions.sort_by(|a, b| a.desk.cmp(&b.desk).then_with(|| a.id.cmp(&b.id)));
+    let mut perms: Vec<_> = office.pending_perms.values().collect();
+    perms.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+
+    let mut cards = String::new();
+    for s in sessions {
+        cards.push_str("<div class=\"card\"><b>");
+        cards.push_str(&escape_html(&s.name));
+        cards.push_str("</b> · ");
+        cards.push_str(&escape_html(&s.status));
+        if let Some(prompt) = s.last_prompt.as_deref().filter(|p| !p.is_empty()) {
+            cards.push_str("<div class=\"prompt\">");
+            cards.push_str(&escape_html(prompt));
+            cards.push_str("</div>");
+        }
+        cards.push_str("</div>");
+    }
+    for p in perms {
+        cards.push_str("<div class=\"card perm\"><b>");
+        cards.push_str(&escape_html(&p.name));
+        cards.push_str("</b> · ");
+        cards.push_str(&escape_html(&p.label));
+        if !p.detail.is_empty() {
+            cards.push_str("<div class=\"detail\">");
+            cards.push_str(&escape_html(&p.detail));
+            cards.push_str("</div>");
+        }
+        cards.push_str("</div>");
+    }
+    if cards.is_empty() {
+        cards.push_str("<div class=\"card\">No active sessions</div>");
+    }
+    PHONE_HTML_TEMPLATE.replace("<!--APP-->", &cards)
+}
+
 pub async fn get_root(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -29,7 +82,7 @@ pub async fn get_root(
     ) {
         return Redirect::to("/pin").into_response();
     }
-    Html(PHONE_HTML).into_response()
+    Html(render_phone_html(&state)).into_response()
 }
 
 pub async fn get_phone(
@@ -48,7 +101,7 @@ pub async fn get_phone(
     ) {
         return Redirect::to("/pin").into_response();
     }
-    Html(PHONE_HTML).into_response()
+    Html(render_phone_html(&state)).into_response()
 }
 
 pub async fn get_pin() -> Html<&'static str> {
@@ -146,18 +199,28 @@ button{background:#d66440;border:none;font-weight:600;cursor:pointer}</style></h
 <script>document.getElementById('f').onsubmit=async e=>{e.preventDefault();const r=await fetch('/pin',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({pin:p.value,keep:k.checked})});if(r.ok)location.href='/phone';else alert('Wrong PIN');};</script>
 </body></html>"#;
 
-const PHONE_HTML: &str = r#"<!doctype html>
+const PHONE_HTML_TEMPLATE: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="manifest" href="/manifest.webmanifest"><title>Agents Station Remote</title>
 <style>body{background:#14161e;color:#f5f0e8;font-family:system-ui,sans-serif;margin:0;padding:16px}
-.card{background:#1e222e;border:1px solid #2f3547;border-radius:10px;padding:12px;margin-bottom:10px}</style></head>
-<body><h2>Agents Station · Remote</h2><div id="app">Loading…</div>
-<script>const es=new EventSource('/stream');es.onmessage=e=>{const d=JSON.parse(e.data);if(d.k==='snap'){app.innerHTML=(d.sessions||[]).map(s=>`<div class="card"><b>${s.name}</b> · ${s.status}</div>`).join('')||'<div class="card">No active sessions</div>';}};</script>
+.card{background:#1e222e;border:1px solid #2f3547;border-radius:10px;padding:12px;margin-bottom:10px}
+.prompt,.detail{opacity:.8;margin-top:4px;font-size:13px;word-break:break-word}</style></head>
+<body><h2>Agents Station · Remote</h2><div id="app"><!--APP--></div>
+<script>const app=document.getElementById('app');const es=new EventSource('/stream');es.onmessage=e=>{const d=JSON.parse(e.data);if(d.k==='snap'){const nodes=[];for(const s of (d.sessions||[])){const c=document.createElement('div');c.className='card';const b=document.createElement('b');b.textContent=String(s.name||'');c.appendChild(b);c.appendChild(document.createTextNode(' \u00b7 '+String(s.status||'')));if(s.last_prompt){const p=document.createElement('div');p.className='prompt';p.textContent=String(s.last_prompt);c.appendChild(p);}nodes.push(c);}for(const p of (d.perms||[])){const c=document.createElement('div');c.className='card perm';const b=document.createElement('b');b.textContent=String(p.name||'');c.appendChild(b);c.appendChild(document.createTextNode(' \u00b7 '+String(p.label||'')));if(p.detail){const det=document.createElement('div');det.className='detail';det.textContent=String(p.detail);c.appendChild(det);}nodes.push(c);}if(!nodes.length){const empty=document.createElement('div');empty.className='card';empty.textContent='No active sessions';nodes.push(empty);}app.replaceChildren(...nodes);}};</script>
 </body></html>"#;
 
 #[cfg(test)]
 mod tests {
+    use super::escape_html;
     use crate::http::{AppState, build_router};
+
+    #[test]
+    fn escape_html_escapes_all_html_metacharacters() {
+        assert_eq!(
+            escape_html(r#"<img src="x" onerror='alert(1)&'>"#),
+            "&lt;img src=&quot;x&quot; onerror=&#39;alert(1)&amp;&#39;&gt;"
+        );
+    }
     use axum::body::Body;
     use axum::extract::ConnectInfo;
     use axum::http::{Request, StatusCode};
@@ -281,5 +344,70 @@ mod tests {
         sixth.extensions_mut().insert(ConnectInfo(loopback));
         let resp = app.oneshot(sixth).await.unwrap();
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn phone_html_escapes_injected_markup_and_avoids_inner_html() {
+        use crate::state::sessions::{PendingPerm, SessionRecord};
+        use axum::body::to_bytes;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        {
+            let mut office = state.office.lock().unwrap();
+            office.sessions.insert(
+                "s1".into(),
+                SessionRecord {
+                    id: "s1".into(),
+                    agent: "claude".into(),
+                    name: "<img src=x onerror=alert(1)>".into(),
+                    cwd: "D:/repo".into(),
+                    status: "work".into(),
+                    desk: 0,
+                    started_at: 1,
+                    updated_at: 1,
+                    last_prompt: Some("<script>alert(2)</script>".into()),
+                    last: None,
+                    model: None,
+                    cache: None,
+                    tool_calls: 0,
+                    edits: 0,
+                    fails: 0,
+                },
+            );
+            office.pending_perms.insert(
+                "p1".into(),
+                PendingPerm {
+                    id: "p1".into(),
+                    sess: "s1".into(),
+                    name: "proj".into(),
+                    kind: "perm".into(),
+                    tool_type: "bash".into(),
+                    label: "<b>bash</b>".into(),
+                    detail: "<img src=x onerror=alert(3)>".into(),
+                    danger: None,
+                    created_at: 1,
+                },
+            );
+        }
+
+        let app = build_router(state);
+        let req = Request::builder()
+            .uri("/phone")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let html = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(!html.contains("<img src=x onerror=alert(1)>"), "raw img XSS in /phone");
+        assert!(!html.contains("<script>alert(2)</script>"), "raw script XSS in /phone");
+        assert!(!html.contains("<img src=x onerror=alert(3)>"), "raw perm XSS in /phone");
+        assert!(!html.contains("innerHTML"), "unsafe innerHTML sink in /phone JS");
+        assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
+        assert!(html.contains("&lt;script&gt;alert(2)&lt;/script&gt;"));
+        assert!(html.contains("textContent"));
     }
 }
