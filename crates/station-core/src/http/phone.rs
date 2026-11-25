@@ -449,6 +449,8 @@ textarea{min-height:84px;resize:vertical}
     root.replaceChildren(...nodes);
   }
 
+  const CHAT_REACTIONS = ["❤️", "👍", "😆", "😮", "😭", "😡"];
+
   function renderChat() {
     const root = document.getElementById('chat-list');
     const nodes = [];
@@ -460,7 +462,7 @@ textarea{min-height:84px;resize:vertical}
       if (m.text) card.appendChild(el('div', 'prompt', m.text));
       const reacts = el('div', 'reacts');
       const counts = m.reacts || {};
-      for (const emoji of ['\u{1F44D}', '\u2764\uFE0F', '\u{1F525}']) {
+      for (const emoji of CHAT_REACTIONS) {
         const who = Array.isArray(counts[emoji]) ? counts[emoji].length : 0;
         const b = el('button', 'react', who ? emoji + ' ' + who : emoji);
         b.type = 'button';
@@ -874,6 +876,31 @@ mod tests {
         assert!(html.contains("&lt;img src=x onerror=alert(1)&gt;"));
         assert!(html.contains("&lt;script&gt;alert(2)&lt;/script&gt;"));
         assert!(html.contains("textContent"));
+    }
+
+    #[test]
+    fn phone_chat_reactions_are_all_accepted_by_chat_engine() {
+        use crate::shared::chat_engine::ChatEngine;
+
+        let marker = "const CHAT_REACTIONS = ";
+        let start = super::PHONE_HTML_TEMPLATE
+            .find(marker)
+            .expect("PHONE_HTML_TEMPLATE must define CHAT_REACTIONS")
+            + marker.len();
+        let rest = &super::PHONE_HTML_TEMPLATE[start..];
+        let end = rest.find(';').expect("CHAT_REACTIONS declaration must end with ';'");
+        let reactions: Vec<String> =
+            serde_json::from_str(&rest[..end]).expect("CHAT_REACTIONS must be valid JSON array");
+        assert!(!reactions.is_empty(), "CHAT_REACTIONS must not be empty");
+
+        let mut engine = ChatEngine::from_persisted(None, 1000);
+        let msg = engine.say("me", "Boss", "hello", 1000, false, None);
+        for emoji in &reactions {
+            assert!(
+                engine.react(&msg.id, "me", emoji),
+                "ChatEngine::react rejected /phone reaction {emoji:?}"
+            );
+        }
     }
 
     #[tokio::test]
