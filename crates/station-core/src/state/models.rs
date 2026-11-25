@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 pub const MAIN_MODELS: [&str; 3] = ["opus", "sonnet", ""];
 pub const SUB_MODELS: [&str; 4] = ["", "sonnet", "haiku", "opus"];
+pub const DEFAULT_SPLIT_NOTE: &str = "When a task has independent parts, delegate them to subagents in parallel so the main session stays focused.";
 const SUB_KEY: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 const FORCE_KEY: &str = "CLAUDE_CODE_SUBAGENT_MODEL_FORCE";
 const OPEN_MARK: &str = "<!-- my-office:subagents -->";

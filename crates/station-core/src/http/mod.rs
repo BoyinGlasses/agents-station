@@ -87,8 +87,16 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(data_dir: PathBuf, harnesses: Option<Arc<dyn HarnessApi>>) -> Result<Self> {
-        let now = now_ms();
         let claude_dir = resolve_claude_dir(std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref());
+        Self::new_with_claude_dir(data_dir, claude_dir, harnesses)
+    }
+
+    pub fn new_with_claude_dir(
+        data_dir: PathBuf,
+        claude_dir: PathBuf,
+        harnesses: Option<Arc<dyn HarnessApi>>,
+    ) -> Result<Self> {
+        let now = now_ms();
         let auth = AuthStore::load_or_init(&data_dir)?;
         let prefs = PrefsStore::load(&data_dir);
         let office = OfficeState::new(data_dir.clone());
