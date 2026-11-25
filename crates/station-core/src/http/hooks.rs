@@ -329,8 +329,8 @@ async fn await_hold(
     }
 }
 
-fn perm_detail(tool_input: &Value) -> String {
-    let raw = tool_input
+fn raw_perm_detail(tool_input: &Value) -> String {
+    tool_input
         .get("command")
         .or_else(|| tool_input.get("file_path"))
         .or_else(|| tool_input.get("url"))
@@ -339,8 +339,11 @@ fn perm_detail(tool_input: &Value) -> String {
         .or_else(|| tool_input.get("prompt"))
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .unwrap_or_else(|| tool_input.to_string());
-    clip(&redact(&raw), 400)
+        .unwrap_or_else(|| tool_input.to_string())
+}
+
+fn perm_detail_clipped(raw: &str) -> String {
+    clip(&redact(raw), 400)
 }
 
 fn is_no_verdict_reason(reason: &str) -> bool {
@@ -371,8 +374,9 @@ pub async fn post_hook_permission(
     let ts = now_ms();
     let tool_input = body.get("tool_input").unwrap_or(&Value::Null);
     let summary = classify_tool(tool_name, tool_input);
-    let detail = perm_detail(tool_input);
-    let dk = danger_key(Some("perm"), Some(&summary.kind), Some(&detail)).map(str::to_owned);
+    let raw_detail = raw_perm_detail(tool_input);
+    let dk = danger_key(Some("perm"), Some(&summary.kind), Some(&raw_detail)).map(str::to_owned);
+    let detail = perm_detail_clipped(&raw_detail);
     let cwd_name = body
         .get("cwd")
         .and_then(Value::as_str)
@@ -535,7 +539,9 @@ pub async fn post_hook_denied(
     let tool_name = body.get("tool_name").and_then(Value::as_str).unwrap_or("tool");
     let tool_input = body.get("tool_input").unwrap_or(&Value::Null);
     let summary = classify_tool(tool_name, tool_input);
-    let detail = perm_detail(tool_input);
+    let raw_detail = raw_perm_detail(tool_input);
+    let dk = danger_key(Some("perm"), Some(&summary.kind), Some(&raw_detail)).map(str::to_owned);
+    let detail = perm_detail_clipped(&raw_detail);
 
     let hold_rx = {
         let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
@@ -557,7 +563,7 @@ pub async fn post_hook_denied(
                 tool_type: summary.kind,
                 label: summary.label,
                 detail,
-                danger: None,
+                danger: dk,
                 created_at: ts,
             };
             office.register_hold(perm, tx);
@@ -1107,5 +1113,176 @@ mod tests {
         let d2_json = read_json_body(d2_resp).await;
         assert_eq!(d2_json, json!({}));
         assert!(state.office.lock().unwrap().pending_perms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_hook_permission_detects_danger_past_400_char_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        state.office.lock().unwrap().presence_focused = true;
+        let app = build_router(state.clone());
+
+        let long_cmd = format!("{}rm -rf /", "echo hello world; ".repeat(30));
+        let payload = json!({
+            "session_id": "s-long-danger",
+            "tool_name": "Bash",
+            "tool_input": { "command": long_cmd }
+        });
+
+        let app_hook = app.clone();
+        let hook_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/permission")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            app_hook.oneshot(req).await.unwrap()
+        });
+
+        let perm_id = wait_for_pending_id(&state).await;
+        {
+            let office = state.office.lock().unwrap();
+            let perm = office.pending_perms.get(&perm_id).unwrap();
+            assert!(
+                perm.danger.is_some(),
+                "danger_key must run on full unclipped command before 400-char truncation"
+            );
+            assert!(perm.detail.chars().count() <= 400);
+        }
+
+        // Resolve so background hook finishes immediately.
+        let _ = state
+            .office
+            .lock()
+            .unwrap()
+            .resolve_hold(&perm_id, crate::state::sessions::PermDecision::Deny {
+                reason: "blocked".to_owned(),
+            });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), hook_task).await;
+    }
+
+    #[tokio::test]
+    async fn post_denied_enforces_denied_kind_and_blocks_remote_dangerous_retry() {
+        use crate::auth::COOKIE_NAME;
+        use axum::extract::ConnectInfo;
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        state.office.lock().unwrap().presence_focused = true;
+        state
+            .prefs
+            .lock()
+            .unwrap()
+            .set("phoneApprove", Some(serde_json::Value::Bool(true)))
+            .unwrap();
+        let cookie = format!("{COOKIE_NAME}={}", state.auth.sign_cookie(false));
+        let app = build_router(state.clone());
+
+        // 1. Spawn a dangerous /hook/denied hold (rm -rf after 500-char prefix too).
+        let deny_payload = json!({
+            "session_id": "s-deny-danger",
+            "tool_name": "Bash",
+            "reason": "Blocked destructive command",
+            "tool_input": { "command": format!("{}rm -rf /tmp/foo", "echo safe step; ".repeat(30)) }
+        });
+        let app_d = app.clone();
+        let deny_task = tokio::spawn(async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/hook/denied")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .header("x-office-wait", "5")
+                .body(Body::from(deny_payload.to_string()))
+                .unwrap();
+            app_d.oneshot(req).await.unwrap()
+        });
+        let deny_id = wait_for_pending_id(&state).await;
+        assert!(
+            state
+                .office
+                .lock()
+                .unwrap()
+                .pending_perms
+                .get(&deny_id)
+                .unwrap()
+                .danger
+                .is_some(),
+            "destructive /hook/denied command must populate PendingPerm.danger"
+        );
+
+        // 2. Also register a normal "perm" hold to test cross-kind isolation.
+        let (perm_tx, mut perm_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut office = state.office.lock().unwrap();
+            office.register_hold(
+                crate::state::sessions::PendingPerm {
+                    id: "perm-cross".to_owned(),
+                    sess: "s-cross".to_owned(),
+                    name: "proj".to_owned(),
+                    kind: "perm".to_owned(),
+                    tool_type: "bash".to_owned(),
+                    label: "echo".to_owned(),
+                    detail: "echo hi".to_owned(),
+                    danger: None,
+                    created_at: 1,
+                },
+                perm_tx,
+            );
+        }
+
+        let lan_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 52100);
+
+        // 3. Remote POST /api/denied targeting a "perm" hold -> 400 and perm preserved.
+        let mut cross_req = Request::builder()
+            .method("POST")
+            .uri("/api/denied")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": "perm-cross", "op": "retry" }).to_string()))
+            .unwrap();
+        cross_req.extensions_mut().insert(ConnectInfo(lan_peer));
+        let cross_resp = app.clone().oneshot(cross_req).await.unwrap();
+        assert_eq!(cross_resp.status(), StatusCode::BAD_REQUEST);
+        assert!(state.office.lock().unwrap().pending_perms.contains_key("perm-cross"));
+        assert!(perm_rx.try_recv().is_err());
+
+        // 4. Remote POST /api/denied targeting dangerous "denied" hold -> 403 and hold preserved.
+        let mut remote_danger_req = Request::builder()
+            .method("POST")
+            .uri("/api/denied")
+            .header("host", "192.168.1.20:4310")
+            .header("cookie", &cookie)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": deny_id, "op": "retry" }).to_string()))
+            .unwrap();
+        remote_danger_req.extensions_mut().insert(ConnectInfo(lan_peer));
+        let rd_resp = app.clone().oneshot(remote_danger_req).await.unwrap();
+        assert_eq!(rd_resp.status(), StatusCode::FORBIDDEN);
+        assert!(state.office.lock().unwrap().pending_perms.contains_key(&deny_id));
+
+        // 5. Loopback POST /api/denied resolves dangerous "denied" hold with retry: true.
+        let local_req = Request::builder()
+            .method("POST")
+            .uri("/api/denied")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "id": deny_id, "op": "retry" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(local_req).await.unwrap().status(), StatusCode::OK);
+        let d_resp = tokio::time::timeout(std::time::Duration::from_secs(2), deny_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let d_json = read_json_body(d_resp).await;
+        assert_eq!(d_json["hookSpecificOutput"]["retry"], true);
+
+        // Clean up perm-cross.
+        state.office.lock().unwrap().cancel_hold("perm-cross");
     }
 }
