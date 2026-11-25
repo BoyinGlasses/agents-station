@@ -5,7 +5,7 @@ pub mod otel_routes;
 pub mod phone;
 pub mod sse;
 
-use crate::auth::AuthStore;
+use crate::auth::{AuthStore, PinRateLimiter};
 use crate::config::{home_dir, resolve_claude_dir};
 use crate::platform::default_platform;
 use crate::prefs::PrefsStore;
@@ -44,6 +44,7 @@ pub trait HarnessApi: Send + Sync {
 pub struct AppState {
     pub data_dir: PathBuf,
     pub auth: AuthStore,
+    pub pin_limiter: Mutex<PinRateLimiter>,
     pub prefs: Mutex<PrefsStore>,
     pub office: Mutex<OfficeState>,
     pub sys: SystemMonitor,
@@ -84,6 +85,7 @@ impl AppState {
         Ok(Self {
             data_dir,
             auth,
+            pin_limiter: Mutex::new(PinRateLimiter::new()),
             prefs: Mutex::new(prefs),
             office: Mutex::new(office),
             sys,

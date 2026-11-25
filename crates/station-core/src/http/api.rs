@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 fn require_auth(
@@ -633,7 +633,22 @@ pub async fn post_pin_update(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let pin = body.get("pin").and_then(Value::as_str).unwrap_or("");
-    let ok = state.auth.set_pin(pin).unwrap_or(false);
+    let valid = !crate::auth::pin_weak(pin);
+    let ip = peer
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    {
+        let mut limiter = state
+            .pin_limiter
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        limiter.check_and_record(ip, now_ms(), valid)?;
+    }
+    let ok = if valid {
+        state.auth.set_pin(pin).unwrap_or(false)
+    } else {
+        false
+    };
     Ok(Json(json!({ "ok": ok, "pin": state.auth.current_pin() })))
 }
 
