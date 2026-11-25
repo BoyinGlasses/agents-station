@@ -60,10 +60,7 @@ fn handle_window_close_requests(
     let close_to_tray = ui.as_ref().map(|u| u.auto_close_tray).unwrap_or(true);
     if worker_mode.0 {
         if close_to_tray {
-            let _ = tray::show_native_tray_toast(
-                "Agents Station running in Tray",
-                "GUI closed · HTTP daemon active on 127.0.0.1:4310",
-            );
+            let _ = tray::notify_parent_in_tray(true);
         } else {
             let _ = tray::request_parent_quit();
         }
