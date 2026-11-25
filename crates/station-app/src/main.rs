@@ -1,8 +1,11 @@
+pub mod bridge;
 pub mod capture;
 pub mod cli;
 pub mod commands;
+pub mod fps;
 pub mod gpu;
 pub mod instance;
+pub mod tray;
 
 use bevy::pbr::{DirectionalLightShadowMap, PointLightShadowMap};
 use bevy::prelude::*;
@@ -31,8 +34,18 @@ fn resolve_assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
+/// Bare camera for ultra-low RAM 2D Lite mode (zero 3D meshes, lights, or textures).
+fn spawn_lite_2d_camera(mut commands: Commands) {
+    commands.spawn((
+        Camera3d::default(),
+        Msaa::Off,
+        Transform::from_xyz(0.0, 0.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+}
+
 fn build_gui_app(cli: &cli::Cli) -> App {
     let mut app = App::new();
+    let capture_mode = cli.capture_scene.is_some();
     app.add_plugins(
         DefaultPlugins
             .set(WindowPlugin {
@@ -58,12 +71,51 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     .insert_resource(PointLightShadowMap { size: 256 })
     .add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
-    });
+    })
+    .add_plugins(fps::AdaptiveFpsPlugin { capture_mode })
+    .add_plugins(tray::TrayPlugin);
 
     let assets_dir = resolve_assets_dir();
-    match cli.capture_scene.as_deref() {
+    let scene = cli.capture_scene.as_deref();
+
+    match scene {
         Some("smoke") => {
-            app.add_plugins(station_3d::SmokeScenePlugin);
+            app.add_plugins(station_3d::SmokeScenePlugin)
+                .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
+        }
+        Some("lite-2d") => {
+            let mut ui_state = station_ui::UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            );
+            ui_state.view_mode = station_ui::ViewMode::Lite2D;
+            ui_state.sys.private_mb = 78.0;
+            app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
+                .add_systems(Startup, spawn_lite_2d_camera)
+                .add_plugins(station_ui::StationUiPlugin {
+                    assets_dir,
+                    initial_state: ui_state,
+                    initial_lang: "en".to_owned(),
+                });
+        }
+        Some("hud-pro") => {
+            let ui_state = station_ui::UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            );
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            })
+            .add_plugins(station_ui::StationUiPlugin {
+                assets_dir,
+                initial_state: ui_state,
+                initial_lang: "en".to_owned(),
+            });
         }
         Some("cozy") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
@@ -71,7 +123,8 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: false,
-            });
+            })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some("hq") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
@@ -79,7 +132,8 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: false,
-            });
+            })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some("pro-country") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
@@ -87,7 +141,8 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 backdrop: station_3d::BackdropKind::Countryside,
                 assets_dir: assets_dir.clone(),
                 night: false,
-            });
+            })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some("pro-beach") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
@@ -95,7 +150,8 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 backdrop: station_3d::BackdropKind::Beach,
                 assets_dir: assets_dir.clone(),
                 night: false,
-            });
+            })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some("pro-night") => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
@@ -103,27 +159,53 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: true,
-            });
+            })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
-        _ => {
+        Some(_) => {
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Pro,
                 backdrop: station_3d::BackdropKind::City,
                 assets_dir: assets_dir.clone(),
                 night: false,
+            })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
+        }
+        None => {
+            let ui_state = station_ui::UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            );
+            let data_dir = commands::resolve_runtime_data_dir();
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            })
+            .add_plugins(station_ui::StationUiPlugin {
+                assets_dir: assets_dir.clone(),
+                initial_state: ui_state,
+                initial_lang: "en".to_owned(),
+            })
+            .add_plugins(bridge::LiveServerBridgePlugin {
+                data_dir,
+                assets_dir,
+                host: cli.host.clone(),
+                port: cli.port,
+                start_http: true,
             });
         }
     }
 
-    app.add_plugins(station_ui::SmokeHudPlugin { assets_dir });
-
-    if let Some(scene) = &cli.capture_scene {
+    if let Some(scene_name) = &cli.capture_scene {
         let out_path = cli
             .out
             .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("artifacts/{scene}.png")));
+            .unwrap_or_else(|| PathBuf::from(format!("artifacts/{scene_name}.png")));
         app.add_plugins(capture::CapturePlugin {
-            scene: scene.clone(),
+            scene: scene_name.clone(),
             out_path,
             settle_frames: 6,
         });
