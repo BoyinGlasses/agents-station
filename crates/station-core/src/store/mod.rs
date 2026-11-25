@@ -14,6 +14,7 @@ pub mod push;
 pub mod rewrite;
 pub mod shots;
 pub mod trophies;
+pub mod tunnel;
 pub mod usage;
 pub mod vault;
 pub mod vsix;
