@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 use std::f32::consts::TAU;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 pub const SAMPLE_RATE: u32 = 22_050;
 
@@ -9,6 +11,114 @@ pub const ALL_SFX_NAMES: [&str; 27] = [
     "bloop", "brew", "rustle", "click", "pock", "shutter", "coin", "beep", "micro", "buzz",
     "thunder", "bell", "water", "clap", "thud", "mixue",
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(usize)]
+pub enum SfxKind {
+    Perm = 0,
+    Turn = 1,
+    Key = 2,
+    Print = 3,
+    Ding = 4,
+    Deploy = 5,
+    Alarm = 6,
+    Siren = 7,
+    Meow = 8,
+    Pop = 9,
+    Chat = 10,
+    Bloop = 11,
+    Brew = 12,
+    Rustle = 13,
+    Click = 14,
+    Pock = 15,
+    Shutter = 16,
+    Coin = 17,
+    Beep = 18,
+    Micro = 19,
+    Buzz = 20,
+    Thunder = 21,
+    Bell = 22,
+    Water = 23,
+    Clap = 24,
+    Thud = 25,
+    Mixue = 26,
+}
+
+pub const ALL_SFX_KINDS: [SfxKind; 27] = [
+    SfxKind::Perm,
+    SfxKind::Turn,
+    SfxKind::Key,
+    SfxKind::Print,
+    SfxKind::Ding,
+    SfxKind::Deploy,
+    SfxKind::Alarm,
+    SfxKind::Siren,
+    SfxKind::Meow,
+    SfxKind::Pop,
+    SfxKind::Chat,
+    SfxKind::Bloop,
+    SfxKind::Brew,
+    SfxKind::Rustle,
+    SfxKind::Click,
+    SfxKind::Pock,
+    SfxKind::Shutter,
+    SfxKind::Coin,
+    SfxKind::Beep,
+    SfxKind::Micro,
+    SfxKind::Buzz,
+    SfxKind::Thunder,
+    SfxKind::Bell,
+    SfxKind::Water,
+    SfxKind::Clap,
+    SfxKind::Thud,
+    SfxKind::Mixue,
+];
+
+impl SfxKind {
+    pub const fn as_str(self) -> &'static str {
+        ALL_SFX_NAMES[self as usize]
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        ALL_SFX_KINDS.into_iter().find(|k| k.as_str() == name)
+    }
+}
+
+/// Process-lifetime pre-baked RIFF/WAVE PCM buffers so async WinMM `PlaySoundW(..., SND_MEMORY | SND_ASYNC)`
+/// always reads from a pinned `'static` address with zero use-after-free risk.
+static PREBAKED_SFX: OnceLock<[Box<[u8]>; 27]> = OnceLock::new();
+
+fn prebaked_bank() -> &'static [Box<[u8]>; 27] {
+    PREBAKED_SFX.get_or_init(|| {
+        std::array::from_fn(|idx| {
+            synthesize_sfx_wav(ALL_SFX_NAMES[idx])
+                .expect("all 27 SFX names must synthesize")
+                .into_boxed_slice()
+        })
+    })
+}
+
+fn dispatch_winmm_wav(wav: &'static [u8]) {
+    #[cfg(all(windows, not(test)))]
+    {
+        use windows_sys::Win32::Media::Audio::{
+            PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT,
+        };
+        // Safety: `wav` lives in `'static` `PREBAKED_SFX` (`Box<[u8]>` never moves or drops),
+        // so WinMM can safely read the RIFF/WAVE bytes asynchronously after `PlaySoundW` returns.
+        unsafe {
+            PlaySoundW(
+                wav.as_ptr() as *const u16,
+                std::ptr::null_mut(),
+                SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+            );
+        }
+    }
+    #[cfg(not(all(windows, not(test))))]
+    {
+        let _ = wav;
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Wave {
@@ -230,18 +340,32 @@ pub fn gap_secs(name: &str) -> f64 {
     }
 }
 
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug)]
 pub struct SfxEngine {
     pub enabled: bool,
     last_played: HashMap<String, f64>,
+    epoch: Instant,
+}
+
+impl Default for SfxEngine {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 impl SfxEngine {
     pub fn new(enabled: bool) -> Self {
+        // Eagerly pre-bake all 27 RIFF/WAVE buffers once at startup.
+        let _ = prebaked_bank();
         Self {
             enabled,
             last_played: HashMap::new(),
+            epoch: Instant::now(),
         }
+    }
+
+    pub fn prebaked_wav(&self, kind: SfxKind) -> &'static [u8] {
+        &prebaked_bank()[kind as usize]
     }
 
     pub fn should_play(&mut self, name: &str, now_secs: f64) -> bool {
@@ -257,6 +381,32 @@ impl SfxEngine {
         self.last_played.insert(name.to_owned(), now_secs);
         true
     }
+
+    pub fn play_sfx_with<F: FnOnce(&'static [u8])>(
+        &mut self,
+        kind: SfxKind,
+        now_secs: f64,
+        sink: F,
+    ) -> bool {
+        if !self.should_play(kind.as_str(), now_secs) {
+            return false;
+        }
+        sink(self.prebaked_wav(kind));
+        true
+    }
+
+    pub fn play_sfx_at(&mut self, kind: SfxKind, now_secs: f64) -> bool {
+        self.play_sfx_with(kind, now_secs, dispatch_winmm_wav)
+    }
+
+    pub fn play_sfx(&mut self, kind: SfxKind) -> bool {
+        let now_secs = self.epoch.elapsed().as_secs_f64();
+        self.play_sfx_at(kind, now_secs)
+    }
+}
+
+pub fn play_sfx(engine: &mut SfxEngine, kind: SfxKind) -> bool {
+    engine.play_sfx(kind)
 }
 
 #[cfg(test)]
@@ -279,5 +429,41 @@ mod tests {
         assert!(eng.should_play("perm", 2.2));
         eng.enabled = false;
         assert!(!eng.should_play("perm", 10.0));
+    }
+
+    #[test]
+    fn prebakes_all_27_valid_riff_wave_buffers_and_respects_mute_and_cooldown() {
+        assert_eq!(ALL_SFX_KINDS.len(), 27);
+        let mut eng = SfxEngine::new(true);
+        for kind in ALL_SFX_KINDS {
+            let wav = eng.prebaked_wav(kind);
+            assert!(wav.len() > 44, "{kind:?} wav too small");
+            assert_eq!(&wav[0..4], b"RIFF");
+            assert_eq!(&wav[8..12], b"WAVE");
+            assert_eq!(&wav[12..16], b"fmt ");
+            assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1, "must be PCM");
+            assert_eq!(&wav[36..40], b"data");
+            let riff_len = u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]) as usize;
+            let data_len = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]) as usize;
+            assert_eq!(riff_len + 8, wav.len());
+            assert_eq!(data_len + 44, wav.len());
+            assert_eq!(
+                wav.as_ptr(),
+                eng.prebaked_wav(kind).as_ptr(),
+                "prebaked WAV pointer must remain stable for async PlaySoundW"
+            );
+        }
+
+        let mut played = Vec::new();
+        assert!(eng.play_sfx_with(SfxKind::Perm, 1.0, |bytes| played.push(bytes.len())));
+        assert_eq!(played.len(), 1);
+        assert!(!eng.play_sfx_with(SfxKind::Perm, 1.5, |bytes| played.push(bytes.len())));
+        assert_eq!(played.len(), 1);
+        assert!(eng.play_sfx_with(SfxKind::Perm, 2.2, |bytes| played.push(bytes.len())));
+        assert_eq!(played.len(), 2);
+
+        eng.enabled = false;
+        assert!(!eng.play_sfx_with(SfxKind::Ding, 10.0, |bytes| played.push(bytes.len())));
+        assert_eq!(played.len(), 2, "disabled SfxEngine must never emit audio");
     }
 }

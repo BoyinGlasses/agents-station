@@ -8,3 +8,6 @@ bevy.workspace = true
 serde.workspace = true
 station-canvas2d = { path = "../station-canvas2d" }
 station-core = { path = "../station-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
