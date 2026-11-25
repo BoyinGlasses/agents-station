@@ -407,8 +407,9 @@ pub async fn post_chat(
             Ok(Json(json!({ "ok": ok })))
         }
         _ => {
-            let text = body.get("text").and_then(Value::as_str).unwrap_or("");
-            let msg = office.chat.say("me", "Boss", text, ts, false, None);
+            let raw_text = body.get("text").and_then(Value::as_str).unwrap_or("");
+            let text = crate::redact::redact(raw_text);
+            let msg = office.chat.say("me", "Boss", &text, ts, false, None);
             let _ = office.save_chat();
             Ok(Json(json!({ "ok": true, "msg": msg })))
         }
@@ -1136,5 +1137,48 @@ mod tests {
         let resp = app.oneshot(ok_local).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(!state.office.lock().unwrap().pending_perms.contains_key("danger1"));
+    }
+
+    #[tokio::test]
+    async fn post_chat_redacts_secrets_before_storing_in_chat_json() {
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state.clone());
+
+        let payload = json!({
+            "op": "send",
+            "text": "keys: sk-ant-api03-secret1234 ghp_1234567890abcdef AKIAIOSFODNN7EXAMPLE"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/chat")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let stored_text = state
+            .office
+            .lock()
+            .unwrap()
+            .chat
+            .msgs
+            .last()
+            .unwrap()
+            .text
+            .clone();
+        let on_disk = std::fs::read_to_string(dir.path().join("chat.json")).unwrap();
+        for secret in [
+            "sk-ant-api03-secret1234",
+            "ghp_1234567890abcdef",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            assert!(!stored_text.contains(secret), "in-memory chat leaked {secret}");
+            assert!(!on_disk.contains(secret), "chat.json leaked {secret}");
+        }
     }
 }

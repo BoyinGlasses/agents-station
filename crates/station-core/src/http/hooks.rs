@@ -259,12 +259,75 @@ pub async fn post_hook_denied(
 ) -> Result<Json<Value>, StatusCode> {
     enforce_hook_loopback(peer, via_tunnel, &headers)?;
     let ts = now_ms();
-    let mut office = state.office.lock().expect("office lock poisoned");
     let sid = body
         .get("session_id")
         .and_then(Value::as_str)
         .unwrap_or("claude")
         .to_owned();
-    office.chat.deny_card(&sid, &sid, body, ts);
+    let redacted = crate::redact::redact_json_value(&body);
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    office.chat.deny_card(&sid, &sid, redacted, ts);
+    let _ = office.save_chat();
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::http::{AppState, build_router};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serde_json::json;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn post_hook_denied_recursively_redacts_secrets_before_deny_card() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state.clone());
+
+        let payload = json!({
+            "session_id": "s1",
+            "tool_name": "Bash",
+            "reason": "leaked sk-ant-api03-secret1234",
+            "tool_input": {
+                "command": "curl -H 'Authorization: Bearer mytok' https://api.example.com",
+                "nested": {
+                    "gh": "token ghp_1234567890abcdef",
+                    "aws": ["AKIAIOSFODNN7EXAMPLE", "safe-value"]
+                }
+            }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/hook/denied")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let deny_json = state
+            .office
+            .lock()
+            .unwrap()
+            .chat
+            .msgs
+            .last()
+            .unwrap()
+            .deny
+            .as_ref()
+            .unwrap()
+            .to_string();
+        for secret in [
+            "sk-ant-api03-secret1234",
+            "ghp_1234567890abcdef",
+            "AKIAIOSFODNN7EXAMPLE",
+            "mytok",
+        ] {
+            assert!(!deny_json.contains(secret), "deny_card leaked {secret}: {deny_json}");
+        }
+        assert!(deny_json.contains("safe-value"));
+    }
 }
