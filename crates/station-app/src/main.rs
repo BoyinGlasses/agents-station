@@ -99,5 +99,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    commands::run_cli_command(&cli, None)
+    let data_dir = commands::resolve_runtime_data_dir();
+    let bin_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agents-station.exe"));
+    let harnesses: std::sync::Arc<dyn station_core::http::HarnessApi> =
+        std::sync::Arc::new(station_launcher::HarnessService::new_win32(
+            data_dir,
+            bin_path,
+            cli.port,
+        ));
+    commands::run_cli_command(&cli, Some(harnesses))
 }

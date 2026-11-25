@@ -11,7 +11,10 @@ station-core = { path = "../station-core" }
 sysinfo.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
+tower.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
