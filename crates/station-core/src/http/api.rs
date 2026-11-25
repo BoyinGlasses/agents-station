@@ -751,31 +751,75 @@ fn parse_perm_action(
     if choice == Some("skip") {
         return Ok(ParsedPermAction::Skip);
     }
-    if body.get("answers").is_some() || choice == Some("answer") {
-        let Some(map) = parse_answers_map(body, tool_input) else {
-            return Err(StatusCode::BAD_REQUEST);
-        };
-        return Ok(ParsedPermAction::Decide(PermDecision::Answers(map)));
-    }
-    match choice {
-        Some("deny" | "revise") => {
-            let reason = body
-                .get("reason")
-                .or_else(|| body.get("note"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            Ok(ParsedPermAction::Decide(PermDecision::Deny { reason }))
-        }
-        Some("retry") => Ok(ParsedPermAction::Decide(PermDecision::Retry)),
-        Some("keep") => Ok(ParsedPermAction::Decide(PermDecision::Keep)),
-        Some("allow" | "always" | "approve") | None => {
-            if perm_kind == "ask" {
+    let has_answers = body.get("answers").is_some();
+    let deny_reason = || {
+        body.get("reason")
+            .or_else(|| body.get("note"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
+
+    match perm_kind {
+        "perm" | "permission" => {
+            if has_answers {
                 return Err(StatusCode::BAD_REQUEST);
             }
-            Ok(ParsedPermAction::Decide(PermDecision::Allow))
+            match choice {
+                Some("allow" | "always" | "approve") | None => {
+                    Ok(ParsedPermAction::Decide(PermDecision::Allow))
+                }
+                Some("deny" | "revise") => {
+                    Ok(ParsedPermAction::Decide(PermDecision::Deny {
+                        reason: deny_reason(),
+                    }))
+                }
+                _ => Err(StatusCode::BAD_REQUEST),
+            }
         }
-        Some(_) => Err(StatusCode::BAD_REQUEST),
+        "ask" => {
+            if has_answers || choice == Some("answer") {
+                let Some(map) = parse_answers_map(body, tool_input) else {
+                    return Err(StatusCode::BAD_REQUEST);
+                };
+                return Ok(ParsedPermAction::Decide(PermDecision::Answers(map)));
+            }
+            match choice {
+                Some("deny" | "revise") => {
+                    Ok(ParsedPermAction::Decide(PermDecision::Deny {
+                        reason: deny_reason(),
+                    }))
+                }
+                _ => Err(StatusCode::BAD_REQUEST),
+            }
+        }
+        "plan" => {
+            if has_answers {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            match choice {
+                Some("allow" | "approve") | None => {
+                    Ok(ParsedPermAction::Decide(PermDecision::Allow))
+                }
+                Some("deny" | "revise") => {
+                    Ok(ParsedPermAction::Decide(PermDecision::Deny {
+                        reason: deny_reason(),
+                    }))
+                }
+                _ => Err(StatusCode::BAD_REQUEST),
+            }
+        }
+        "denied" => {
+            if has_answers {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            match choice {
+                Some("retry") => Ok(ParsedPermAction::Decide(PermDecision::Retry)),
+                Some("keep") => Ok(ParsedPermAction::Decide(PermDecision::Keep)),
+                _ => Err(StatusCode::BAD_REQUEST),
+            }
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
     }
 }
 
@@ -897,6 +941,15 @@ pub async fn post_denied(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(perm) = office.pending_perms.get(id) else {
+        return Ok(Json(json!({ "ok": false })));
+    };
+    if perm.kind != "denied" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !local && perm.danger.is_some() {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let resolved = office.resolve_hold(id, decision).is_some();
     Ok(Json(json!({ "ok": resolved })))
 }
@@ -1452,5 +1505,83 @@ mod tests {
                 .unwrap();
         assert_eq!(wrapped_body["days"], 1);
         assert_eq!(wrapped_body["perDay"][0]["prompts"], 1);
+    }
+
+    #[tokio::test]
+    async fn post_perm_validates_decision_matches_hold_kind() {
+        use crate::state::sessions::PendingPerm;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let mk = |id: &str, kind: &str| PendingPerm {
+            id: id.to_owned(),
+            sess: "s1".to_owned(),
+            name: "proj".to_owned(),
+            kind: kind.to_owned(),
+            tool_type: "bash".to_owned(),
+            label: "cmd".to_owned(),
+            detail: "echo hi".to_owned(),
+            danger: None,
+            created_at: 1,
+        };
+        {
+            let mut office = state.office.lock().unwrap();
+            office.pending_perms.insert("h-perm".into(), mk("h-perm", "perm"));
+            office.pending_perms.insert("h-ask".into(), mk("h-ask", "ask"));
+            office.pending_perms.insert("h-plan".into(), mk("h-plan", "plan"));
+            office.pending_perms.insert("h-denied".into(), mk("h-denied", "denied"));
+        }
+
+        let app = build_router(state.clone());
+        let mismatches = [
+            ("h-perm", json!({ "id": "h-perm", "choice": "retry" })),
+            ("h-perm", json!({ "id": "h-perm", "choice": "keep" })),
+            ("h-perm", json!({ "id": "h-perm", "answers": { "Q": "A" } })),
+            ("h-ask", json!({ "id": "h-ask", "choice": "allow" })),
+            ("h-ask", json!({ "id": "h-ask", "choice": "retry" })),
+            ("h-plan", json!({ "id": "h-plan", "answers": { "Q": "A" } })),
+            ("h-plan", json!({ "id": "h-plan", "choice": "retry" })),
+            ("h-denied", json!({ "id": "h-denied", "choice": "allow" })),
+            ("h-denied", json!({ "id": "h-denied", "choice": "deny" })),
+            ("h-denied", json!({ "id": "h-denied" })),
+        ];
+        for (id, body) in mismatches {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/perm")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for mismatched decision {body}"
+            );
+            assert!(
+                state.office.lock().unwrap().pending_perms.contains_key(id),
+                "mismatched decision must not remove hold {id}"
+            );
+        }
+
+        // Valid per-kind decisions succeed.
+        for body in [
+            json!({ "id": "h-denied", "choice": "retry" }),
+            json!({ "id": "h-plan", "choice": "allow" }),
+            json!({ "id": "h-ask", "choice": "deny", "reason": "skip" }),
+            json!({ "id": "h-perm", "choice": "allow" }),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/perm")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+        assert!(state.office.lock().unwrap().pending_perms.is_empty());
     }
 }
