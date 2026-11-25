@@ -67,6 +67,7 @@ struct FileCursor {
 pub struct UsageScanner {
     files: HashMap<PathBuf, FileCursor>,
     order: VecDeque<PathBuf>,
+    sessions: HashMap<String, SessionUsage>,
 }
 
 impl Default for UsageScanner {
@@ -80,7 +81,50 @@ impl UsageScanner {
         Self {
             files: HashMap::new(),
             order: VecDeque::new(),
+            sessions: HashMap::new(),
         }
+    }
+
+    fn find_transcript(sid: &str, claude_dir: &Path) -> Option<PathBuf> {
+        if sid.is_empty()
+            || sid.len() > 120
+            || !sid
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return None;
+        }
+        let projects = claude_dir.join("projects");
+        let rd = std::fs::read_dir(projects).ok()?;
+        let fname = format!("{sid}.jsonl");
+        for entry in rd.flatten().take(200) {
+            let candidate = entry.path().join(&fname);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    pub fn scan_session(
+        &mut self,
+        sid: &str,
+        transcript_path: Option<&Path>,
+        claude_dir: &Path,
+    ) -> Option<SessionUsage> {
+        let path = transcript_path
+            .filter(|p| p.is_file())
+            .map(Path::to_path_buf)
+            .or_else(|| Self::find_transcript(sid, claude_dir))?;
+        let mut cur = self.sessions.remove(sid).unwrap_or_default();
+        self.scan_file(&mut cur, &path, true);
+        let out = cur.clone();
+        self.sessions.insert(sid.to_owned(), cur);
+        Some(out)
+    }
+
+    pub fn usage_of(&self, sid: &str) -> Option<&SessionUsage> {
+        self.sessions.get(sid)
     }
 
     fn read_new_lines(&mut self, path: &Path) -> Option<Vec<String>> {
