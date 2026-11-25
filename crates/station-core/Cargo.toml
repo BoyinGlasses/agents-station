@@ -20,7 +20,6 @@ sysinfo.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tower.workspace = true
-tower-http.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]

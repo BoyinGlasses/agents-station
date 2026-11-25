@@ -5111,7 +5111,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower",
- "tower-http",
  "unicode-normalization",
  "windows-sys 0.59.0",
 ]
