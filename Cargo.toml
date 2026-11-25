@@ -25,6 +25,7 @@ tempfile = "3.19"
 ttf-parser = "0.25"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Threading",
 ] }
 bevy = { version = "0.16", default-features = false, features = [

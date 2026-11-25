@@ -8,8 +8,13 @@ name = "agents-station"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
 station-core = { path = "../station-core" }
 station-launcher = { path = "../station-launcher" }
 station-canvas2d = { path = "../station-canvas2d" }
 station-3d = { path = "../station-3d" }
 station-ui = { path = "../station-ui" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
