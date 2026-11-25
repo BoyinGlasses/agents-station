@@ -42,10 +42,53 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let ledger = std::fs::read_to_string(root.join("PARITY_LEDGER.md"))
             .expect("PARITY_LEDGER.md must exist at workspace root");
-        let checked_or_pending = ledger.lines().filter(|l| l.starts_with("- [")).count();
+
+        let mut verified = 0usize;
+        let mut partial = 0usize;
+        let mut unported = 0usize;
+
+        for (idx, line) in ledger.lines().enumerate() {
+            if !line.starts_with("- [") {
+                continue;
+            }
+            if line.starts_with("- [x] ") {
+                for forbidden in [
+                    "post_local_ok",
+                    "get_generic_ok",
+                    "post_accounts_any",
+                    "Platform trait stub",
+                ] {
+                    assert!(
+                        !line.contains(forbidden),
+                        "PARITY_LEDGER.md line {} falsely marks `{forbidden}` as [x]: {line}",
+                        idx + 1
+                    );
+                }
+                verified += 1;
+            } else if line.starts_with("- [~] ") {
+                partial += 1;
+            } else if line.starts_with("- [ ] ") {
+                unported += 1;
+            } else {
+                panic!(
+                    "malformed parity checkbox on line {}: {line}",
+                    idx + 1
+                );
+            }
+        }
+
+        let total = verified + partial + unported;
         assert!(
-            checked_or_pending >= 449,
-            "expected >= 449 tracked files in PARITY_LEDGER.md, got {checked_or_pending}"
+            total >= 571,
+            "expected >= 571 tracked items in PARITY_LEDGER.md, got {total}"
+        );
+
+        let expected_status = format!(
+            "Status: {verified} verified `[x]` | {partial} partial/stubbed `[~]` | {unported} unported `[ ]` | {total} total"
+        );
+        assert!(
+            ledger.lines().any(|l| l.trim() == expected_status),
+            "PARITY_LEDGER.md missing exact summary line `{expected_status}`"
         );
     }
 }
