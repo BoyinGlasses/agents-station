@@ -117,6 +117,26 @@ fn is_our_cmd(cmd: &str, port: u16) -> bool {
     cmd.contains(&format!("127.0.0.1:{port}/"))
 }
 
+fn status_line_cmd(bin_path: &Path, port: u16) -> String {
+    format!("\"{}\" status-line --port {port}", fwd(bin_path))
+}
+
+fn is_our_status_line(val: &Value, port: u16) -> bool {
+    val.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.contains("status-line") && c.contains(&format!("--port {port}")))
+}
+
+fn statusline_prev_path(settings_path: &Path, data_dir: Option<&Path>) -> PathBuf {
+    match data_dir {
+        Some(dir) => dir.join("statusline-prev.json"),
+        None => settings_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("statusline-prev.json"),
+    }
+}
+
 fn entry_has_our_route(entry: &Value, port: u16, route: &str) -> bool {
     entry
         .get("hooks")
@@ -224,13 +244,23 @@ pub fn install_agent_hooks(
     bin_path: &Path,
     port: u16,
 ) -> Result<InstallReport> {
+    install_agent_hooks_with_data_dir(agent, settings_override, None, bin_path, port)
+}
+
+pub fn install_agent_hooks_with_data_dir(
+    agent: &str,
+    settings_override: Option<&Path>,
+    data_dir: Option<&Path>,
+    bin_path: &Path,
+    port: u16,
+) -> Result<InstallReport> {
     let settings_path = match settings_override {
         Some(p) => p.to_path_buf(),
         None => default_settings_path(agent)?,
     };
 
     match agent {
-        "claude" => install_claude(&settings_path, bin_path, port),
+        "claude" => install_claude(&settings_path, data_dir, bin_path, port),
         "codex" => install_codex(&settings_path, bin_path, port),
         "opencode" => install_opencode(&settings_path, port),
         "zcode" => install_zcode(&settings_path, bin_path, port),
@@ -239,7 +269,12 @@ pub fn install_agent_hooks(
     }
 }
 
-fn install_claude(settings_path: &Path, bin_path: &Path, port: u16) -> Result<InstallReport> {
+fn install_claude(
+    settings_path: &Path,
+    data_dir: Option<&Path>,
+    bin_path: &Path,
+    port: u16,
+) -> Result<InstallReport> {
     let mut cfg = read_json_or_empty(settings_path)?;
     let hooks = cfg
         .as_object_mut()
@@ -347,6 +382,38 @@ fn install_claude(settings_path: &Path, bin_path: &Path, port: u16) -> Result<In
             }));
             added += 1;
         }
+    }
+
+    if !cfg
+        .get("statusLine")
+        .is_some_and(|s| is_our_status_line(s, port))
+    {
+        let existing_padding = cfg
+            .get("statusLine")
+            .and_then(|s| s.get("padding"))
+            .cloned();
+        if let Some(prev) = cfg.get("statusLine")
+            && prev
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| !c.trim().is_empty())
+        {
+            let prev_path = statusline_prev_path(settings_path, data_dir);
+            write_json_atomic(&prev_path, prev)?;
+        }
+        let mut status_obj = serde_json::Map::new();
+        status_obj.insert("type".to_owned(), Value::String("command".to_owned()));
+        status_obj.insert(
+            "command".to_owned(),
+            Value::String(status_line_cmd(bin_path, port)),
+        );
+        if let Some(pad) = existing_padding {
+            status_obj.insert("padding".to_owned(), pad);
+        }
+        if let Some(root) = cfg.as_object_mut() {
+            root.insert("statusLine".to_owned(), Value::Object(status_obj));
+        }
+        added += 1;
     }
 
     added += add_otel(&mut cfg, port, true);
@@ -649,6 +716,15 @@ pub fn uninstall_agent_hooks(
     settings_override: Option<&Path>,
     port: u16,
 ) -> Result<bool> {
+    uninstall_agent_hooks_with_data_dir(agent, settings_override, None, port)
+}
+
+pub fn uninstall_agent_hooks_with_data_dir(
+    agent: &str,
+    settings_override: Option<&Path>,
+    data_dir: Option<&Path>,
+    port: u16,
+) -> Result<bool> {
     let path = match settings_override {
         Some(p) => p.to_path_buf(),
         None => default_settings_path(agent)?,
@@ -696,6 +772,29 @@ pub fn uninstall_agent_hooks(
                         hooks.remove(&k);
                     }
                 }
+            }
+            if cfg
+                .get("statusLine")
+                .is_some_and(|s| is_our_status_line(s, port))
+            {
+                let prev_path = statusline_prev_path(&path, data_dir);
+                let prev = std::fs::read_to_string(&prev_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                    .filter(|v| {
+                        v.get("command")
+                            .and_then(Value::as_str)
+                            .is_some_and(|c| !c.trim().is_empty())
+                    });
+                if let Some(root) = cfg.as_object_mut() {
+                    if let Some(prev_val) = prev {
+                        root.insert("statusLine".to_owned(), prev_val);
+                    } else {
+                        root.remove("statusLine");
+                    }
+                }
+                let _ = std::fs::remove_file(&prev_path);
+                removed += 1;
             }
             removed += remove_otel(&mut cfg);
         }
@@ -899,5 +998,80 @@ mod tests {
         assert!(!text.to_ascii_lowercase().contains("powershell"));
         assert!(uninstall_windows_service_in(dir.path()).unwrap());
         assert!(!vbs.exists());
+    }
+
+    #[test]
+    fn install_claude_wires_status_line_saves_prev_and_restores_on_uninstall() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let settings = dir.path().join("settings.json");
+        let bin = Path::new("D:/mystation/agents-station/agents-station.exe");
+
+        std::fs::write(
+            &settings,
+            r#"{"statusLine": {"type": "command", "command": "echo old-status", "padding": 2}}"#,
+        )
+        .unwrap();
+
+        let rep = install_agent_hooks_with_data_dir(
+            "claude",
+            Some(&settings),
+            Some(&data_dir),
+            bin,
+            4310,
+        )
+        .unwrap();
+        assert!(rep.added > 0);
+
+        let prev_file = data_dir.join("statusline-prev.json");
+        assert!(prev_file.exists(), "previous statusLine must be saved");
+        let prev: Value =
+            serde_json::from_str(&std::fs::read_to_string(&prev_file).unwrap()).unwrap();
+        assert_eq!(prev["command"], "echo old-status");
+
+        let cfg: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(cfg["statusLine"]["type"], "command");
+        assert_eq!(cfg["statusLine"]["padding"], 2);
+        let cmd = cfg["statusLine"]["command"].as_str().unwrap();
+        assert!(cmd.contains("status-line"), "cmd={cmd}");
+        assert!(cmd.contains("--port 4310"), "cmd={cmd}");
+
+        // Second install is idempotent and must not overwrite statusline-prev.json.
+        let rep2 = install_agent_hooks_with_data_dir(
+            "claude",
+            Some(&settings),
+            Some(&data_dir),
+            bin,
+            4310,
+        )
+        .unwrap();
+        assert_eq!(rep2.added, 0);
+        let prev_after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&prev_file).unwrap()).unwrap();
+        assert_eq!(prev_after["command"], "echo old-status");
+
+        // Uninstall restores previous statusLine and removes statusline-prev.json.
+        assert!(
+            uninstall_agent_hooks_with_data_dir("claude", Some(&settings), Some(&data_dir), 4310)
+                .unwrap()
+        );
+        let restored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored["statusLine"]["command"], "echo old-status");
+        assert!(!prev_file.exists());
+
+        // Fresh install without prior statusLine removes statusLine completely on uninstall.
+        let settings2 = dir.path().join("settings2.json");
+        std::fs::write(&settings2, "{}").unwrap();
+        install_agent_hooks_with_data_dir("claude", Some(&settings2), Some(&data_dir), bin, 4310)
+            .unwrap();
+        assert!(
+            uninstall_agent_hooks_with_data_dir("claude", Some(&settings2), Some(&data_dir), 4310)
+                .unwrap()
+        );
+        let cleaned: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings2).unwrap()).unwrap();
+        assert!(cleaned.get("statusLine").is_none());
     }
 }
