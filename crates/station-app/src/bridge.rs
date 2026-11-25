@@ -996,8 +996,8 @@ fn process_ui_actions(
                     if let Some(p) = pal.as_mut() {
                         p.purge_transient_images(imgs);
                     }
-                    if let Some(ba) = backdrop_assets.as_mut() {
-                        ba.purge(imgs);
+                    if let (Some(ba), Some(mats)) = (backdrop_assets.as_mut(), materials.as_mut()) {
+                        ba.purge(mats, imgs);
                     }
                 }
             }
@@ -1011,7 +1011,7 @@ fn process_ui_actions(
                     for ent in &backdrop_q {
                         commands.entity(ent).despawn();
                     }
-                    ba.purge(imgs);
+                    ba.purge(mats, imgs);
                     let spec = station_3d::LayoutSpec::for_layout(ui.layout);
                     let mut brands = BrandRegistry::new(bridge.assets_dir.clone());
                     let mut fonts = FontEngine::from_assets_dir(&bridge.assets_dir);
@@ -1082,8 +1082,10 @@ fn process_ui_actions(
                         if let Some(p) = pal.as_mut() {
                             p.purge_transient_images(imgs);
                         }
-                        if let Some(ba) = backdrop_assets.as_mut() {
-                            ba.purge(imgs);
+                        if let (Some(ba), Some(mats)) =
+                            (backdrop_assets.as_mut(), materials.as_mut())
+                        {
+                            ba.purge(mats, imgs);
                         }
                     }
                     for mut win in &mut tray_params.windows {

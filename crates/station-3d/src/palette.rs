@@ -54,6 +54,23 @@ pub fn srgb_hex(hex: &str) -> Color {
     Color::srgb_u8(r, g, b)
 }
 
+/// Uploads a `station-canvas2d` RGBA8 surface directly to GPU with `RenderAssetUsages::RENDER_WORLD`,
+/// dropping the CPU buffer immediately after upload for minimum RAM usage.
+pub fn upload_gpu_image(images: &mut Assets<Image>, surface: RgbaSurface) -> Handle<Image> {
+    let img = Image::new(
+        Extent3d {
+            width: surface.width.max(1),
+            height: surface.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        surface.rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    images.add(img)
+}
+
 impl WorldPalette {
     pub fn new(meshes: &mut Assets<Mesh>) -> Self {
         Self {
@@ -182,18 +199,7 @@ impl WorldPalette {
         images: &mut Assets<Image>,
         surface: RgbaSurface,
     ) -> Handle<Image> {
-        let img = Image::new(
-            Extent3d {
-                width: surface.width.max(1),
-                height: surface.height.max(1),
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            surface.rgba,
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        let handle = images.add(img);
+        let handle = upload_gpu_image(images, surface);
         self.owned_images.push(handle.clone());
         handle
     }
