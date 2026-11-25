@@ -1,6 +1,9 @@
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 pub fn steer_line(text: &str) -> String {
     let payload = json!({
@@ -90,6 +93,93 @@ pub fn steerable(
         };
     }
     SteerCheck { ok: true, why: None }
+}
+
+/// Writes a steer JSONL line to the session's inbox socket / Windows named pipe.
+pub async fn deliver(inbox: &str, text: &str, timeout_ms: u64) -> bool {
+    if inbox.is_empty() {
+        return false;
+    }
+    let line = steer_line(text);
+    let fut = async move {
+        #[cfg(windows)]
+        {
+            use tokio::net::windows::named_pipe::ClientOptions;
+            let mut client = ClientOptions::new().open(inbox).ok()?;
+            client.write_all(line.as_bytes()).await.ok()?;
+            client.flush().await.ok()?;
+            Some(())
+        }
+        #[cfg(unix)]
+        {
+            use tokio::net::UnixStream;
+            let mut stream = UnixStream::connect(inbox).await.ok()?;
+            stream.write_all(line.as_bytes()).await.ok()?;
+            stream.shutdown().await.ok()?;
+            Some(())
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(timeout_ms.max(50)), fut)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QueuedSteer {
+    pub key: String,
+    pub sid: Option<String>,
+    pub dir: Option<String>,
+    pub agent: String,
+    pub text: String,
+    pub name: String,
+    pub at: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct SteerQueue {
+    items: HashMap<String, QueuedSteer>,
+}
+
+impl SteerQueue {
+    pub fn enqueue(&mut self, mut item: QueuedSteer, now_ms: u64) {
+        if let Some(prev) = self.items.get(&item.key) {
+            let joined = format!("{}\n{}", prev.text, item.text);
+            item.text = joined.chars().take(4000).collect();
+        } else {
+            item.text = item.text.chars().take(4000).collect();
+        }
+        item.at = now_ms;
+        self.items.insert(item.key.clone(), item);
+        // Prune stale (> 6h) or excess (> 8)
+        self.items
+            .retain(|_, v| now_ms.saturating_sub(v.at) <= 6 * 3_600_000);
+        while self.items.len() > 8 {
+            if let Some(oldest_k) = self
+                .items
+                .iter()
+                .min_by_key(|(_, v)| v.at)
+                .map(|(k, _)| k.clone())
+            {
+                self.items.remove(&oldest_k);
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn take(&mut self, key: &str) -> Option<QueuedSteer> {
+        self.items.remove(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
 }
 
 #[cfg(test)]
