@@ -2569,35 +2569,153 @@ pub async fn post_ag_ai(
     Ok(Json(res))
 }
 
-pub async fn post_accounts_any(
-    headers: HeaderMap,
-    OptionalPeer(peer): OptionalPeer,
-    ViaTunnel(via_tunnel): ViaTunnel,
-    Json(_body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    require_local_post(peer, via_tunnel, &headers)?;
-    Ok(Json(json!({ "ok": true })))
-}
-
-pub async fn get_generic_ok(
+pub async fn get_accounts(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    Ok(Json(json!({ "ok": true })))
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if !local {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let view = state
+        .claude_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    Ok(Json(view))
 }
 
-pub async fn post_local_ok(
+pub async fn post_accounts(
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
-    Json(_body): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    Ok(Json(json!({ "ok": true })))
+    let res = state
+        .claude_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mutate("prepare", &body);
+    Ok(Json(res))
+}
+
+pub async fn post_accounts_action(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    AxumPath(action): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let res = state
+        .claude_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mutate(&action, &body);
+    Ok(Json(res))
+}
+
+fn is_valid_tunnel_hostname(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || !host.contains('.') {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
+fn tunnel_status_json(state: &AppState) -> Value {
+    let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+    let on = prefs
+        .get("tunnel")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let domain = prefs
+        .get("tunnelDomain")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    json!({
+        "ok": true,
+        "on": on,
+        "state": if on { "configured" } else { "off" },
+        "domain": domain,
+        "url": Value::Null,
+    })
+}
+
+pub async fn get_tunnel_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if !local {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Json(tunnel_status_json(&state)))
+}
+
+pub async fn post_tunnel_toggle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set("tunnel", if on { Some(Value::Bool(true)) } else { None });
+    }
+    Ok(Json(tunnel_status_json(&state)))
+}
+
+pub async fn post_tunnel_domain(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let raw = body
+        .get("host")
+        .or_else(|| body.get("domain"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !raw.is_empty() && !is_valid_tunnel_hostname(&raw) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set(
+            "tunnelDomain",
+            if raw.is_empty() {
+                None
+            } else {
+                Some(Value::String(raw))
+            },
+        );
+    }
+    Ok(Json(tunnel_status_json(&state)))
 }
 
 pub async fn get_harnesses(
@@ -3390,7 +3508,7 @@ mod tests {
         let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
         let app = build_router(state.clone());
 
-        // 1. POST /api/tasks/allow toggles phoneTasks pref (stub post_local_ok won't persist it!)
+        // 1. POST /api/tasks/allow toggles phoneTasks pref (a no-op stub would not persist it!)
         let allow_req = Request::builder()
             .method("POST")
             .uri("/api/tasks/allow")
@@ -4568,5 +4686,146 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(bad_req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn accounts_and_tunnel_http_routes_persist_real_state_and_enforce_loopback() {
+        use crate::auth::COOKIE_NAME;
+        use crate::http::guard::ViaTunnel;
+        use axum::body::to_bytes;
+        use axum::extract::ConnectInfo;
+        use serde_json::{Value, json};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"tok-primary"}}"#,
+        )
+        .unwrap();
+
+        let state = Arc::new(AppState::new_with_claude_dir(data_dir, claude_dir, None).unwrap());
+        let cookie = format!("{COOKIE_NAME}={}", state.auth.sign_cookie(false));
+        let app = build_router(state.clone());
+
+        // 1. Save main, prepare secondary "side", rename, switch, and GET /api/accounts
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/accounts/save")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "name": "", "label": "Main" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+        let prep = Request::builder()
+            .method("POST")
+            .uri("/api/accounts")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "name": "side" }).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(prep).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["name"], "side");
+        assert!(dir.path().join(".claude-side").is_dir());
+
+        let sw = Request::builder()
+            .method("POST")
+            .uri("/api/accounts/switch")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "name": "side" }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(sw).await.unwrap().status(), StatusCode::OK);
+
+        let list = Request::builder()
+            .uri("/api/accounts")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(list).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["active"], "side");
+
+        // 2. Tunnel domain + toggle routes persist into prefs and validate hostname
+        let set_dom = Request::builder()
+            .method("POST")
+            .uri("/api/tunnel/domain")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "host": "office.example.com" }).to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(set_dom).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let dom_body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(dom_body["domain"], "office.example.com");
+        assert_eq!(
+            state.allowed_tunnel_host().as_deref(),
+            Some("office.example.com")
+        );
+
+        let bad_dom = Request::builder()
+            .method("POST")
+            .uri("/api/tunnel/domain")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "host": "https://evil.com/path" }).to_string()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(bad_dom).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let start_tun = Request::builder()
+            .method("POST")
+            .uri("/api/tunnel")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "on": true }).to_string()))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(start_tun).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let get_tun = Request::builder()
+            .uri("/api/tunnel")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(get_tun).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tun_body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(tun_body["on"], true);
+        assert_eq!(tun_body["domain"], "office.example.com");
+
+        // 3. Remote ViaTunnel rejected on GET /api/accounts & GET /api/tunnel
+        let loopback_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 52280);
+        for uri in ["/api/accounts", "/api/tunnel"] {
+            let mut tun_req = Request::builder()
+                .uri(uri)
+                .header("host", "127.0.0.1:4310")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap();
+            tun_req.extensions_mut().insert(ConnectInfo(loopback_peer));
+            tun_req.extensions_mut().insert(ViaTunnel(true));
+            assert_eq!(
+                app.clone().oneshot(tun_req).await.unwrap().status(),
+                StatusCode::FORBIDDEN,
+                "ViaTunnel must be 403 on {uri}"
+            );
+        }
     }
 }

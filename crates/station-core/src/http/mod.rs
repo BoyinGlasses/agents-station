@@ -22,6 +22,7 @@ use crate::state::tenure::TenureStore;
 use crate::store::agent_history::AgentHistory;
 use crate::store::antigravity_accounts::AntigravityAccounts;
 use crate::store::antigravity_runs::AntigravityWatcher;
+use crate::store::claude_accounts::ClaudeAccounts;
 use crate::store::codex_accounts::CodexAccounts;
 use crate::store::images::ImageStore;
 use crate::store::otel::OtelStore;
@@ -70,6 +71,7 @@ pub struct AppState {
     pub steer_queue: Mutex<SteerQueue>,
     pub push: Mutex<PushStore>,
     pub rewriter: Arc<Mutex<Rewriter>>,
+    pub claude_accounts: Mutex<ClaudeAccounts>,
     pub codex_accounts: Mutex<CodexAccounts>,
     pub ag_accounts: Mutex<AntigravityAccounts>,
     pub claude_version: Arc<Mutex<ClaudeVersionWatcher>>,
@@ -109,6 +111,7 @@ impl AppState {
         let steer_queue = Mutex::new(SteerQueue::default());
         let push = PushStore::load(&data_dir);
         let rewriter = Arc::new(Mutex::new(Rewriter::default()));
+        let claude_accounts = ClaudeAccounts::load(&data_dir, &claude_dir);
         let codex_accounts = CodexAccounts::load(&data_dir);
         let ag_accounts = AntigravityAccounts::load(&data_dir);
         let claude_version = Arc::new(Mutex::new(ClaudeVersionWatcher::load(&data_dir, home_dir())));
@@ -140,6 +143,7 @@ impl AppState {
             steer_queue,
             push: Mutex::new(push),
             rewriter,
+            claude_accounts: Mutex::new(claude_accounts),
             codex_accounts: Mutex::new(codex_accounts),
             ag_accounts: Mutex::new(ag_accounts),
             claude_version,
@@ -269,8 +273,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/push", get(api::get_push).post(api::post_push))
         .route("/api/image", get(api::get_image))
         .route("/api/macapprove", get(api::get_macapprove).post(api::post_macapprove))
-        .route("/api/tunnel", get(api::get_generic_ok).post(api::post_local_ok))
-        .route("/api/tunnel/domain", post(api::post_local_ok))
+        .route("/api/tunnel", get(api::get_tunnel_status).post(api::post_tunnel_toggle))
+        .route("/api/tunnel/domain", post(api::post_tunnel_domain))
         .route("/api/presence", post(api::post_presence))
         .route("/api/perm", post(api::post_perm))
         .route("/api/pin", post(api::post_pin_update))
@@ -284,8 +288,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/prefs", get(api::get_prefs).post(api::post_prefs))
         .route("/api/todos", post(api::post_todos))
         // Accounts & multi-AI
-        .route("/api/accounts", post(api::post_accounts_any))
-        .route("/api/accounts/{action}", post(api::post_accounts_any))
+        .route("/api/accounts", get(api::get_accounts).post(api::post_accounts))
+        .route("/api/accounts/{action}", post(api::post_accounts_action))
         .route("/api/ai/codex/{action}", post(api::post_codex_ai))
         .route("/api/ai/ag/{action}", post(api::post_ag_ai))
         // Native GUI Harness Launcher (strictly loopback)
