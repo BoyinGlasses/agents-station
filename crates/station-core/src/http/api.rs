@@ -126,6 +126,16 @@ pub async fn get_wrapped(
     Ok(Json(summary))
 }
 
+pub fn is_valid_day_key(day: &str) -> bool {
+    let b = day.as_bytes();
+    b.len() == 10
+        && b[0..4].iter().all(u8::is_ascii_digit)
+        && b[4] == b'-'
+        && b[5..7].iter().all(u8::is_ascii_digit)
+        && b[7] == b'-'
+        && b[8..10].iter().all(u8::is_ascii_digit)
+}
+
 pub async fn get_replay(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -134,7 +144,10 @@ pub async fn get_replay(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let day = q.get("day").cloned().unwrap_or_default();
+    let day = q.get("day").map(String::as_str).unwrap_or("");
+    if !is_valid_day_key(day) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
     let file = state.data_dir.join("replay").join(format!("{day}.jsonl"));
     let items: Vec<Value> = std::fs::read_to_string(file)
         .ok()
@@ -892,5 +905,66 @@ pub async fn post_harnesses_custom(
         }
     } else {
         Ok(Json(json!({ "ok": false, "error": "launcher unavailable" })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_day_key;
+    use crate::http::{AppState, build_router};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    #[test]
+    fn is_valid_day_key_matches_strict_yyyy_mm_dd() {
+        assert!(is_valid_day_key("2026-11-25"));
+        assert!(!is_valid_day_key(""));
+        assert!(!is_valid_day_key("../../secret"));
+        assert!(!is_valid_day_key("2026-1-5"));
+        assert!(!is_valid_day_key("2026-11-25a"));
+        assert!(!is_valid_day_key("2026/11/25"));
+    }
+
+    #[tokio::test]
+    async fn replay_rejects_path_traversal_and_invalid_day_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.jsonl"), "{\"leaked\":true}\n").unwrap();
+        let replay_dir = dir.path().join("replay");
+        std::fs::create_dir_all(&replay_dir).unwrap();
+        std::fs::write(replay_dir.join("2026-11-25.jsonl"), "{\"ok\":true}\n").unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state);
+
+        for bad_uri in [
+            "/api/replay?day=../../secret",
+            "/api/replay?day=../secret",
+            "/api/replay?day=2026-11-25/../../secret",
+            "/api/replay?day=2026-1-5",
+            "/api/replay?day=not-a-date",
+            "/api/replay",
+        ] {
+            let req = Request::builder()
+                .uri(bad_uri)
+                .header("host", "127.0.0.1:4310")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for {bad_uri}"
+            );
+        }
+
+        let good_req = Request::builder()
+            .uri("/api/replay?day=2026-11-25")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(good_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
