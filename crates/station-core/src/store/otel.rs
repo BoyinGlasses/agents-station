@@ -730,15 +730,16 @@ impl OtelStore {
                 self.st.cum.remove(&k);
             }
         }
-        let dirty_keys: Vec<String> = self.dirty_days.drain().collect();
+        let dirty_keys: Vec<String> = self.dirty_days.iter().cloned().collect();
         for k in dirty_keys {
             if let Some(d) = self.days.get(&k) {
                 write_json_atomic(&self.dir.join(format!("{k}.json")), d)?;
             }
+            self.dirty_days.remove(&k);
         }
         if self.dirty {
-            self.dirty = false;
             write_json_atomic(&self.dir.join("state.json"), &self.st)?;
+            self.dirty = false;
         }
         Ok(())
     }
@@ -836,5 +837,68 @@ mod tests {
         let sum_30d = store.burn_summary("30d", now);
         assert_eq!(sum_30d.per_day.len(), 30);
         assert!((sum_30d.total.row.usd - 1.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flush_retains_dirty_flags_on_write_failure_and_recovers_on_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let otel_dir = dir.path().join("otel");
+        let now = 1_793_091_600_000u64;
+        let today = day_key(now);
+        let mut store = OtelStore::load(otel_dir.clone(), 30, now);
+
+        let make_metric = |val: f64, seq: u64| {
+            let t_ns = (now + seq * 1000) * 1_000_000;
+            serde_json::json!({
+                "resourceMetrics": [{
+                    "scopeMetrics": [{
+                        "metrics": [{
+                            "name": COST_METRIC,
+                            "sum": {
+                                "aggregationTemporality": 1,
+                                "dataPoints": [{
+                                    "asDouble": val,
+                                    "startTimeUnixNano": (t_ns - 1_000_000).to_string(),
+                                    "timeUnixNano": t_ns.to_string(),
+                                    "attributes": [
+                                        { "key": "session.id", "value": { "stringValue": "s-retry" } },
+                                        { "key": "model", "value": { "stringValue": "claude-sonnet-4" } }
+                                    ]
+                                }]
+                            }
+                        }]
+                    }]
+                }]
+            })
+        };
+
+        // 1. Failing day-file write must keep dirty_days + is_dirty() true.
+        assert_eq!(store.ingest_metrics(&make_metric(1.0, 1), now), 1);
+        let day_blocker = otel_dir.join(format!("{today}.json"));
+        std::fs::create_dir_all(&day_blocker).unwrap();
+        assert!(store.flush(now).is_err());
+        assert!(store.is_dirty(), "is_dirty must remain true after failed day flush");
+        assert!(
+            store.dirty_days.contains(&today),
+            "dirty_days must retain failed day key for retry"
+        );
+        std::fs::remove_dir(&day_blocker).unwrap();
+        store.flush(now).unwrap();
+        assert!(!store.is_dirty());
+
+        // 2. Failing state.json write must keep self.dirty + is_dirty() true.
+        assert_eq!(store.ingest_metrics(&make_metric(2.0, 2), now), 1);
+        let state_path = otel_dir.join("state.json");
+        std::fs::remove_file(&state_path).unwrap();
+        std::fs::create_dir_all(&state_path).unwrap();
+        assert!(store.flush(now).is_err());
+        assert!(store.is_dirty(), "is_dirty must remain true after failed state.json flush");
+        assert!(store.dirty, "dirty flag must remain true after failed state.json flush");
+        std::fs::remove_dir(&state_path).unwrap();
+        store.flush(now).unwrap();
+        assert!(!store.is_dirty());
+
+        let reloaded = OtelStore::load(otel_dir, 30, now);
+        assert!((reloaded.burn_summary("today", now).total.row.usd - 3.0).abs() < 1e-6);
     }
 }
