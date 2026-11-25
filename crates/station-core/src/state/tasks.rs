@@ -480,13 +480,16 @@ pub fn start_and_spawn(
     let stdin_data = spec.stdin_payload;
     tokio::spawn(async move {
         let mut child = child;
-        if let (Some(payload), Some(mut stdin)) = (stdin_data, child.stdin.take()) {
-            let _ = stdin.write_all(payload.as_bytes()).await;
-            let _ = stdin.shutdown().await;
-        }
+        let stdin_pipe = child.stdin.take();
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
+        let write_stdin = async move {
+            if let (Some(payload), Some(mut stdin)) = (stdin_data, stdin_pipe) {
+                let _ = stdin.write_all(payload.as_bytes()).await;
+                let _ = stdin.shutdown().await;
+            }
+        };
         let drain_out = async move {
             let mut buf = Vec::new();
             if let Some(out) = stdout_pipe {
@@ -510,7 +513,8 @@ pub fn start_and_spawn(
 
         let outcome = {
             let run_fut = async {
-                let (status, out_buf, err_buf) = tokio::join!(child.wait(), drain_out, drain_err);
+                let (status, (), out_buf, err_buf) =
+                    tokio::join!(child.wait(), write_stdin, drain_out, drain_err);
                 (status, out_buf, err_buf)
             };
             tokio::select! {
@@ -765,5 +769,155 @@ mod tests {
         }
         let last2 = tm.lock().unwrap().recent_completed().last().copied().unwrap().clone();
         assert_eq!(last2.status, "timeout");
+    }
+
+    #[tokio::test]
+    async fn start_and_spawn_cancels_blocked_large_stdin_write_on_timeout_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let tm = Arc::new(Mutex::new(TaskManager::new()));
+        // 256 KB payload exceeds OS pipe buffer (4-64 KB) when child ignores stdin.
+        let large_stdin = "S".repeat(256 * 1024);
+
+        let payload_a = large_stdin.clone();
+        #[cfg(windows)]
+        let stall_cmd_a = move |_req: &TaskStartRequest, _id: &str| {
+            Some(TaskCommandSpec {
+                program: PathBuf::from("ping.exe"),
+                args: vec!["-n".into(), "15".into(), "127.0.0.1".into()],
+                stdin_payload: Some(payload_a.clone()),
+            })
+        };
+        #[cfg(not(windows))]
+        let stall_cmd_a = move |_req: &TaskStartRequest, _id: &str| {
+            Some(TaskCommandSpec {
+                program: PathBuf::from("sleep"),
+                args: vec!["15".into()],
+                stdin_payload: Some(payload_a.clone()),
+            })
+        };
+
+        // 1. Timeout must cancel the blocked stdin write, kill child, and free slot promptly.
+        {
+            let mut g = tm.lock().unwrap();
+            g.set_timeout(Duration::from_millis(200));
+            g.set_command_override(Arc::new(stall_cmd_a));
+        }
+        let res1 = start_and_spawn(
+            Arc::clone(&tm),
+            TaskStartRequest {
+                dir: dir.path().to_string_lossy().into_owned(),
+                text: "blocked stdin timeout".into(),
+                agent: "antigravity".into(),
+                model: String::new(),
+                fork: false,
+            },
+            1000,
+            None,
+        );
+        assert_eq!(res1["ok"], true);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !tm.lock().unwrap().list().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "blocked large stdin write must not bypass timeout and wedge slot"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let last1 = tm.lock().unwrap().recent_completed().last().copied().unwrap().clone();
+        assert_eq!(last1.status, "timeout");
+
+        // 2. Explicit stop() must also cancel a blocked large stdin write and free slot.
+        let payload_b = large_stdin;
+        #[cfg(windows)]
+        let stall_cmd_b = move |_req: &TaskStartRequest, _id: &str| {
+            Some(TaskCommandSpec {
+                program: PathBuf::from("ping.exe"),
+                args: vec!["-n".into(), "15".into(), "127.0.0.1".into()],
+                stdin_payload: Some(payload_b.clone()),
+            })
+        };
+        #[cfg(not(windows))]
+        let stall_cmd_b = move |_req: &TaskStartRequest, _id: &str| {
+            Some(TaskCommandSpec {
+                program: PathBuf::from("sleep"),
+                args: vec!["15".into()],
+                stdin_payload: Some(payload_b.clone()),
+            })
+        };
+        {
+            let mut g = tm.lock().unwrap();
+            g.set_timeout(Duration::from_secs(30));
+            g.set_command_override(Arc::new(stall_cmd_b));
+        }
+        let res2 = start_and_spawn(
+            Arc::clone(&tm),
+            TaskStartRequest {
+                dir: dir.path().to_string_lossy().into_owned(),
+                text: "blocked stdin stop".into(),
+                agent: "antigravity".into(),
+                model: String::new(),
+                fork: false,
+            },
+            2000,
+            None,
+        );
+        assert_eq!(res2["ok"], true);
+        let id2 = res2["task"]["id"].as_str().unwrap().to_owned();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(tm.lock().unwrap().stop(&id2));
+        assert!(tm.lock().unwrap().list().is_empty());
+
+        // 3. Large bidirectional stdin -> stdout echo completes concurrently without deadlock.
+        let echo_payload = "echo line ok hello world from stdin pipe\n".repeat(600);
+        let payload_c = echo_payload.clone();
+        #[cfg(windows)]
+        let echo_cmd = move |_req: &TaskStartRequest, _id: &str| {
+            Some(TaskCommandSpec {
+                program: PathBuf::from("findstr.exe"),
+                args: vec!["hello".into()],
+                stdin_payload: Some(payload_c.clone()),
+            })
+        };
+        #[cfg(not(windows))]
+        let echo_cmd = move |_req: &TaskStartRequest, _id: &str| {
+            Some(TaskCommandSpec {
+                program: PathBuf::from("cat"),
+                args: Vec::new(),
+                stdin_payload: Some(payload_c.clone()),
+            })
+        };
+        {
+            let mut g = tm.lock().unwrap();
+            g.set_timeout(Duration::from_secs(5));
+            g.set_command_override(Arc::new(echo_cmd));
+        }
+        let res3 = start_and_spawn(
+            Arc::clone(&tm),
+            TaskStartRequest {
+                dir: dir.path().to_string_lossy().into_owned(),
+                text: "bidirectional large stdin stdout".into(),
+                agent: "antigravity".into(),
+                model: String::new(),
+                fork: false,
+            },
+            3000,
+            None,
+        );
+        assert_eq!(res3["ok"], true);
+        let deadline3 = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !tm.lock().unwrap().list().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline3,
+                "bidirectional large stdin/stdout child must complete concurrently without deadlocking"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let last3 = tm.lock().unwrap().recent_completed().last().copied().unwrap().clone();
+        assert_eq!(last3.status, "done");
+        assert!(
+            last3.result.starts_with("echo line ok"),
+            "expected echoed stdout starting with 'echo line ok', got: {:?}",
+            last3.result
+        );
     }
 }
