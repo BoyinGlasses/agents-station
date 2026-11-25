@@ -68,11 +68,45 @@ fn tick_ui_timers(time: Res<Time>, mut state: ResMut<UiState>) {
     state.tick_toasts(time.delta_secs());
 }
 
+fn draw_server_banner(ctx: &egui::Context, state: &mut UiState) {
+    let Some(msg) = state.server_banner.clone() else {
+        return;
+    };
+    egui::Area::new(egui::Id::new("station_server_banner"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 56.0))
+        .show(ctx, |ui| {
+            egui::Frame::NONE
+                .fill(egui::Color32::from_rgba_unmultiplied(64, 22, 22, 242))
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(12, 7))
+                .stroke(egui::Stroke::new(1.4_f32, theme::STATUS_ERR))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("SERVER ERROR")
+                                .strong()
+                                .size(11.0)
+                                .color(theme::STATUS_ERR),
+                        );
+                        ui.label(
+                            egui::RichText::new(&msg)
+                                .size(11.5)
+                                .color(theme::TEXT_PRIMARY),
+                        );
+                        if ui.small_button("×").clicked() {
+                            state.server_banner = None;
+                        }
+                    });
+                });
+        });
+}
+
 fn draw_full_station_ui(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
     match state.view_mode {
         ViewMode::Mode3D => hud::draw_hud(ctx, state, i18n),
         ViewMode::Lite2D | ViewMode::PanelCompact => lite_view::draw_lite_2d_view(ctx, state, i18n),
     }
+    draw_server_banner(ctx, state);
     drawers::draw_active_drawer(ctx, state, i18n);
 }
 

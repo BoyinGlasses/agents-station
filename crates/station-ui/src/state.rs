@@ -178,6 +178,7 @@ pub struct UiState {
     pub demo_running: bool,
     pub replay_playing: bool,
     pub server_port: u16,
+    pub server_banner: Option<String>,
     pub pairing_pin: String,
     pub target_fps: u32,
     pub sessions: Vec<SessionCard>,
@@ -228,6 +229,7 @@ impl UiState {
             demo_running: false,
             replay_playing: false,
             server_port: 4310,
+            server_banner: None,
             pairing_pin: "431088".to_owned(),
             target_fps: 60,
             sessions: vec![
