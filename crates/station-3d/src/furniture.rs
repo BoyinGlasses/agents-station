@@ -1,9 +1,12 @@
+use crate::interact::InteractiveProp;
 use crate::layout::LayoutSpec;
 use crate::palette::{
     WorldEntity, WorldPalette, spawn_box, spawn_box_rot, spawn_cyl, spawn_quad, spawn_sphere,
 };
 use crate::rooms::spawn_pot_plant;
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use station_canvas2d::boards_and_social::{
     WhiteboardInput, WhiteboardTask, draw_sticky_note, draw_whiteboard,
 };
@@ -13,6 +16,92 @@ use std::f32::consts::PI;
 #[derive(Component)]
 pub struct ServerFan {
     pub speed: f32,
+}
+
+#[derive(Component)]
+pub struct WhiteboardSurface;
+
+/// Redraws the 3D whiteboard texture in-place on its existing `Image` asset (zero leaked assets).
+pub fn redraw_whiteboard_surface(
+    text: &str,
+    streamer: bool,
+    wb_mat_handle: &Handle<StandardMaterial>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    fonts: &mut FontEngine,
+) -> bool {
+    let Some(mat) = materials.get(wb_mat_handle) else {
+        return false;
+    };
+    let Some(tex_handle) = mat.base_color_texture.clone() else {
+        return false;
+    };
+
+    let mut tasks = Vec::new();
+    let mut open_todos = 0usize;
+    let mut total_todos = 0usize;
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let body = trimmed
+            .trim_start_matches("- ")
+            .trim_start_matches("* ")
+            .trim();
+        let done = body.starts_with("[x]") || body.starts_with("[X]");
+        let clean = body
+            .trim_start_matches("[x]")
+            .trim_start_matches("[X]")
+            .trim_start_matches("[ ]")
+            .trim();
+        if clean.is_empty() {
+            continue;
+        }
+        total_todos += 1;
+        if !done {
+            open_todos += 1;
+        }
+        if tasks.len() < 4 {
+            tasks.push(WhiteboardTask {
+                name: format!("Note {}", tasks.len() + 1),
+                color: if done { hex("#3DDC84") } else { hex("#D97757") },
+                state: if done { "done".into() } else { "doing".into() },
+                prompt: clean.to_owned(),
+                todos_done: usize::from(done),
+                todos_total: 1,
+            });
+        }
+    }
+
+    let surf = draw_whiteboard(
+        &WhiteboardInput {
+            title: "Whiteboard".into(),
+            yours_title: "Yours".into(),
+            streamer,
+            tasks,
+            open_todos,
+            total_todos,
+        },
+        fonts,
+    );
+    let new_img = Image::new(
+        Extent3d {
+            width: surf.width.max(1),
+            height: surf.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        surf.rgba,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    if let Some(slot) = images.get_mut(&tex_handle) {
+        *slot = new_img;
+        true
+    } else {
+        false
+    }
 }
 
 /// Spawns whiteboard + stickies, coffee corner, meeting table, 3 server racks + fans,
@@ -66,7 +155,7 @@ pub fn spawn_furniture(
             fonts,
         );
         let wb_mat = palette.textured_lit(images, materials, wb_surf, 0.35);
-        spawn_quad(
+        let wb_ent = spawn_quad(
             commands,
             palette,
             wb_mat,
@@ -74,6 +163,10 @@ pub fn spawn_furniture(
             Vec2::new(3.1, 1.55),
             rot * Quat::from_rotation_y(PI * 0.5),
         );
+        commands.entity(wb_ent).insert((
+            WhiteboardSurface,
+            InteractiveProp::new("whiteboard", "office", "Office Whiteboard"),
+        ));
 
         let stickies = [
             ("Ship P3 3D world", false, hex("#FFE787"), 0.25_f32, -0.47_f32),
