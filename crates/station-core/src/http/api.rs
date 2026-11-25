@@ -2026,27 +2026,36 @@ pub async fn get_image(
     }
     let resolved = {
         let store = state.images.lock().unwrap_or_else(|e| e.into_inner());
-        store.resolve(id)
+        store.lookup(id)
     };
     match resolved {
         Err(crate::store::images::ImageResolveError::InvalidId) => {
             (StatusCode::BAD_REQUEST, sec_headers, "invalid id").into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, sec_headers, "not found").into_response(),
-        Ok((path, mime)) => match tokio::fs::read(&path).await {
-            Ok(bytes) => (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, mime),
-                    (header::CONTENT_SECURITY_POLICY, "sandbox"),
-                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-                    (header::CACHE_CONTROL, "private, max-age=30"),
-                ],
-                bytes,
-            )
-                .into_response(),
-            Err(_) => (StatusCode::NOT_FOUND, sec_headers, "not found").into_response(),
-        },
+        Ok((path, mime)) => {
+            let read_res = tokio::task::spawn_blocking(move || {
+                crate::store::images::read_image_bytes_bounded(
+                    &path,
+                    crate::store::images::MAX_IMAGE_BYTES,
+                )
+            })
+            .await;
+            match read_res {
+                Ok(Ok(bytes)) => (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, mime),
+                        (header::CONTENT_SECURITY_POLICY, "sandbox"),
+                        (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+                        (header::CACHE_CONTROL, "private, max-age=30"),
+                    ],
+                    bytes,
+                )
+                    .into_response(),
+                _ => (StatusCode::NOT_FOUND, sec_headers, "not found").into_response(),
+            }
+        }
     }
 }
 
