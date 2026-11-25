@@ -9,6 +9,7 @@ use crate::auth::{AuthStore, PinRateLimiter};
 use crate::config::{home_dir, resolve_claude_dir};
 use crate::platform::default_platform;
 use crate::prefs::PrefsStore;
+use crate::shared::duty::{DutyState, fresh as fresh_duty};
 use crate::state::auto_resume::AutoResumeGuard;
 use crate::state::claude_version::ClaudeVersionWatcher;
 use crate::state::git::GitTracker;
@@ -18,7 +19,9 @@ use crate::state::steer::SteerQueue;
 use crate::state::stranded::StrandedScanner;
 use crate::state::tasks::TaskManager;
 use crate::state::tenure::TenureStore;
+use crate::store::agent_history::AgentHistory;
 use crate::store::antigravity_accounts::AntigravityAccounts;
+use crate::store::antigravity_runs::AntigravityWatcher;
 use crate::store::codex_accounts::CodexAccounts;
 use crate::store::images::ImageStore;
 use crate::store::otel::OtelStore;
@@ -69,11 +72,14 @@ pub struct AppState {
     pub rewriter: Arc<Mutex<Rewriter>>,
     pub codex_accounts: Mutex<CodexAccounts>,
     pub ag_accounts: Mutex<AntigravityAccounts>,
-    pub claude_version: Mutex<ClaudeVersionWatcher>,
+    pub claude_version: Arc<Mutex<ClaudeVersionWatcher>>,
     pub images: Mutex<ImageStore>,
     pub git: Arc<Mutex<GitTracker>>,
     pub usage: Arc<Mutex<UsageScanner>>,
     pub stranded: Arc<Mutex<StrandedScanner>>,
+    pub agent_history: Arc<Mutex<AgentHistory>>,
+    pub ag_watcher: Arc<Mutex<AntigravityWatcher>>,
+    pub duty: Mutex<DutyState>,
     pub auto_resume: Mutex<AutoResumeGuard>,
     pub lift: LiftService,
     pub harnesses: Option<Arc<dyn HarnessApi>>,
@@ -97,11 +103,16 @@ impl AppState {
         let rewriter = Arc::new(Mutex::new(Rewriter::default()));
         let codex_accounts = CodexAccounts::load(&data_dir);
         let ag_accounts = AntigravityAccounts::load(&data_dir);
-        let claude_version = ClaudeVersionWatcher::load(&data_dir, home_dir());
+        let claude_version = Arc::new(Mutex::new(ClaudeVersionWatcher::load(&data_dir, home_dir())));
         let images = ImageStore::load(&data_dir);
         let git = Arc::new(Mutex::new(GitTracker::new()));
         let usage = Arc::new(Mutex::new(UsageScanner::new()));
         let stranded = Arc::new(Mutex::new(StrandedScanner::new()));
+        let agent_history = Arc::new(Mutex::new(AgentHistory::default()));
+        let ag_watcher = Arc::new(Mutex::new(AntigravityWatcher::new(
+            home_dir().join(".gemini").join("antigravity").join("brain"),
+        )));
+        let duty = Mutex::new(fresh_duty());
         let auto_resume = Mutex::new(AutoResumeGuard::default());
         let lift = LiftService::init(&data_dir, env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_VERSION"), now);
 
@@ -123,11 +134,14 @@ impl AppState {
             rewriter,
             codex_accounts: Mutex::new(codex_accounts),
             ag_accounts: Mutex::new(ag_accounts),
-            claude_version: Mutex::new(claude_version),
+            claude_version,
             images: Mutex::new(images),
             git,
             usage,
             stranded,
+            agent_history,
+            ag_watcher,
+            duty,
             auto_resume,
             lift,
             harnesses,
@@ -229,11 +243,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/sys/auto", post(api::post_sys_auto))
         .route("/api/panel", get(api::get_panel))
         .route("/api/panel/answer", post(api::post_panel_answer))
-        .route("/api/panel/open", post(api::post_local_ok))
+        .route("/api/panel/open", post(api::post_panel_open))
         .route("/api/chat", get(api::get_chat).post(api::post_chat))
         .route("/api/loop", get(api::get_loop).post(api::post_loop))
         .route("/api/tenure", get(api::get_tenure).post(api::post_tenure))
-        .route("/api/cache", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/cache", get(api::get_cache).post(api::post_cache))
         .route("/api/tasks", get(api::get_tasks).post(api::post_tasks))
         .route("/api/tasks/allow", post(api::post_tasks_allow))
         .route("/api/tasks/bg", post(api::post_tasks_bg))
@@ -241,21 +255,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/tasks/steer", post(api::post_tasks_steer))
         .route("/api/steer", post(api::post_tasks_steer))
         .route("/api/models", get(api::get_models).post(api::post_models))
-        .route("/api/quick", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/quick", get(api::get_quick).post(api::post_quick))
         .route("/api/claude-version", get(api::get_claude_version))
         .route("/api/push", get(api::get_push).post(api::post_push))
         .route("/api/image", get(api::get_image))
-        .route("/api/macapprove", get(api::get_generic_ok).post(api::post_local_ok))
+        .route("/api/macapprove", get(api::get_macapprove).post(api::post_macapprove))
         .route("/api/tunnel", get(api::get_generic_ok).post(api::post_local_ok))
         .route("/api/tunnel/domain", post(api::post_local_ok))
         .route("/api/presence", post(api::post_presence))
         .route("/api/perm", post(api::post_perm))
         .route("/api/pin", post(api::post_pin_update))
-        .route("/api/lan", post(api::post_local_ok))
-        .route("/api/phone", post(api::post_local_ok))
-        .route("/api/rc", post(api::post_local_ok))
+        .route("/api/lan", post(api::post_lan))
+        .route("/api/phone", post(api::post_phone))
+        .route("/api/rc", post(api::post_rc))
         .route("/api/prompt/rewrite", post(api::post_prompt_rewrite))
-        .route("/api/open", post(api::post_local_ok))
+        .route("/api/open", post(api::post_open))
         .route("/api/denied", post(api::post_denied))
         .route("/api/ci", post(api::post_ci))
         .route("/api/prefs", get(api::get_prefs).post(api::post_prefs))
@@ -309,7 +323,15 @@ fn spawn_maintenance_loop_with_intervals(
                     let _ = state.flush_dirty_otel(now_ms());
                 }
                 _ = reap_tick.tick() => {
-                    let _ = state.reap_once(now_ms());
+                    let now = now_ms();
+                    let _ = state.reap_once(now);
+                    let cv = Arc::clone(&state.claude_version);
+                    let ag = Arc::clone(&state.ag_watcher);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        cv.lock().unwrap_or_else(|e| e.into_inner()).check(now);
+                        let _ = ag.lock().unwrap_or_else(|e| e.into_inner()).scan_changed();
+                    })
+                    .await;
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {

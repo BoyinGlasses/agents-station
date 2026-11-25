@@ -57,9 +57,47 @@ pub async fn get_live(
     let lang = state.prefs.lock().unwrap_or_else(|e| e.into_inner()).lang();
     let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     let mut snap = office.snapshot_json(local, lang);
+    let today_date = chrono::Local::now().date_naive();
+    let today_str = today_date.format("%Y-%m-%d").to_string();
+    let prev_str = today_date
+        .pred_opt()
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    let people: Vec<crate::shared::duty::DutyPerson> = office
+        .sessions
+        .values()
+        .map(|s| crate::shared::duty::DutyPerson {
+            key: s.id.clone(),
+            name: s.name.clone(),
+        })
+        .collect();
+    let duty_view = {
+        let mut d = state.duty.lock().unwrap_or_else(|e| e.into_inner());
+        let rolled = crate::shared::duty::roll(&d, &today_str, &prev_str);
+        *d = crate::shared::duty::assign_exact(&rolled, &people);
+        d.clone()
+    };
+    let lunches: Vec<Value> = office
+        .sessions
+        .values()
+        .filter(|s| crate::shared::comnha::brings_lunch(&s.id, today_date, false))
+        .map(|s| {
+            let b = crate::shared::comnha::lunch_of(&s.id, today_date);
+            json!({
+                "id": s.id,
+                "box": b,
+                "warmAt": crate::shared::comnha::warm_at(&s.id, today_date),
+            })
+        })
+        .collect();
     if let Some(obj) = snap.as_object_mut() {
-        obj.insert("trophies".to_owned(), state.trophies.lock().unwrap_or_else(|e| e.into_inner()).pub_view());
+        obj.insert(
+            "trophies".to_owned(),
+            state.trophies.lock().unwrap_or_else(|e| e.into_inner()).pub_view(),
+        );
         obj.insert("lift".to_owned(), json!(state.lift.pub_view(now_ms())));
+        obj.insert("duty".to_owned(), json!(duty_view));
+        obj.insert("lunch".to_owned(), Value::Array(lunches));
         if local {
             obj.insert("pin".to_owned(), Value::String(state.auth.current_pin()));
         }
@@ -91,12 +129,34 @@ pub async fn get_doctor(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let ag_watcher = Arc::clone(&state.ag_watcher);
+    let agent_hist = Arc::clone(&state.agent_history);
+    let claude_projects = state.claude_dir.join("projects");
+    let (vsix_count, ag_changed, history_count) = tokio::task::spawn_blocking(move || {
+        let vsix = crate::store::vsix::find_installed_claude_vsix(&crate::config::home_dir()).len();
+        let ag = ag_watcher
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .scan_changed()
+            .len();
+        let hist = {
+            let mut h = agent_hist.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = h.scan_jsonl_dir("claude", &claude_projects);
+            h.list(None, 50).len()
+        };
+        (vsix, ag, hist)
+    })
+    .await
+    .unwrap_or((0, 0, 0));
     Ok(Json(json!({
         "ok": true,
         "platform": state.sys.platform().name(),
         "dataDir": state.data_dir,
         "otel": state.otel.lock().unwrap_or_else(|e| e.into_inner()).info(),
         "sessions": state.office.lock().unwrap_or_else(|e| e.into_inner()).sessions.len(),
+        "vsix": vsix_count,
+        "antigravityRuns": ag_changed,
+        "agentHistory": history_count,
     })))
 }
 
@@ -108,6 +168,23 @@ pub async fn get_log(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if let Some(sid) = q.get("id").filter(|s| !s.is_empty()) {
+        let tp = {
+            let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+            office
+                .sessions
+                .get(sid)
+                .and_then(|s| s.transcript_path.clone())
+        };
+        if let Some(path) = tp {
+            let items = tokio::task::spawn_blocking(move || {
+                crate::store::codex_history::read_codex_history(&path, 120)
+            })
+            .await
+            .unwrap_or_default();
+            return Ok(Json(json!({ "ok": true, "items": items })));
+        }
+    }
     let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "feed": office.feed })))
 }
@@ -165,12 +242,21 @@ pub async fn get_replay(
     if !is_valid_day_key(day) {
         return Err(StatusCode::BAD_REQUEST);
     }
+    let from = q.get("from").and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let to = q
+        .get("to")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(u64::MAX);
     let file = state.data_dir.join("replay").join(format!("{day}.jsonl"));
     let items: Vec<Value> = std::fs::read_to_string(file)
         .ok()
         .map(|t| {
             t.lines()
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|v| {
+                    let ts = v.get("t").and_then(Value::as_u64).unwrap_or(0);
+                    ts >= from && ts <= to
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -196,7 +282,8 @@ pub async fn get_replay_days(
         })
         .collect();
     days.sort();
-    Ok(Json(json!({ "ok": true, "days": days })))
+    let today = crate::store::otel::day_key(now_ms());
+    Ok(Json(json!({ "ok": true, "days": days, "today": today })))
 }
 
 fn collect_stranded_dirs(state: &AppState) -> (Vec<String>, Vec<String>) {
@@ -367,7 +454,11 @@ pub async fn get_undo(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let sid = q.get("sid").map(String::as_str).unwrap_or("");
+    let sid = q
+        .get("id")
+        .or_else(|| q.get("sid"))
+        .map(String::as_str)
+        .unwrap_or("");
     let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     Ok(Json(json!({ "ok": true, "plan": office.undo.plan(sid) })))
 }
@@ -377,13 +468,99 @@ pub async fn post_undo(
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
     Json(body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    require_local_post(peer, via_tunnel, &headers)?;
-    let sid = body.get("sid").and_then(Value::as_str).unwrap_or("");
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    require_task_permission(&state, local)?;
+    let sid = body
+        .get("id")
+        .or_else(|| body.get("sid"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if sid.is_empty() {
+        return Ok((StatusCode::NOT_FOUND, Json(json!({ "ok": false, "code": "gone" }))));
+    }
+
+    if body.get("op").and_then(Value::as_str) == Some("tell") {
+        let files_str = match body.get("files") {
+            Some(Value::String(s)) => s.chars().take(2000).collect::<String>(),
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+                .chars()
+                .take(2000)
+                .collect(),
+            _ => String::new(),
+        };
+        let note = format!("Heads up: reverted files from your last turn: {files_str}");
+        let (sess_busy, sess_cwd) = {
+            let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+            office
+                .sessions
+                .get(sid)
+                .map(|s| (s.status != "rest", s.cwd.clone()))
+                .unwrap_or((false, String::new()))
+        };
+        if sess_busy {
+            let (st, val) = steer_inner(&state, &json!({ "sid": sid, "text": note })).await;
+            return Ok((st, Json(val)));
+        }
+        let res = spawn_task_with_card(
+            &state,
+            crate::state::tasks::TaskStartRequest {
+                dir: sess_cwd,
+                text: note,
+                agent: "claude".to_owned(),
+                model: String::new(),
+                fork: false,
+            },
+        );
+        let st = if res.get("ok").and_then(Value::as_bool) == Some(true) {
+            StatusCode::OK
+        } else {
+            StatusCode::CONFLICT
+        };
+        return Ok((st, Json(res)));
+    }
+
+    let only_files: Option<Vec<String>> = body
+        .get("files")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        });
     let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
-    let res = office.undo.apply(sid, now_ms());
-    Ok(Json(json!({ "ok": true, "result": res })))
+    if office
+        .sessions
+        .get(sid)
+        .is_some_and(|s| s.status != "rest")
+    {
+        return Ok((StatusCode::CONFLICT, Json(json!({ "ok": false, "code": "busy" }))));
+    }
+    let ts = now_ms();
+    let res = office
+        .undo
+        .apply_filtered(sid, ts, only_files.as_deref());
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "done": res.done,
+            "after": res.after,
+            "result": res,
+        })),
+    ))
 }
 
 pub async fn get_burn(
@@ -471,6 +648,23 @@ pub async fn get_chat(
     })))
 }
 
+fn is_valid_chat_photo(data: &str) -> bool {
+    if data.len() >= 500_000 {
+        return false;
+    }
+    let Some(rest) = data
+        .strip_prefix("data:image/jpeg;base64,")
+        .or_else(|| data.strip_prefix("data:image/png;base64,"))
+        .or_else(|| data.strip_prefix("data:image/webp;base64,"))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
 pub async fn post_chat(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -484,16 +678,36 @@ pub async fn post_chat(
         state.allowed_tunnel_host().as_deref(),
         via_tunnel,
     )?;
-    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     let ts = now_ms();
     let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     let op = body.get("op").and_then(Value::as_str).unwrap_or("send");
     match op {
+        "send" => {
+            let raw_text = body.get("text").and_then(Value::as_str).unwrap_or("");
+            let text = crate::redact::redact(raw_text);
+            let sticker = body.get("sticker").and_then(Value::as_u64).map(|v| v as u32);
+            let reply = body
+                .get("replyTo")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .and_then(|rid| office.chat.reply_ref(rid));
+            let msg = office
+                .chat
+                .send_rich("me", "Boss", &text, ts, false, sticker, None, reply);
+            let _ = office.save_chat();
+            office.broadcast(json!({ "k": "chat", "op": "send", "m": msg }));
+            Ok(Json(json!({ "ok": true, "msg": msg })))
+        }
         "react" => {
             let id = body.get("id").and_then(Value::as_str).unwrap_or("");
             let emoji = body.get("emoji").and_then(Value::as_str).unwrap_or("");
             let ok = office.chat.react(id, "me", emoji);
             let _ = office.save_chat();
+            if ok {
+                let m = office.chat.by_id(id).cloned();
+                office.broadcast(json!({ "k": "chat", "op": "react", "id": id, "m": m }));
+            }
             Ok(Json(json!({ "ok": ok })))
         }
         "vote" => {
@@ -501,27 +715,112 @@ pub async fn post_chat(
             let idx = body.get("i").and_then(Value::as_u64).unwrap_or(0) as usize;
             let ok = office.chat.vote(id, "me", idx);
             let _ = office.save_chat();
+            if ok {
+                let m = office.chat.by_id(id).cloned();
+                office.broadcast(json!({ "k": "chat", "op": "vote", "id": id, "m": m }));
+            }
+            Ok(Json(json!({ "ok": ok })))
+        }
+        "rsvp" => {
+            let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+            let yes = body.get("yes").and_then(Value::as_bool).unwrap_or(false);
+            let ok = office.chat.rsvp(id, "me", yes);
+            let _ = office.save_chat();
+            if ok {
+                let m = office.chat.by_id(id).cloned();
+                office.broadcast(json!({ "k": "chat", "op": "rsvp", "id": id, "m": m }));
+            }
             Ok(Json(json!({ "ok": ok })))
         }
         "recall" => {
             let id = body.get("id").and_then(Value::as_str).unwrap_or("");
             let ok = office.chat.recall(id);
             let _ = office.save_chat();
+            if ok {
+                office.broadcast(json!({ "k": "chat", "op": "recall", "id": id }));
+            }
             Ok(Json(json!({ "ok": ok })))
         }
         "pin" => {
             let id = body.get("id").and_then(Value::as_str).unwrap_or("");
             let ok = office.chat.pin(id);
             let _ = office.save_chat();
+            if ok {
+                office.broadcast(json!({ "k": "chat", "op": "pin", "id": id }));
+            }
             Ok(Json(json!({ "ok": ok })))
         }
-        _ => {
-            let raw_text = body.get("text").and_then(Value::as_str).unwrap_or("");
-            let text = crate::redact::redact(raw_text);
-            let msg = office.chat.say("me", "Boss", &text, ts, false, None);
+        "poll" => {
+            let q_text = crate::redact::redact(body.get("q").and_then(Value::as_str).unwrap_or(""));
+            let opts: Vec<String> = body
+                .get("opts")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .take(6)
+                        .filter_map(Value::as_str)
+                        .map(crate::redact::redact)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let Some(msg) = office.chat.poll("me", "Boss", &q_text, &opts, ts) else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
             let _ = office.save_chat();
+            office.broadcast(json!({ "k": "chat", "op": "poll", "m": msg }));
             Ok(Json(json!({ "ok": true, "msg": msg })))
         }
+        "photo" => {
+            if !local {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            let data = body.get("data").and_then(Value::as_str).unwrap_or("");
+            if !is_valid_chat_photo(data) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let msg = office.chat.photo("me", "Boss", data.to_owned(), ts);
+            let _ = office.save_chat();
+            office.broadcast(json!({ "k": "chat", "op": "photo", "m": msg }));
+            Ok(Json(json!({ "ok": true, "msg": msg })))
+        }
+        "say" => {
+            if !local {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            let key = body.get("key").and_then(Value::as_str);
+            if !office.chat.fresh(key) {
+                return Ok(Json(json!({ "ok": true, "deduped": true })));
+            }
+            let from: String = body
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("reception")
+                .chars()
+                .take(60)
+                .collect();
+            let name = body
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&from)
+                .to_owned();
+            let text = crate::redact::redact(body.get("text").and_then(Value::as_str).unwrap_or(""));
+            let sticker = body.get("sticker").and_then(Value::as_u64).map(|v| v as u32);
+            let photo = body
+                .get("photo")
+                .and_then(Value::as_str)
+                .filter(|d| is_valid_chat_photo(d))
+                .map(str::to_owned);
+            let msg = office
+                .chat
+                .send_rich(&from, &name, &text, ts, false, sticker, photo, None);
+            if body.get("pin").and_then(Value::as_bool) == Some(true) {
+                office.chat.pin(&msg.id);
+            }
+            let _ = office.save_chat();
+            office.broadcast(json!({ "k": "chat", "op": "say", "m": msg }));
+            Ok(Json(json!({ "ok": true, "msg": msg })))
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
     }
 }
 
@@ -1670,8 +1969,262 @@ pub async fn get_claude_version(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let v = state.claude_version.lock().unwrap_or_else(|e| e.into_inner()).current().clone();
-    Ok(Json(json!({ "ok": true, "version": v })))
+    let cv = Arc::clone(&state.claude_version);
+    let now = now_ms();
+    let v = tokio::task::spawn_blocking(move || {
+        let mut g = cv.lock().unwrap_or_else(|e| e.into_inner());
+        if g.current().version.is_none() {
+            g.check(now).clone()
+        } else {
+            g.current().clone()
+        }
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({
+        "ok": true,
+        "version": v,
+        "prev": v.prev,
+        "at": v.at,
+    })))
+}
+
+pub async fn get_cache(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let nudge = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("cacheNudge")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(Json(json!({ "ok": true, "nudge": nudge })))
+}
+
+pub async fn post_cache(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let nudge = body.get("nudge").and_then(Value::as_bool).unwrap_or(false);
+    let _ = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set("cacheNudge", if nudge { Some(Value::Bool(true)) } else { None });
+    Ok(Json(json!({ "ok": true, "nudge": nudge })))
+}
+
+pub async fn get_quick(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let list: Option<Value> = std::fs::read_to_string(state.data_dir.join("quick.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    Ok(Json(json!({ "ok": true, "list": list })))
+}
+
+pub async fn post_quick(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let list: Vec<Value> = body
+        .get("list")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .take(12)
+                .filter_map(|item| {
+                    let label: String = one_line(item.get("label").and_then(Value::as_str).unwrap_or(""))
+                        .chars()
+                        .take(24)
+                        .collect();
+                    let prompt: String = item
+                        .get("prompt")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .chars()
+                        .take(2000)
+                        .collect();
+                    if label.is_empty() || prompt.is_empty() {
+                        None
+                    } else {
+                        Some(json!({
+                            "label": crate::redact::redact(&label),
+                            "prompt": crate::redact::redact(&prompt),
+                        }))
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::atomic::write_json_atomic(&state.data_dir.join("quick.json"), &list)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "ok": true, "list": list })))
+}
+
+pub async fn get_macapprove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    if !local {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let on = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get("macApprove")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    Ok(Json(json!({ "ok": true, "on": on })))
+}
+
+pub async fn post_macapprove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(true);
+    let _ = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set("macApprove", if !on { Some(Value::Bool(false)) } else { None });
+    Ok(Json(json!({ "ok": true, "on": on })))
+}
+
+pub async fn post_phone(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let approve = body.get("approve").and_then(Value::as_bool).unwrap_or(false);
+    let tasks_on = {
+        let mut prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = prefs.set("phoneApprove", if approve { Some(Value::Bool(true)) } else { None });
+        prefs
+            .get("phoneTasks")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    state
+        .office
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .broadcast(json!({ "k": "phone", "approve": approve, "tasks": tasks_on }));
+    Ok(Json(json!({ "ok": true, "approve": approve })))
+}
+
+pub async fn post_lan(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    let _ = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set("lan", if on { Some(Value::Bool(true)) } else { None });
+    Ok(Json(json!({ "ok": true, "on": on, "pin": state.auth.current_pin() })))
+}
+
+pub async fn post_rc(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    let _ = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .set("rcAtStartup", if on { Some(Value::Bool(true)) } else { None });
+    Ok(Json(json!({ "ok": true, "rc": on })))
+}
+
+pub async fn post_open(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("");
+    let cwd = {
+        let office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+        office.sessions.get(id).map(|s| s.cwd.clone())
+    };
+    let Some(dir) = cwd.filter(|s| !s.is_empty()) else {
+        return Ok(Json(json!({ "ok": false, "code": "gone" })));
+    };
+    let p = std::path::PathBuf::from(&dir);
+    let res = tokio::task::spawn_blocking(move || crate::state::stranded::open_folder(&p))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match res {
+        Ok(()) => Ok(Json(json!({ "ok": true, "path": dir }))),
+        Err(msg) => Ok(Json(json!({ "ok": false, "message": msg }))),
+    }
+}
+
+pub async fn post_panel_open(
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let what = body.get("what").and_then(Value::as_str).unwrap_or("");
+    let url = if what == "2d" {
+        format!("http://127.0.0.1:{}/?view=2d", crate::DEFAULT_PORT)
+    } else {
+        format!("http://127.0.0.1:{}/", crate::DEFAULT_PORT)
+    };
+    Ok(Json(json!({ "ok": true, "url": url })))
 }
 
 pub async fn post_todos(
@@ -2772,5 +3325,325 @@ mod tests {
                 .unwrap();
         assert_eq!(empty_body["ok"], false);
         assert_eq!(empty_body["code"], "empty");
+    }
+
+    #[tokio::test]
+    async fn post_chat_supports_all_ops_broadcasts_sse_and_rejects_unknown_op() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let mut rx = state.office.lock().unwrap().subscribe();
+        let app = build_router(state.clone());
+
+        let post = |body: Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/api/chat")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+
+        // 1. Unknown op -> 400
+        let bad = app.clone().oneshot(post(json!({ "op": "bogus" }))).await.unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        // 2. send + SSE broadcast { k: "chat" }
+        let r1 = app
+            .clone()
+            .oneshot(post(json!({ "op": "send", "text": "hello world" })))
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1: Value =
+            serde_json::from_slice(&to_bytes(r1.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        let msg_id = b1["msg"]["id"].as_str().unwrap().to_owned();
+        let sse_ev = rx.try_recv().expect("POST /api/chat must broadcast SSE event");
+        assert_eq!(sse_ev["k"], "chat");
+
+        // 3. send with replyTo + sticker
+        let r2 = app
+            .clone()
+            .oneshot(post(json!({ "op": "send", "text": "replying", "replyTo": msg_id, "sticker": 3 })))
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2: Value =
+            serde_json::from_slice(&to_bytes(r2.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(b2["msg"]["sticker"], 3);
+        assert_eq!(b2["msg"]["reply"]["id"], msg_id);
+
+        // 4. poll + vote + pin + react + photo + say + rsvp + recall
+        let r_poll = app
+            .clone()
+            .oneshot(post(json!({ "op": "poll", "q": "Ship?", "opts": ["Yes", "No"] })))
+            .await
+            .unwrap();
+        assert_eq!(r_poll.status(), StatusCode::OK);
+        let b_poll: Value =
+            serde_json::from_slice(&to_bytes(r_poll.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        let poll_id = b_poll["msg"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            app.clone()
+                .oneshot(post(json!({ "op": "vote", "id": poll_id, "i": 0 })))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post(json!({ "op": "photo", "data": "data:image/jpeg;base64,/9j/4AAQ" })))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post(json!({ "op": "say", "from": "reception", "text": "Welcome!" })))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(post(json!({ "op": "rsvp", "id": msg_id, "yes": true })))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn post_undo_supports_selective_files_and_tell_op() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let fa = ws.join("a.txt");
+        let fb = ws.join("b.txt");
+        std::fs::write(&fa, "orig-a").unwrap();
+        std::fs::write(&fb, "orig-b").unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        #[cfg(windows)]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("cmd.exe"),
+            args: vec!["/C".into(), "echo".into(), "ok".into()],
+        };
+        #[cfg(not(windows))]
+        let fast_cmd = || crate::state::tasks::TaskCommandSpec {
+            program: std::path::PathBuf::from("sh"),
+            args: vec!["-c".into(), "echo ok".into()],
+        };
+        state
+            .tasks
+            .lock()
+            .unwrap()
+            .set_command_override(Arc::new(move |_req, _id| Some(fast_cmd())));
+        let app = build_router(state.clone());
+
+        for ev in [
+            json!({ "session_id": "s-undo", "hook_event_name": "UserPromptSubmit", "cwd": ws.to_string_lossy(), "prompt": "edit two files" }),
+            json!({ "session_id": "s-undo", "hook_event_name": "PreToolUse", "cwd": ws.to_string_lossy(), "tool_name": "Edit", "tool_input": { "file_path": fa.to_string_lossy() } }),
+            json!({ "session_id": "s-undo", "hook_event_name": "PreToolUse", "cwd": ws.to_string_lossy(), "tool_name": "Edit", "tool_input": { "file_path": fb.to_string_lossy() } }),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/event")
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(ev.to_string()))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+        std::fs::write(&fa, "new-a").unwrap();
+        std::fs::write(&fb, "new-b").unwrap();
+        let stop_req = Request::builder()
+            .method("POST")
+            .uri("/event")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "session_id": "s-undo", "hook_event_name": "Stop", "cwd": ws.to_string_lossy() }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(stop_req).await.unwrap().status(), StatusCode::OK);
+
+        // Selective undo: restore ONLY a.txt, leave b.txt modified!
+        let canon_a = std::fs::canonicalize(&fa).unwrap();
+        let undo_req = Request::builder()
+            .method("POST")
+            .uri("/api/undo")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "id": "s-undo", "files": [canon_a.to_string_lossy()] }).to_string(),
+            ))
+            .unwrap();
+        let undo_resp = app.clone().oneshot(undo_req).await.unwrap();
+        assert_eq!(undo_resp.status(), StatusCode::OK);
+        let undo_body: Value =
+            serde_json::from_slice(&to_bytes(undo_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(undo_body["ok"], true);
+        assert_eq!(std::fs::read_to_string(&fa).unwrap(), "orig-a");
+        assert_eq!(std::fs::read_to_string(&fb).unwrap(), "new-b");
+
+        // op: "tell" notifies session
+        let tell_req = Request::builder()
+            .method("POST")
+            .uri("/api/undo")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "id": "s-undo", "op": "tell", "files": "a.txt" }).to_string(),
+            ))
+            .unwrap();
+        let tell_resp = app.oneshot(tell_req).await.unwrap();
+        assert_eq!(tell_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cache_quick_macapprove_phone_lan_rc_and_replay_range_work() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state.clone());
+
+        // /api/cache
+        let c_post = Request::builder()
+            .method("POST")
+            .uri("/api/cache")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "nudge": true }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(c_post).await.unwrap().status(), StatusCode::OK);
+        let c_get = Request::builder()
+            .uri("/api/cache")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let c_body: Value = serde_json::from_slice(
+            &to_bytes(app.clone().oneshot(c_get).await.unwrap().into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(c_body["nudge"], true);
+
+        // /api/quick
+        let q_post = Request::builder()
+            .method("POST")
+            .uri("/api/quick")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "list": [{ "label": "Test", "prompt": "run cargo test" }] }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(q_post).await.unwrap().status(), StatusCode::OK);
+        let q_get = Request::builder()
+            .uri("/api/quick")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let q_body: Value = serde_json::from_slice(
+            &to_bytes(app.clone().oneshot(q_get).await.unwrap().into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(q_body["list"].as_array().unwrap().len(), 1);
+        assert_eq!(q_body["list"][0]["label"], "Test");
+
+        // /api/macapprove
+        let m_post = Request::builder()
+            .method("POST")
+            .uri("/api/macapprove")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "on": false }).to_string()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(m_post).await.unwrap().status(), StatusCode::OK);
+        let m_get = Request::builder()
+            .uri("/api/macapprove")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let m_body: Value = serde_json::from_slice(
+            &to_bytes(app.clone().oneshot(m_get).await.unwrap().into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(m_body["on"], false);
+
+        // /api/phone, /api/lan, /api/rc persist prefs
+        for (uri, payload, key) in [
+            ("/api/phone", json!({ "approve": true }), "phoneApprove"),
+            ("/api/lan", json!({ "on": true }), "lan"),
+            ("/api/rc", json!({ "on": true }), "rcAtStartup"),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("host", "127.0.0.1:4310")
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+            assert_eq!(
+                state.prefs.lock().unwrap().get(key).and_then(Value::as_bool),
+                Some(true),
+                "{uri} must persist pref {key}"
+            );
+        }
+
+        // /api/replay?day=...&from=...&to=... filters by timestamp
+        let replay_dir = dir.path().join("replay");
+        std::fs::create_dir_all(&replay_dir).unwrap();
+        std::fs::write(
+            replay_dir.join("2026-11-25.jsonl"),
+            "{\"t\":1000,\"m\":{\"k\":\"ev\"}}\n{\"t\":5000,\"m\":{\"k\":\"ev\"}}\n",
+        )
+        .unwrap();
+        let rep_req = Request::builder()
+            .uri("/api/replay?day=2026-11-25&from=2000&to=6000")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let rep_body: Value = serde_json::from_slice(
+            &to_bytes(app.clone().oneshot(rep_req).await.unwrap().into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rep_body["items"].as_array().unwrap().len(), 1);
+        assert_eq!(rep_body["items"][0]["t"], 5000);
+
+        let days_req = Request::builder()
+            .uri("/api/replay/days")
+            .header("host", "127.0.0.1:4310")
+            .body(Body::empty())
+            .unwrap();
+        let days_body: Value = serde_json::from_slice(
+            &to_bytes(app.oneshot(days_req).await.unwrap().into_body(), 64 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(days_body["today"].as_str().is_some_and(|s| s.len() == 10));
     }
 }
