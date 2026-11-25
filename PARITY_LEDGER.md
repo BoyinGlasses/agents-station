@@ -244,246 +244,246 @@ Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 H
 
 ## P5 — UI, Panel, Components, App, Styles & i18n (240 files)
 
-- [ ] src/office/ui/activity.js -> (pending)
-- [ ] src/office/ui/ai-accounts.js -> (pending)
-- [ ] src/office/ui/burn.js -> (pending)
-- [ ] src/office/ui/cache-words.js -> (pending)
-- [ ] src/office/ui/camera-bar.js -> (pending)
-- [ ] src/office/ui/chat-avatars.js -> (pending)
-- [ ] src/office/ui/ci-card.js -> (pending)
-- [ ] src/office/ui/clip-music.js -> (pending)
-- [ ] src/office/ui/denied-card.js -> (pending)
-- [ ] src/office/ui/event-text.js -> (pending)
-- [ ] src/office/ui/group-chat-view.js -> (pending)
-- [ ] src/office/ui/group-chat.js -> (pending)
-- [ ] src/office/ui/icons.js -> (pending)
-- [ ] src/office/ui/image-view.js -> (pending)
-- [ ] src/office/ui/lite.js -> (pending)
-- [ ] src/office/ui/look-switch.js -> (pending)
-- [ ] src/office/ui/mac-approve.js -> (pending)
-- [ ] src/office/ui/mac-drawer.js -> (pending)
-- [ ] src/office/ui/model-choices.js -> (pending)
-- [ ] src/office/ui/models.js -> (pending)
-- [ ] src/office/ui/notify.js -> (pending)
-- [ ] src/office/ui/permissions.js -> (pending)
-- [ ] src/office/ui/phone-home.js -> (pending)
-- [ ] src/office/ui/phone.js -> (pending)
-- [ ] src/office/ui/photo.js -> (pending)
-- [ ] src/office/ui/pins.js -> (pending)
-- [ ] src/office/ui/portraits.js -> (pending)
-- [ ] src/office/ui/session-account.js -> (pending)
-- [ ] src/office/ui/session-compose.js -> (pending)
-- [ ] src/office/ui/session-drawer.js -> (pending)
-- [ ] src/office/ui/settings.js -> (pending)
-- [ ] src/office/ui/stranded.js -> (pending)
-- [ ] src/office/ui/stuck.js -> (pending)
-- [ ] src/office/ui/task-sheet.js -> (pending)
-- [ ] src/office/ui/ticks.js -> (pending)
-- [ ] src/office/ui/timelapse.js -> (pending)
-- [ ] src/office/ui/tips.js -> (pending)
-- [ ] src/office/ui/topbar.js -> (pending)
-- [ ] src/office/ui/undo-view.js -> (pending)
-- [ ] src/office/ui/vault.js -> (pending)
-- [ ] src/office/ui/whiteboard.js -> (pending)
-- [ ] src/office/ui/wrapped.js -> (pending)
-- [ ] src/panel/fmt.js -> (pending)
-- [ ] src/panel/keys.js -> (pending)
-- [ ] src/panel/mac.js -> (pending)
-- [ ] src/panel/main.js -> (pending)
-- [ ] src/panel/md.js -> (pending)
-- [ ] src/panel/quota.js -> (pending)
-- [ ] src/panel/session-card.js -> (pending)
-- [ ] src/components/OfficeBoot.tsx -> (pending)
-- [ ] src/components/PanelBoot.tsx -> (pending)
-- [ ] src/components/office/ActivityPanel.tsx -> (pending)
-- [ ] src/components/office/BurnDrawer.tsx -> (pending)
-- [ ] src/components/office/CameraToolbar.tsx -> (pending)
-- [ ] src/components/office/FirstPersonHud.tsx -> (pending)
-- [ ] src/components/office/MacDrawer.tsx -> (pending)
-- [ ] src/components/office/PhoneModal.tsx -> (pending)
-- [ ] src/components/office/PhotoBar.tsx -> (pending)
-- [ ] src/components/office/PlaceCard.tsx -> (pending)
-- [ ] src/components/office/ReplayBar.tsx -> (pending)
-- [ ] src/components/office/SessionDrawer.tsx -> (pending)
-- [ ] src/components/office/SessionRail.tsx -> (pending)
-- [ ] src/components/office/SettingsPanel.tsx -> (pending)
-- [ ] src/components/office/Stage.tsx -> (pending)
-- [ ] src/components/office/TimelinePanel.tsx -> (pending)
-- [ ] src/components/office/Toast.tsx -> (pending)
-- [ ] src/components/office/TopBar.tsx -> (pending)
-- [ ] src/components/office/VaultDrawer.tsx -> (pending)
-- [ ] src/components/office/WrappedModal.tsx -> (pending)
-- [ ] app/apple-icon.png -> (pending)
-- [ ] app/favicon.ico -> (pending)
-- [ ] app/icon.svg -> (pending)
-- [ ] app/layout.tsx -> (pending)
-- [ ] app/manifest.ts -> (pending)
-- [ ] app/opengraph-image.alt.txt -> (pending)
-- [ ] app/opengraph-image.jpg -> (pending)
-- [ ] app/page.tsx -> (pending)
-- [ ] app/panel/page.tsx -> (pending)
-- [ ] app/twitter-image.alt.txt -> (pending)
-- [ ] app/twitter-image.jpg -> (pending)
-- [ ] src/styles/activity.css -> (pending)
-- [ ] src/styles/base.css -> (pending)
-- [ ] src/styles/burn.css -> (pending)
-- [ ] src/styles/chat.css -> (pending)
-- [ ] src/styles/csgt.css -> (pending)
-- [ ] src/styles/drawers.css -> (pending)
-- [ ] src/styles/fonts.css -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-400-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-400-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-400-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-500-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-500-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-500-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-600-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-600-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-600-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-700-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-700-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-700-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-800-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-800-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/BeVietnamPro-800-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/JetBrainsMono-400-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/JetBrainsMono-400-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/JetBrainsMono-400-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/JetBrainsMono-600-latin-ext.woff2 -> (pending)
-- [ ] src/styles/fonts/JetBrainsMono-600-latin.woff2 -> (pending)
-- [ ] src/styles/fonts/JetBrainsMono-600-vietnamese.woff2 -> (pending)
-- [ ] src/styles/fonts/PlexThaiLooped-400-thai.woff2 -> (pending)
-- [ ] src/styles/fonts/PlexThaiLooped-500-thai.woff2 -> (pending)
-- [ ] src/styles/fonts/PlexThaiLooped-600-thai.woff2 -> (pending)
-- [ ] src/styles/fonts/PlexThaiLooped-700-thai.woff2 -> (pending)
-- [ ] src/styles/group-chat.css -> (pending)
-- [ ] src/styles/labels.css -> (pending)
-- [ ] src/styles/lite.css -> (pending)
-- [ ] src/styles/mac.css -> (pending)
-- [ ] src/styles/modal.css -> (pending)
-- [ ] src/styles/panel.css -> (pending)
-- [ ] src/styles/permissions.css -> (pending)
-- [ ] src/styles/phone.css -> (pending)
-- [ ] src/styles/photo.css -> (pending)
-- [ ] src/styles/places.css -> (pending)
-- [ ] src/styles/replay.css -> (pending)
-- [ ] src/styles/responsive.css -> (pending)
-- [ ] src/styles/sessions.css -> (pending)
-- [ ] src/styles/settings.css -> (pending)
-- [ ] src/styles/sidebars.css -> (pending)
-- [ ] src/styles/stage.css -> (pending)
-- [ ] src/styles/streamer.css -> (pending)
-- [ ] src/styles/timeline.css -> (pending)
-- [ ] src/styles/tips.css -> (pending)
-- [ ] src/styles/todos.css -> (pending)
-- [ ] src/styles/topbar-plan.css -> (pending)
-- [ ] src/styles/topbar.css -> (pending)
-- [ ] src/styles/vault.css -> (pending)
-- [ ] src/i18n/index.js -> (pending)
-- [ ] src/i18n/locales/en/activity.js -> (pending)
-- [ ] src/i18n/locales/en/ai.js -> (pending)
-- [ ] src/i18n/locales/en/board.js -> (pending)
-- [ ] src/i18n/locales/en/burn.js -> (pending)
-- [ ] src/i18n/locales/en/chat.js -> (pending)
-- [ ] src/i18n/locales/en/cli.js -> (pending)
-- [ ] src/i18n/locales/en/common.js -> (pending)
-- [ ] src/i18n/locales/en/demo.js -> (pending)
-- [ ] src/i18n/locales/en/drawer.js -> (pending)
-- [ ] src/i18n/locales/en/events.js -> (pending)
-- [ ] src/i18n/locales/en/fp.js -> (pending)
-- [ ] src/i18n/locales/en/incident.js -> (pending)
-- [ ] src/i18n/locales/en/index.js -> (pending)
-- [ ] src/i18n/locales/en/life.js -> (pending)
-- [ ] src/i18n/locales/en/lite.js -> (pending)
-- [ ] src/i18n/locales/en/mac.js -> (pending)
-- [ ] src/i18n/locales/en/panel.js -> (pending)
-- [ ] src/i18n/locales/en/people.js -> (pending)
-- [ ] src/i18n/locales/en/perm.js -> (pending)
-- [ ] src/i18n/locales/en/places.js -> (pending)
-- [ ] src/i18n/locales/en/props.js -> (pending)
-- [ ] src/i18n/locales/en/replay.js -> (pending)
-- [ ] src/i18n/locales/en/server.js -> (pending)
-- [ ] src/i18n/locales/en/settings.js -> (pending)
-- [ ] src/i18n/locales/en/time.js -> (pending)
-- [ ] src/i18n/locales/en/timeline.js -> (pending)
-- [ ] src/i18n/locales/en/tips.js -> (pending)
-- [ ] src/i18n/locales/en/topbar.js -> (pending)
-- [ ] src/i18n/locales/en/trophies.js -> (pending)
-- [ ] src/i18n/locales/en/ui.js -> (pending)
-- [ ] src/i18n/locales/en/vault.js -> (pending)
-- [ ] src/i18n/locales/en/world.js -> (pending)
-- [ ] src/i18n/locales/en/wrapped.js -> (pending)
-- [ ] src/i18n/locales/th/activity.js -> (pending)
-- [ ] src/i18n/locales/th/ai.js -> (pending)
-- [ ] src/i18n/locales/th/board.js -> (pending)
-- [ ] src/i18n/locales/th/burn.js -> (pending)
-- [ ] src/i18n/locales/th/chat-a.js -> (pending)
-- [ ] src/i18n/locales/th/chat-b.js -> (pending)
-- [ ] src/i18n/locales/th/chat.js -> (pending)
-- [ ] src/i18n/locales/th/cli.js -> (pending)
-- [ ] src/i18n/locales/th/common.js -> (pending)
-- [ ] src/i18n/locales/th/demo.js -> (pending)
-- [ ] src/i18n/locales/th/drawer.js -> (pending)
-- [ ] src/i18n/locales/th/events.js -> (pending)
-- [ ] src/i18n/locales/th/fp.js -> (pending)
-- [ ] src/i18n/locales/th/incident.js -> (pending)
-- [ ] src/i18n/locales/th/index.js -> (pending)
-- [ ] src/i18n/locales/th/life.js -> (pending)
-- [ ] src/i18n/locales/th/lite.js -> (pending)
-- [ ] src/i18n/locales/th/mac.js -> (pending)
-- [ ] src/i18n/locales/th/panel.js -> (pending)
-- [ ] src/i18n/locales/th/people-a.js -> (pending)
-- [ ] src/i18n/locales/th/people-b.js -> (pending)
-- [ ] src/i18n/locales/th/people.js -> (pending)
-- [ ] src/i18n/locales/th/perm.js -> (pending)
-- [ ] src/i18n/locales/th/places.js -> (pending)
-- [ ] src/i18n/locales/th/props.js -> (pending)
-- [ ] src/i18n/locales/th/replay.js -> (pending)
-- [ ] src/i18n/locales/th/server.js -> (pending)
-- [ ] src/i18n/locales/th/settings.js -> (pending)
-- [ ] src/i18n/locales/th/time.js -> (pending)
-- [ ] src/i18n/locales/th/timeline.js -> (pending)
-- [ ] src/i18n/locales/th/tips.js -> (pending)
-- [ ] src/i18n/locales/th/topbar.js -> (pending)
-- [ ] src/i18n/locales/th/trophies.js -> (pending)
-- [ ] src/i18n/locales/th/ui.js -> (pending)
-- [ ] src/i18n/locales/th/vault.js -> (pending)
-- [ ] src/i18n/locales/th/world.js -> (pending)
-- [ ] src/i18n/locales/th/wrapped.js -> (pending)
-- [ ] src/i18n/locales/vi/activity.js -> (pending)
-- [ ] src/i18n/locales/vi/ai.js -> (pending)
-- [ ] src/i18n/locales/vi/board.js -> (pending)
-- [ ] src/i18n/locales/vi/burn.js -> (pending)
-- [ ] src/i18n/locales/vi/chat.js -> (pending)
-- [ ] src/i18n/locales/vi/cli.js -> (pending)
-- [ ] src/i18n/locales/vi/common.js -> (pending)
-- [ ] src/i18n/locales/vi/demo.js -> (pending)
-- [ ] src/i18n/locales/vi/drawer.js -> (pending)
-- [ ] src/i18n/locales/vi/events.js -> (pending)
-- [ ] src/i18n/locales/vi/fp.js -> (pending)
-- [ ] src/i18n/locales/vi/incident.js -> (pending)
-- [ ] src/i18n/locales/vi/index.js -> (pending)
-- [ ] src/i18n/locales/vi/life.js -> (pending)
-- [ ] src/i18n/locales/vi/lite.js -> (pending)
-- [ ] src/i18n/locales/vi/mac.js -> (pending)
-- [ ] src/i18n/locales/vi/panel.js -> (pending)
-- [ ] src/i18n/locales/vi/people.js -> (pending)
-- [ ] src/i18n/locales/vi/perm.js -> (pending)
-- [ ] src/i18n/locales/vi/places.js -> (pending)
-- [ ] src/i18n/locales/vi/props.js -> (pending)
-- [ ] src/i18n/locales/vi/replay.js -> (pending)
-- [ ] src/i18n/locales/vi/server.js -> (pending)
-- [ ] src/i18n/locales/vi/settings.js -> (pending)
-- [ ] src/i18n/locales/vi/time.js -> (pending)
-- [ ] src/i18n/locales/vi/timeline.js -> (pending)
-- [ ] src/i18n/locales/vi/tips.js -> (pending)
-- [ ] src/i18n/locales/vi/topbar.js -> (pending)
-- [ ] src/i18n/locales/vi/trophies.js -> (pending)
-- [ ] src/i18n/locales/vi/ui.js -> (pending)
-- [ ] src/i18n/locales/vi/vault.js -> (pending)
-- [ ] src/i18n/locales/vi/world.js -> (pending)
-- [ ] src/i18n/locales/vi/wrapped.js -> (pending)
-- [ ] src/i18n/server.ts -> (pending)
+- [x] src/office/ui/activity.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/ai-accounts.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/burn.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/cache-words.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/camera-bar.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/chat-avatars.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/ci-card.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/clip-music.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/denied-card.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/event-text.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/group-chat-view.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/group-chat.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/icons.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/image-view.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/lite.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/office/ui/look-switch.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/mac-approve.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/mac-drawer.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/model-choices.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/models.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/notify.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/permissions.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/phone-home.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/phone.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/photo.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/pins.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/portraits.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/session-account.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/session-compose.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/session-drawer.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/settings.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/stranded.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/stuck.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/task-sheet.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/ticks.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/timelapse.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/tips.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/topbar.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/undo-view.js -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/office/ui/vault.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/whiteboard.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/office/ui/wrapped.js -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/panel/fmt.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/panel/keys.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/panel/mac.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/panel/main.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/panel/md.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/panel/quota.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/panel/session-card.js -> `crates/station-ui/src/lite_view.rs (2D Lite + /panel verified)`
+- [x] src/components/OfficeBoot.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/PanelBoot.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/ActivityPanel.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/BurnDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/CameraToolbar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/FirstPersonHud.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/MacDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/PhoneModal.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/PhotoBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/PlaceCard.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/ReplayBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/SessionDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/SessionRail.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/SettingsPanel.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/Stage.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/TimelinePanel.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/Toast.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/TopBar.tsx -> `crates/station-ui/src/{hud,drawers,launcher_dock,state}.rs (g5-hud-pro.png verified)`
+- [x] src/components/office/VaultDrawer.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] src/components/office/WrappedModal.tsx -> `crates/station-ui/src/drawers.rs + crates/station-ui/src/state.rs`
+- [x] app/apple-icon.png -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/favicon.ico -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/icon.svg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/layout.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/manifest.ts -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/opengraph-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/opengraph-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/panel/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/twitter-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/twitter-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] src/styles/activity.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/base.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/burn.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/chat.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/csgt.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/drawers.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-400-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-400-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-400-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-500-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-500-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-500-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-600-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-600-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-600-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-700-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-700-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-700-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-800-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-800-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/BeVietnamPro-800-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/JetBrainsMono-400-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/JetBrainsMono-400-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/JetBrainsMono-400-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/JetBrainsMono-600-latin-ext.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/JetBrainsMono-600-latin.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/JetBrainsMono-600-vietnamese.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/PlexThaiLooped-400-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/PlexThaiLooped-500-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/PlexThaiLooped-600-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/fonts/PlexThaiLooped-700-thai.woff2 -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/group-chat.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/labels.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/lite.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/mac.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/modal.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/panel.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/permissions.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/phone.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/photo.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/places.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/replay.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/responsive.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/sessions.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/settings.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/sidebars.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/stage.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/streamer.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/timeline.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/tips.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/todos.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/topbar-plan.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/topbar.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/styles/vault.css -> `crates/station-ui/src/theme.rs + crates/station-ui/src/fonts.rs (warm-slate tokens + 25 TTFs)`
+- [x] src/i18n/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/en/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/chat-a.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/chat-b.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/people-a.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/people-b.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/th/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/activity.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/ai.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/board.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/burn.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/chat.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/cli.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/common.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/demo.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/drawer.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/events.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/fp.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/incident.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/index.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/life.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/lite.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/mac.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/panel.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/people.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/perm.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/places.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/props.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/replay.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/server.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/settings.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/time.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/timeline.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/tips.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/topbar.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/trophies.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/ui.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/vault.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/world.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/locales/vi/wrapped.js -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
+- [x] src/i18n/server.ts -> `assets/i18n/{en,vi,th}.json + crates/station-ui/src/i18n.rs (en/vi/th verified)`
 
 ## P1 — HTTP / SSE / OTLP / Launcher Endpoints (106 endpoints)
 
