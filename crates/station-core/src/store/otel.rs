@@ -666,15 +666,36 @@ impl OtelStore {
         accepted
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.dirty || !self.dirty_days.is_empty()
+    }
+
     pub fn burn_summary(&self, range: &str, now_ms: u64) -> BurnSummary {
-        let n = if range == "7d" { 7 } else { 1 };
-        let mut keys = Vec::new();
-        for i in 0..n {
-            let dk = day_key(now_ms.saturating_sub(((n - 1 - i) as u64) * DAY_MS));
-            if !keys.contains(&dk) {
-                keys.push(dk);
+        let n = match range {
+            "30d" => 30usize,
+            "7d" => 7usize,
+            _ => 1usize,
+        };
+        let keys: Vec<String> = if let Some(today_dt) = Local.timestamp_millis_opt(now_ms as i64).single() {
+            let today = today_dt.date_naive();
+            (0..n)
+                .map(|i| {
+                    let delta = (n - 1 - i) as i64;
+                    (today - chrono::Duration::days(delta))
+                        .format("%Y-%m-%d")
+                        .to_string()
+                })
+                .collect()
+        } else {
+            let mut ks = Vec::with_capacity(n);
+            for i in 0..n {
+                let dk = day_key(now_ms.saturating_sub(((n - 1 - i) as u64) * DAY_MS));
+                if !ks.contains(&dk) {
+                    ks.push(dk);
+                }
             }
-        }
+            ks
+        };
         let pairs: Vec<(String, DayRollup)> = keys
             .into_iter()
             .map(|k| {
@@ -772,5 +793,48 @@ mod tests {
             assert!(!body.contains("sk-"), "secret leaked to otel disk");
             assert!(!body.contains("user.email"), "email attr leaked to otel disk");
         }
+    }
+
+    #[test]
+    fn burn_summary_30d_returns_30_days_and_includes_older_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_793_091_600_000u64;
+        let mut store = OtelStore::load(dir.path().join("otel"), 30, now);
+
+        let twenty_days_ago_ns = (now - 20 * DAY_MS) * 1_000_000;
+        let metrics = serde_json::json!({
+            "resourceMetrics": [{
+                "scopeMetrics": [{
+                    "metrics": [{
+                        "name": COST_METRIC,
+                        "sum": {
+                            "aggregationTemporality": 1,
+                            "dataPoints": [{
+                                "asDouble": 1.25,
+                                "startTimeUnixNano": (twenty_days_ago_ns - 1_000_000).to_string(),
+                                "timeUnixNano": twenty_days_ago_ns.to_string(),
+                                "attributes": [
+                                    { "key": "session.id", "value": { "stringValue": "s-old" } },
+                                    { "key": "model", "value": { "stringValue": "claude-sonnet-4" } }
+                                ]
+                            }]
+                        }
+                    }]
+                }]
+            }]
+        });
+        assert_eq!(store.ingest_metrics(&metrics, now), 1);
+
+        let sum_today = store.burn_summary("today", now);
+        assert_eq!(sum_today.per_day.len(), 1);
+        assert_eq!(sum_today.total.row.usd, 0.0);
+
+        let sum_7d = store.burn_summary("7d", now);
+        assert_eq!(sum_7d.per_day.len(), 7);
+        assert_eq!(sum_7d.total.row.usd, 0.0);
+
+        let sum_30d = store.burn_summary("30d", now);
+        assert_eq!(sum_30d.per_day.len(), 30);
+        assert!((sum_30d.total.row.usd - 1.25).abs() < 1e-6);
     }
 }
