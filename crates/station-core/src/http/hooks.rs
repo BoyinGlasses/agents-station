@@ -86,17 +86,16 @@ pub async fn post_hook_loop(
     if let Some(sid) = body.get("session_id").and_then(Value::as_str) {
         let tool = body.get("tool_name").and_then(Value::as_str).unwrap_or("");
         let input = body.get("tool_input").unwrap_or(&Value::Null);
-        let cwd = body
-            .get("cwd")
-            .and_then(Value::as_str)
+        let cwd = office
+            .sessions
+            .get(sid)
+            .map(|s| s.cwd.clone())
             .filter(|s| !s.is_empty())
-            .map(str::to_owned)
             .or_else(|| {
-                office
-                    .sessions
-                    .get(sid)
-                    .map(|s| s.cwd.clone())
+                body.get("cwd")
+                    .and_then(Value::as_str)
                     .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
             })
             .unwrap_or_default();
         if is_edit_tool(tool) {
@@ -342,5 +341,49 @@ mod tests {
             assert!(!deny_json.contains(secret), "deny_card leaked {secret}: {deny_json}");
         }
         assert!(deny_json.contains("safe-value"));
+    }
+
+    #[tokio::test]
+    async fn post_hook_loop_prefers_registered_session_cwd_over_payload_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "outside-before").unwrap();
+
+        let state = Arc::new(AppState::new(dir.path().join("data"), None).unwrap());
+        {
+            let mut office = state.office.lock().unwrap();
+            office.ingest_raw_event(json!({
+                "session_id": "sess-cwd-lock",
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": workspace.to_string_lossy(),
+                "prompt": "edit something"
+            }));
+        }
+
+        let app = build_router(state.clone());
+        // Payload attempts to widen cwd to parent directory and target outside.txt.
+        let payload = json!({
+            "session_id": "sess-cwd-lock",
+            "tool_name": "Edit",
+            "cwd": dir.path().to_string_lossy(),
+            "tool_input": { "file_path": outside.to_string_lossy() }
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/hook/loop")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let office = state.office.lock().unwrap();
+        assert!(
+            office.undo.plan("sess-cwd-lock").is_none(),
+            "hook payload cwd must not widen registered session.cwd boundary"
+        );
     }
 }
