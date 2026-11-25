@@ -1,4 +1,6 @@
 pub mod fonts;
+pub mod i18n;
+pub mod theme;
 
 use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;

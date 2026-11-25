@@ -5048,6 +5048,8 @@ name = "station-3d"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "serde",
+ "station-canvas2d",
  "station-core",
 ]
 
@@ -5136,7 +5138,11 @@ dependencies = [
  "anyhow",
  "bevy",
  "bevy_egui",
+ "serde",
+ "serde_json",
+ "station-3d",
  "station-core",
+ "station-launcher",
  "ttf-parser",
  "woff2-patched",
 ]
