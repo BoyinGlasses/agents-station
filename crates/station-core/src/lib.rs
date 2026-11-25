@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod prefs;
 pub mod redact;
+pub mod shared;
 
 pub const DEFAULT_PORT: u16 = 4310;
 pub const DEFAULT_HOST: &str = "127.0.0.1";

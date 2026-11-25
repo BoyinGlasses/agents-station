@@ -38,6 +38,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["cors"] }
 ttf-parser = "0.25"
+unicode-normalization = "0.1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
