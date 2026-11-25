@@ -7,6 +7,7 @@ pub mod prefs;
 pub mod redact;
 pub mod shared;
 pub mod state;
+pub mod store;
 pub mod system;
 
 pub const DEFAULT_PORT: u16 = 4310;
