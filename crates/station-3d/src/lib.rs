@@ -17,11 +17,15 @@ pub mod replay;
 pub mod rooms;
 
 use bevy::prelude::*;
+pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
+pub use desks::DeskScreen;
+pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
+pub use people::{LiveSessionWorker, LiveWorkerSpec};
 use station_canvas2d::{BrandRegistry, FontEngine};
 use std::path::{Path, PathBuf};
 
@@ -92,7 +96,9 @@ fn register_office_runtime(
         .insert_resource(SharedFontEngine::new(assets_dir))
         .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
-        .add_systems(
+        .add_event::<interact::WorkerSelected>();
+    interact::register_picking_observers(app);
+    app.add_systems(
             Update,
             (
                 props::animate_props_system,
