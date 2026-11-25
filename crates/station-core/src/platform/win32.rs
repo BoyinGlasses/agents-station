@@ -16,12 +16,14 @@ use windows_sys::Win32::System::SystemInformation::{
     GetTickCount, GlobalMemoryStatusEx, MEMORYSTATUSEX,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    TerminateProcess,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
 const MIB_TCP_STATE_LISTEN: u32 = 2;
 const MIB_TCP_STATE_ESTAB: u32 = 5;
+const STILL_ACTIVE: u32 = 259;
 const CACHE_TTL: Duration = Duration::from_secs(2);
 
 struct CachedReading {
@@ -161,13 +163,20 @@ fn collect_tcp_v4(
     if rc != ERROR_INSUFFICIENT_BUFFER || size == 0 {
         return;
     }
-    let mut buf = vec![0u8; size as usize + 1024];
-    size = buf.len() as u32;
-    // SAFETY: buffer is properly allocated with size bytes.
+    const _: () = assert!(
+        std::mem::align_of::<MIB_TCPTABLE_OWNER_PID>() <= std::mem::align_of::<u32>()
+    );
+    let words = (size as usize).saturating_add(1024).div_ceil(size_of::<u32>());
+    let mut buf = vec![0u32; words];
+    let buf_bytes = buf.len() * size_of::<u32>();
+    let Ok(mut cap) = u32::try_from(buf_bytes) else {
+        return;
+    };
+    // SAFETY: 4-byte aligned buffer allocated with `cap` bytes.
     let rc2 = unsafe {
         GetExtendedTcpTable(
             buf.as_mut_ptr() as *mut c_void,
-            &mut size,
+            &mut cap,
             0,
             AF_INET as u32,
             TCP_TABLE_OWNER_PID_ALL,
@@ -177,11 +186,11 @@ fn collect_tcp_v4(
     if rc2 != NO_ERROR {
         return;
     }
-    // SAFETY: GetExtendedTcpTable populated MIB_TCPTABLE_OWNER_PID in buf.
+    // SAFETY: buf is 4-byte aligned Vec<u32> of >= 1024 bytes, populated by GetExtendedTcpTable.
     let table = unsafe { &*(buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
     let base_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCPROW_OWNER_PID;
-    let max_rows = (buf.len().saturating_sub(size_of::<u32>())) / size_of::<MIB_TCPROW_OWNER_PID>();
+    let max_rows = (buf_bytes.saturating_sub(size_of::<u32>())) / size_of::<MIB_TCPROW_OWNER_PID>();
     for i in 0..count.min(max_rows) {
         // SAFETY: bounded by count.min(max_rows) within buf.
         let row = unsafe { &*base_ptr.add(i) };
@@ -216,13 +225,20 @@ fn collect_tcp_v6(
     if rc != ERROR_INSUFFICIENT_BUFFER || size == 0 {
         return;
     }
-    let mut buf = vec![0u8; size as usize + 1024];
-    size = buf.len() as u32;
-    // SAFETY: buffer is properly allocated with size bytes.
+    const _: () = assert!(
+        std::mem::align_of::<MIB_TCP6TABLE_OWNER_PID>() <= std::mem::align_of::<u32>()
+    );
+    let words = (size as usize).saturating_add(1024).div_ceil(size_of::<u32>());
+    let mut buf = vec![0u32; words];
+    let buf_bytes = buf.len() * size_of::<u32>();
+    let Ok(mut cap) = u32::try_from(buf_bytes) else {
+        return;
+    };
+    // SAFETY: 4-byte aligned buffer allocated with `cap` bytes.
     let rc2 = unsafe {
         GetExtendedTcpTable(
             buf.as_mut_ptr() as *mut c_void,
-            &mut size,
+            &mut cap,
             0,
             AF_INET6 as u32,
             TCP_TABLE_OWNER_PID_ALL,
@@ -232,11 +248,11 @@ fn collect_tcp_v6(
     if rc2 != NO_ERROR {
         return;
     }
-    // SAFETY: GetExtendedTcpTable populated MIB_TCP6TABLE_OWNER_PID in buf.
+    // SAFETY: buf is 4-byte aligned Vec<u32> of >= 1024 bytes, populated by GetExtendedTcpTable.
     let table = unsafe { &*(buf.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
     let base_ptr = std::ptr::addr_of!(table.table) as *const MIB_TCP6ROW_OWNER_PID;
-    let max_rows = (buf.len().saturating_sub(size_of::<u32>())) / size_of::<MIB_TCP6ROW_OWNER_PID>();
+    let max_rows = (buf_bytes.saturating_sub(size_of::<u32>())) / size_of::<MIB_TCP6ROW_OWNER_PID>();
     for i in 0..count.min(max_rows) {
         // SAFETY: bounded by count.min(max_rows) within buf.
         let row = unsafe { &*base_ptr.add(i) };
@@ -373,14 +389,16 @@ impl Platform for Win32Platform {
     }
 
     fn is_pid_alive(&self, pid: u32) -> bool {
-        // SAFETY: querying process existence via PROCESS_QUERY_LIMITED_INFORMATION.
+        // SAFETY: querying process exit status via PROCESS_QUERY_LIMITED_INFORMATION.
         unsafe {
             let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if h.is_null() {
                 return false;
             }
+            let mut code: u32 = 0;
+            let alive = GetExitCodeProcess(h, &mut code) != 0 && code == STILL_ACTIVE;
             CloseHandle(h);
-            true
+            alive
         }
     }
 }
@@ -414,5 +432,30 @@ mod tests {
         let my_ports = list.get(&my_pid).expect("current PID must have listening ports");
         assert!(my_ports.contains(&port), "bound port {port} not found in {my_ports:?}");
         drop(listener);
+    }
+
+    #[test]
+    fn win32_is_pid_alive_returns_false_for_exited_zombie_process() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let plat = Win32Platform::new();
+        assert!(plat.is_pid_alive(std::process::id()));
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--help")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .expect("spawn short-lived child");
+        let pid = child.id();
+        let _ = child.wait().expect("wait for child exit");
+
+        let alive = plat.is_pid_alive(pid);
+        drop(child);
+        assert!(!alive, "exited zombie PID {pid} must not be reported alive");
     }
 }
