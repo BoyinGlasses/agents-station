@@ -2,6 +2,7 @@ use crate::cli::GpuPreference;
 use anyhow::Result;
 use bevy::prelude::*;
 use std::process::Child;
+use std::sync::Arc;
 
 pub const TRAY_WINDOW_CLASS: &str = "AgentsStationTrayHost";
 pub const TRAY_ICON_UID: u32 = 0x4310;
@@ -75,6 +76,7 @@ struct TrayController {
     cfg: TrayWorkerConfig,
     worker: Option<(Child, bool)>,
     last_lite: bool,
+    on_worker_hidden: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(windows)]
     taskbar_created_msg: u32,
     #[cfg(windows)]
@@ -92,6 +94,7 @@ impl TrayController {
             cfg,
             worker: None,
             last_lite,
+            on_worker_hidden: None,
             #[cfg(windows)]
             taskbar_created_msg: 0,
             #[cfg(windows)]
@@ -103,11 +106,18 @@ impl TrayController {
         }
     }
 
+    fn notify_worker_hidden(&self) {
+        if let Some(cb) = &self.on_worker_hidden {
+            cb();
+        }
+    }
+
     fn reap_exited_worker(&mut self) {
         if let Some((child, _)) = &mut self.worker {
             match child.try_wait() {
                 Ok(Some(_)) | Err(_) => {
                     self.worker = None;
+                    self.notify_worker_hidden();
                 }
                 Ok(None) => {}
             }
@@ -127,6 +137,7 @@ impl TrayController {
             let _ = child.kill();
             let _ = child.wait();
             self.worker = None;
+            self.notify_worker_hidden();
         }
 
         if let Ok(child) = spawn_gui_worker(&self.cfg, target_lite) {
@@ -139,6 +150,7 @@ impl TrayController {
         if let Some((mut child, _)) = self.worker.take() {
             let _ = child.kill();
             let _ = child.wait();
+            self.notify_worker_hidden();
         }
     }
 }
@@ -466,12 +478,22 @@ unsafe extern "system" fn tray_wndproc(
             }
             WM_APP_NOTIFY_TRAY => {
                 if !ctrl_ptr.is_null() {
-                    let (port, installed) = {
+                    let (port, installed, hidden_cb) = {
                         let ctrl = &mut *ctrl_ptr;
                         ctrl.notifications_dispatched =
                             ctrl.notifications_dispatched.saturating_add(1);
-                        (ctrl.cfg.port, ctrl.icon_installed)
+                        let cb = if wparam == NOTIFY_REASON_CLOSED_TO_TRAY
+                            || wparam == NOTIFY_REASON_MINIMIZED_TO_TRAY
+                        {
+                            ctrl.on_worker_hidden.clone()
+                        } else {
+                            None
+                        };
+                        (ctrl.cfg.port, ctrl.icon_installed, cb)
                     };
+                    if let Some(cb) = hidden_cb {
+                        cb();
+                    }
                     if installed {
                         let _ = emit_parent_tray_balloon(hwnd, port, wparam);
                     }
@@ -720,6 +742,16 @@ impl TrayDaemon {
 
     pub fn was_deleted(&self) -> bool {
         self.deleted
+    }
+
+    pub fn set_on_worker_hidden(&self, cb: Arc<dyn Fn() + Send + Sync>) {
+        if self.deleted || self.controller.is_null() {
+            return;
+        }
+        // SAFETY: called on owner thread before entering `run_message_loop`.
+        unsafe {
+            (*self.controller).on_worker_hidden = Some(cb);
+        }
     }
 
     pub fn spawn_initial_worker(&self) {
@@ -997,9 +1029,13 @@ mod tests {
         cfg.port = 4399;
         let daemon = TrayDaemon::new(4399, cfg).unwrap();
         let hwnd = daemon.hwnd_raw() as HWND;
+        let hidden_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let hidden_cb = hidden_calls.clone();
+        daemon.set_on_worker_hidden(Arc::new(move || {
+            hidden_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }));
 
-        // Post parent-owned tray notification (as --gui-worker does) and pump message.
-        assert!(unsafe { PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, NOTIFY_REASON_CLOSED_TO_TRAY, 0) != 0 });
+        // Hold alerts must NOT trigger the worker-hidden presence reset.
         assert!(notify_tray_hwnd_hold_alert(daemon.hwnd_raw(), "perm"));
         assert!(notify_tray_hwnd_hold_alert(daemon.hwnd_raw(), "ask"));
         assert!(notify_tray_hwnd_hold_alert(daemon.hwnd_raw(), "denied"));
@@ -1010,7 +1046,21 @@ mod tests {
                 DispatchMessageW(&msg);
             }
         }
-        assert_eq!(daemon.notifications_dispatched(), 4);
+        assert_eq!(daemon.notifications_dispatched(), 3);
+        assert_eq!(hidden_calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Closed/minimized-to-tray notifications MUST invoke on_worker_hidden so parent clears presence_focused.
+        assert!(unsafe { PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, NOTIFY_REASON_CLOSED_TO_TRAY, 0) != 0 });
+        assert!(unsafe { PostMessageW(hwnd, WM_APP_NOTIFY_TRAY, NOTIFY_REASON_MINIMIZED_TO_TRAY, 0) != 0 });
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut msg, hwnd, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        assert_eq!(daemon.notifications_dispatched(), 5);
+        assert_eq!(hidden_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
 
         // Simulate external WM_CLOSE -> DefWindowProcW -> DestroyWindow -> WM_DESTROY -> PostQuitMessage(0).
         assert!(unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0 });
