@@ -1,5 +1,7 @@
 pub mod camera;
+pub mod desks;
 pub mod entrance;
+pub mod furniture;
 pub mod layout;
 pub mod lights;
 pub mod palette;
