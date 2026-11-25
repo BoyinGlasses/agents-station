@@ -8,8 +8,8 @@ use station_3d::{BackdropAssets, BackdropEntity, WorldEntity, WorldPalette};
 use station_canvas2d::BrandRegistry;
 use station_core::http::{AppState, HarnessApi, start_http_server};
 use station_core::state::sessions::PermDecision;
-use station_launcher::focus_launch::Win32WindowLauncher;
-use station_launcher::{HarnessService, HarnessStatus};
+use station_launcher::focus_launch::{Win32WindowLauncher, WindowLauncher};
+use station_launcher::{HarnessService, HarnessStatus, LaunchOutcome};
 use station_ui::state::{FeedEntry, HarnessDockItem, PendingPermCard, SessionCard, UiAction};
 use station_ui::{I18nStore, UiState, ViewMode};
 use std::collections::HashSet;
@@ -22,6 +22,8 @@ use tokio::sync::{mpsc, watch};
 
 const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
 const REMOTE_ACTION_QUEUE_CAP: usize = 64;
+const TOAST_QUEUE_CAP: usize = 32;
+const HARNESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Marks a Bevy GUI app running as the ephemeral `--gui-worker` child of `TrayDaemon`.
 #[derive(Resource, Debug, Clone, Copy, Default)]
@@ -45,6 +47,121 @@ struct RemoteActionCmd {
     path: &'static str,
     body: Value,
     refresh: RefreshKind,
+    launch_toast_label: Option<String>,
+}
+
+#[derive(Clone)]
+struct PollerWakeup(Arc<Mutex<Option<std::sync::mpsc::Sender<()>>>>);
+
+impl PollerWakeup {
+    fn trigger(&self) {
+        if let Ok(guard) = self.0.lock()
+            && let Some(tx) = guard.as_ref()
+        {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Runs `HarnessService::list()` on a dedicated 1 Hz background thread so Win32 process/window
+/// enumeration never stalls the Bevy render thread. Drops cleanly by closing the wakeup channel.
+struct HarnessPoller {
+    latest_rx: watch::Receiver<Option<Vec<HarnessDockItem>>>,
+    wakeup: PollerWakeup,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HarnessPoller {
+    fn spawn<L: WindowLauncher + 'static>(
+        service: Arc<HarnessService<L>>,
+        interval: Duration,
+    ) -> Self {
+        let (snap_tx, snap_rx) = watch::channel::<Option<Vec<HarnessDockItem>>>(None);
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel::<()>();
+        let wakeup = PollerWakeup(Arc::new(Mutex::new(Some(wake_tx))));
+        let join_handle = std::thread::Builder::new()
+            .name("station-harness-scanner".to_owned())
+            .spawn(move || {
+                loop {
+                    let items: Vec<HarnessDockItem> = service
+                        .list()
+                        .into_iter()
+                        .map(|h| HarnessDockItem {
+                            id: h.id,
+                            label: h.label,
+                            status: h.status,
+                            custom: h.custom,
+                            hook_agent: h.hook_agent,
+                        })
+                        .collect();
+                    snap_tx.send_replace(Some(items));
+                    match wake_rx.recv_timeout(interval) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            })
+            .ok();
+        Self {
+            latest_rx: snap_rx,
+            wakeup,
+            join_handle,
+        }
+    }
+
+    fn take_latest(&mut self) -> Option<Vec<HarnessDockItem>> {
+        if self.latest_rx.has_changed().unwrap_or(false) {
+            self.latest_rx.borrow_and_update().clone()
+        } else {
+            None
+        }
+    }
+
+    fn trigger_refresh(&self) {
+        self.wakeup.trigger();
+    }
+
+    fn wakeup_handle(&self) -> PollerWakeup {
+        self.wakeup.clone()
+    }
+}
+
+impl Drop for HarnessPoller {
+    fn drop(&mut self) {
+        // Close the sole Sender so recv_timeout wakes immediately even if a launch thread holds PollerWakeup.
+        if let Ok(mut guard) = self.wakeup.0.lock() {
+            guard.take();
+        }
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn launch_outcome_toast(label: &str, outcome: &LaunchOutcome) -> (String, String) {
+    match outcome {
+        LaunchOutcome::FocusedExisting { pid } => (
+            format!("Focused {label}"),
+            format!("Switched to running {label} (PID {pid})"),
+        ),
+        LaunchOutcome::LaunchedNew => (
+            format!("Launched {label}"),
+            format!("Started {label} desktop app"),
+        ),
+        LaunchOutcome::NotInstalled => (
+            format!("{label} not installed"),
+            format!("Install {label} or add its .exe/.lnk via + Add"),
+        ),
+    }
+}
+
+fn launch_error_toast(label: &str, err: &str) -> (String, String) {
+    (format!("Failed to open {label}"), err.to_owned())
+}
+
+fn parse_launch_outcome_from_json(val: &Value) -> Option<LaunchOutcome> {
+    val.get("result")
+        .and_then(|r| serde_json::from_value::<LaunchOutcome>(r.clone()).ok())
 }
 
 #[derive(Default, Clone)]
@@ -111,6 +228,7 @@ enum BridgeBackend {
     InProcess {
         app_state: Arc<AppState>,
         harnesses: Arc<HarnessService<Win32WindowLauncher>>,
+        harness_poller: HarnessPoller,
         _shutdown: Option<watch::Sender<bool>>,
     },
     AttachedHttp {
@@ -121,6 +239,7 @@ enum BridgeBackend {
     BindError {
         message: String,
         harnesses: Arc<HarnessService<Win32WindowLauncher>>,
+        harness_poller: HarnessPoller,
     },
 }
 
@@ -413,6 +532,7 @@ fn spawn_attached_sse_client(
     base_url: String,
     host_header: String,
     snap_lock: Arc<Mutex<RemoteSnapshot>>,
+    toast_tx: mpsc::Sender<(String, String)>,
 ) -> (mpsc::Sender<RemoteActionCmd>, watch::Sender<bool>) {
     let (action_tx, mut action_rx) = mpsc::channel::<RemoteActionCmd>(REMOTE_ACTION_QUEUE_CAP);
     let (tx, mut rx) = watch::channel(false);
@@ -437,6 +557,7 @@ fn spawn_attached_sse_client(
                 let base_a = base_url.clone();
                 let host_a = host_header.clone();
                 let snap_a = snap_lock.clone();
+                let toast_a = toast_tx.clone();
                 let mut rx_a = rx.clone();
                 tokio::spawn(async move {
                     loop {
@@ -445,14 +566,40 @@ fn spawn_attached_sse_client(
                                 let Some(cmd) = maybe_cmd else {
                                     break;
                                 };
-                                let ok = client_a
+                                let resp = client_a
                                     .post(format!("{base_a}{}", cmd.path))
                                     .header("host", &host_a)
                                     .timeout(Duration::from_secs(3))
                                     .json(&cmd.body)
                                     .send()
-                                    .await
-                                    .is_ok_and(|r| r.status().is_success());
+                                    .await;
+                                let ok = match resp {
+                                    Ok(r) if r.status().is_success() => {
+                                        if let Some(label) = cmd.launch_toast_label.as_deref() {
+                                            if let Ok(val) = r.json::<Value>().await
+                                                && let Some(outcome) = parse_launch_outcome_from_json(&val)
+                                            {
+                                                let _ = toast_a.try_send(launch_outcome_toast(label, &outcome));
+                                            }
+                                        }
+                                        true
+                                    }
+                                    Ok(r) => {
+                                        if let Some(label) = cmd.launch_toast_label.as_deref() {
+                                            let _ = toast_a.try_send(launch_error_toast(
+                                                label,
+                                                &format!("HTTP {}", r.status().as_u16()),
+                                            ));
+                                        }
+                                        false
+                                    }
+                                    Err(err) => {
+                                        if let Some(label) = cmd.launch_toast_label.as_deref() {
+                                            let _ = toast_a.try_send(launch_error_toast(label, &err.to_string()));
+                                        }
+                                        false
+                                    }
+                                };
                                 if ok {
                                     match cmd.refresh {
                                         RefreshKind::Live => {
@@ -474,14 +621,14 @@ fn spawn_attached_sse_client(
                     }
                 });
 
-                // Periodic harness refresh alongside live SSE stream.
+                // Periodic 1 Hz harness refresh alongside live SSE stream.
                 let client_h = client.clone();
                 let base_h = base_url.clone();
                 let host_h = host_header.clone();
                 let snap_h = snap_lock.clone();
                 let mut rx_h = rx.clone();
                 tokio::spawn(async move {
-                    let mut tick = tokio::time::interval(Duration::from_secs(3));
+                    let mut tick = tokio::time::interval(HARNESS_POLL_INTERVAL);
                     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
                         tokio::select! {
@@ -583,6 +730,8 @@ pub struct LiveServerBridge {
     banner_pushed: bool,
     seen_perm_ids: HashSet<String>,
     last_window_focused: Option<bool>,
+    toast_tx: mpsc::Sender<(String, String)>,
+    toast_rx: mpsc::Receiver<(String, String)>,
 }
 
 impl LiveServerBridge {
@@ -594,12 +743,18 @@ impl LiveServerBridge {
         start_http: bool,
         prefer_attach: bool,
     ) -> Self {
+        let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+
         if prefer_attach && probe_local_health(port) {
             let base_url = format!("http://127.0.0.1:{port}");
             let host_header = format!("127.0.0.1:{port}");
             let snapshot = Arc::new(Mutex::new(RemoteSnapshot::default()));
-            let (action_tx, shutdown) =
-                spawn_attached_sse_client(base_url, host_header, snapshot.clone());
+            let (action_tx, shutdown) = spawn_attached_sse_client(
+                base_url,
+                host_header,
+                snapshot.clone(),
+                toast_tx.clone(),
+            );
             return Self {
                 backend: BridgeBackend::AttachedHttp {
                     snapshot,
@@ -612,6 +767,8 @@ impl LiveServerBridge {
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
                 last_window_focused: None,
+                toast_tx,
+                toast_rx,
             };
         }
 
@@ -627,10 +784,12 @@ impl LiveServerBridge {
         let app_state = match AppState::new(data_dir, Some(harness_api)) {
             Ok(st) => Arc::new(st),
             Err(err) => {
+                let harness_poller = HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
                 return Self {
                     backend: BridgeBackend::BindError {
                         message: format!("Failed to initialize station store: {err}"),
                         harnesses,
+                        harness_poller,
                     },
                     assets_dir,
                     port,
@@ -638,15 +797,19 @@ impl LiveServerBridge {
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
                     last_window_focused: None,
+                    toast_tx,
+                    toast_rx,
                 };
             }
         };
 
         if !start_http {
+            let harness_poller = HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
             return Self {
                 backend: BridgeBackend::InProcess {
                     app_state,
                     harnesses,
+                    harness_poller,
                     _shutdown: None,
                 },
                 assets_dir,
@@ -655,6 +818,8 @@ impl LiveServerBridge {
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
                 last_window_focused: None,
+                toast_tx,
+                toast_rx,
             };
         }
 
@@ -705,27 +870,38 @@ impl LiveServerBridge {
         };
 
         match bind_res {
-            Ok(()) => Self {
-                backend: BridgeBackend::InProcess {
-                    app_state,
-                    harnesses,
-                    _shutdown: Some(tx),
-                },
-                assets_dir,
-                port,
-                sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-                banner_pushed: false,
-                seen_perm_ids: HashSet::new(),
-                last_window_focused: None,
-            },
+            Ok(()) => {
+                let harness_poller =
+                    HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
+                Self {
+                    backend: BridgeBackend::InProcess {
+                        app_state,
+                        harnesses,
+                        harness_poller,
+                        _shutdown: Some(tx),
+                    },
+                    assets_dir,
+                    port,
+                    sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+                    banner_pushed: false,
+                    seen_perm_ids: HashSet::new(),
+                    last_window_focused: None,
+                    toast_tx,
+                    toast_rx,
+                }
+            }
             Err(err) => {
                 // Re-check once in case another Agents Station daemon just finished binding :4310.
                 if prefer_attach && probe_local_health(port) {
                     let base_url = format!("http://127.0.0.1:{port}");
                     let host_header = format!("127.0.0.1:{port}");
                     let snapshot = Arc::new(Mutex::new(RemoteSnapshot::default()));
-                    let (action_tx, shutdown) =
-                        spawn_attached_sse_client(base_url, host_header, snapshot.clone());
+                    let (action_tx, shutdown) = spawn_attached_sse_client(
+                        base_url,
+                        host_header,
+                        snapshot.clone(),
+                        toast_tx.clone(),
+                    );
                     Self {
                         backend: BridgeBackend::AttachedHttp {
                             snapshot,
@@ -738,14 +914,19 @@ impl LiveServerBridge {
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
                         last_window_focused: None,
+                        toast_tx,
+                        toast_rx,
                     }
                 } else {
+                    let harness_poller =
+                        HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
                     Self {
                         backend: BridgeBackend::BindError {
                             message: format!(
                                 "Cannot bind http://{host}:{port} ({err}). Stop the conflicting process or change --port."
                             ),
                             harnesses,
+                            harness_poller,
                         },
                         assets_dir,
                         port,
@@ -753,6 +934,8 @@ impl LiveServerBridge {
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
                         last_window_focused: None,
+                        toast_tx,
+                        toast_rx,
                     }
                 }
             }
@@ -831,6 +1014,7 @@ impl LiveServerBridge {
                         path,
                         body,
                         refresh,
+                        launch_toast_label: None,
                     })
                     .is_ok()
             }
@@ -888,6 +1072,22 @@ fn sync_live_state_to_ui(
         bridge.banner_pushed = true;
     }
 
+    while let Ok((title, body)) = bridge.toast_rx.try_recv() {
+        ui.push_toast(title, body);
+    }
+
+    match &mut bridge.backend {
+        BridgeBackend::InProcess { harness_poller, .. }
+        | BridgeBackend::BindError { harness_poller, .. } => {
+            if let Some(items) = harness_poller.take_latest()
+                && !items.is_empty()
+            {
+                ui.harnesses = items;
+            }
+        }
+        BridgeBackend::AttachedHttp { .. } => {}
+    }
+
     let has_window = windows.iter().next().is_some();
     let window_focused = windows.iter().any(|w| w.visible && w.focused);
     let in_tray = tray.as_deref().is_some_and(|t| t.in_tray);
@@ -908,6 +1108,7 @@ fn sync_live_state_to_ui(
                     path: "/api/presence",
                     body: json!({ "focused": window_focused }),
                     refresh: RefreshKind::None,
+                    launch_toast_label: None,
                 })
                 .is_ok(),
             BridgeBackend::BindError { .. } => true,
@@ -929,25 +1130,7 @@ fn sync_live_state_to_ui(
             synced_live_perms = snap.has_snapshot;
             apply_remote_snapshot_to_ui(&snap, &mut ui);
         }
-        BridgeBackend::InProcess {
-            app_state,
-            harnesses,
-            ..
-        } => {
-            let list = harnesses.list();
-            if !list.is_empty() {
-                ui.harnesses = list
-                    .into_iter()
-                    .map(|h| HarnessDockItem {
-                        id: h.id,
-                        label: h.label,
-                        status: h.status,
-                        custom: h.custom,
-                        hook_agent: h.hook_agent,
-                    })
-                    .collect();
-            }
-
+        BridgeBackend::InProcess { app_state, .. } => {
             if let Ok(office) = app_state.office.lock() {
                 if !office.sessions.is_empty() {
                     ui.sessions = office
@@ -1004,21 +1187,7 @@ fn sync_live_state_to_ui(
                 }
             }
         }
-        BridgeBackend::BindError { harnesses, .. } => {
-            let list = harnesses.list();
-            if !list.is_empty() {
-                ui.harnesses = list
-                    .into_iter()
-                    .map(|h| HarnessDockItem {
-                        id: h.id,
-                        label: h.label,
-                        status: h.status,
-                        custom: h.custom,
-                        hook_agent: h.hook_agent,
-                    })
-                    .collect();
-            }
-        }
+        BridgeBackend::BindError { .. } => {}
     }
 
     if synced_live_perms {
@@ -1151,22 +1320,46 @@ fn process_ui_actions(
     let actions = ui.drain_actions();
     for action in actions {
         match action {
-            UiAction::LaunchHarness(id) => match &bridge.backend {
-                BridgeBackend::AttachedHttp { action_tx, .. } => {
-                    let _ = action_tx.try_send(RemoteActionCmd {
-                        path: "/api/harnesses/launch",
-                        body: json!({ "id": id }),
-                        refresh: RefreshKind::Harnesses,
-                    });
+            UiAction::LaunchHarness(id) => {
+                let label = ui
+                    .harnesses
+                    .iter()
+                    .find(|h| h.id == id)
+                    .map(|h| h.label.clone())
+                    .unwrap_or_else(|| id.clone());
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/harnesses/launch",
+                            body: json!({ "id": id }),
+                            refresh: RefreshKind::Harnesses,
+                            launch_toast_label: Some(label),
+                        });
+                    }
+                    BridgeBackend::InProcess {
+                        harnesses,
+                        harness_poller,
+                        ..
+                    }
+                    | BridgeBackend::BindError {
+                        harnesses,
+                        harness_poller,
+                        ..
+                    } => {
+                        let svc = harnesses.clone();
+                        let toast_tx = bridge.toast_tx.clone();
+                        let wakeup = harness_poller.wakeup_handle();
+                        std::thread::spawn(move || {
+                            let notice = match svc.open(&id) {
+                                Ok(outcome) => launch_outcome_toast(&label, &outcome),
+                                Err(err) => launch_error_toast(&label, &err.to_string()),
+                            };
+                            let _ = toast_tx.try_send(notice);
+                            wakeup.trigger();
+                        });
+                    }
                 }
-                BridgeBackend::InProcess { harnesses, .. }
-                | BridgeBackend::BindError { harnesses, .. } => {
-                    let svc = harnesses.clone();
-                    std::thread::spawn(move || {
-                        let _ = svc.open(&id);
-                    });
-                }
-            },
+            }
             UiAction::AddCustomHarness {
                 id,
                 label,
@@ -1186,11 +1379,21 @@ fn process_ui_actions(
                             path: "/api/harnesses/custom",
                             body: payload,
                             refresh: RefreshKind::Harnesses,
+                            launch_toast_label: None,
                         });
                     }
-                    BridgeBackend::InProcess { harnesses, .. }
-                    | BridgeBackend::BindError { harnesses, .. } => {
+                    BridgeBackend::InProcess {
+                        harnesses,
+                        harness_poller,
+                        ..
+                    }
+                    | BridgeBackend::BindError {
+                        harnesses,
+                        harness_poller,
+                        ..
+                    } => {
                         let _ = harnesses.mutate_custom(payload);
+                        harness_poller.trigger_refresh();
                     }
                 }
             }
@@ -1205,11 +1408,21 @@ fn process_ui_actions(
                             path: "/api/harnesses/custom",
                             body: payload,
                             refresh: RefreshKind::Harnesses,
+                            launch_toast_label: None,
                         });
                     }
-                    BridgeBackend::InProcess { harnesses, .. }
-                    | BridgeBackend::BindError { harnesses, .. } => {
+                    BridgeBackend::InProcess {
+                        harnesses,
+                        harness_poller,
+                        ..
+                    }
+                    | BridgeBackend::BindError {
+                        harnesses,
+                        harness_poller,
+                        ..
+                    } => {
                         let _ = harnesses.mutate_custom(payload);
+                        harness_poller.trigger_refresh();
                     }
                 }
             }
@@ -1269,6 +1482,7 @@ fn process_ui_actions(
                         path: "/api/prefs",
                         body: json!({ "lang": code }),
                         refresh: RefreshKind::None,
+                        launch_toast_label: None,
                     });
                 }
             }
@@ -1282,6 +1496,7 @@ fn process_ui_actions(
                             path: "/api/perm",
                             body: json!({ "id": id, "choice": decision, "decision": decision }),
                             refresh: RefreshKind::Live,
+                            launch_toast_label: None,
                         });
                     }
                     BridgeBackend::InProcess { app_state, .. } => {
@@ -2344,9 +2559,11 @@ mod tests {
                 path: "/api/prefs",
                 body: json!({}),
                 refresh: RefreshKind::None,
+                launch_toast_label: None,
             })
             .unwrap();
         let (shutdown, _rx) = watch::channel(false);
+        let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
         let bridge = LiveServerBridge {
             backend: BridgeBackend::AttachedHttp {
                 snapshot: Arc::new(Mutex::new(RemoteSnapshot::default())),
@@ -2359,6 +2576,8 @@ mod tests {
             banner_pushed: true,
             seen_perm_ids: HashSet::new(),
             last_window_focused: None,
+            toast_tx,
+            toast_rx,
         };
 
         let mut app = App::new();
@@ -2375,6 +2594,213 @@ mod tests {
             app.world().resource::<LiveServerBridge>().last_window_focused,
             None,
             "failed try_send must NOT update last_window_focused so presence retries next frame"
+        );
+    }
+
+    #[test]
+    fn background_harness_poller_scans_off_main_thread_and_shuts_down_cleanly() {
+        use station_launcher::catalog::{HarnessCatalog, HarnessEntry, LaunchTarget};
+        use station_launcher::focus_launch::WindowLauncher;
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread::ThreadId;
+
+        struct BgTestLauncher {
+            scan_count: AtomicUsize,
+            last_thread: Mutex<Option<ThreadId>>,
+            running: Mutex<HashMap<String, (u32, isize)>>,
+        }
+
+        impl WindowLauncher for BgTestLauncher {
+            fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+                self.scan_count.fetch_add(1, Ordering::SeqCst);
+                *self.last_thread.lock().unwrap() = Some(std::thread::current().id());
+                self.running.lock().unwrap().clone()
+            }
+            fn focus_window(&self, _hwnd: isize) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn launch_target(&self, _target: &LaunchTarget) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        struct ArcBg(Arc<BgTestLauncher>);
+        impl WindowLauncher for ArcBg {
+            fn snapshot_running_windows(&self) -> HashMap<String, (u32, isize)> {
+                self.0.snapshot_running_windows()
+            }
+            fn focus_window(&self, hwnd: isize) -> anyhow::Result<()> {
+                self.0.focus_window(hwnd)
+            }
+            fn launch_target(&self, t: &LaunchTarget) -> anyhow::Result<()> {
+                self.0.launch_target(t)
+            }
+        }
+
+        let main_tid = std::thread::current().id();
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = Arc::new(BgTestLauncher {
+            scan_count: AtomicUsize::new(0),
+            last_thread: Mutex::new(None),
+            running: Mutex::new(HashMap::from([("claude.exe".to_owned(), (777, 0x10))])),
+        });
+        let builtins = vec![
+            HarnessEntry {
+                id: "claude".to_owned(),
+                label: "Claude".to_owned(),
+                hook_agent: None,
+                target: Some(LaunchTarget::Exe(PathBuf::from("C:/Apps/Claude.exe"))),
+                custom: false,
+                process_names: vec!["claude.exe".to_owned()],
+            },
+            HarnessEntry {
+                id: "missing".to_owned(),
+                label: "Missing".to_owned(),
+                hook_agent: None,
+                target: None,
+                custom: false,
+                process_names: vec![],
+            },
+        ];
+        let svc = Arc::new(HarnessService::with_components(
+            HarnessCatalog::load_or_default(dir.path()),
+            builtins,
+            ArcBg(launcher.clone()),
+            PathBuf::from("D:/app/agents-station.exe"),
+            4310,
+            HashMap::new(),
+        ));
+
+        let mut poller = HarnessPoller::spawn(svc, Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut latest = None;
+        while Instant::now() < deadline {
+            if let Some(items) = poller.take_latest() {
+                latest = Some(items);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let items = latest.expect("background poller must deliver initial harness snapshot");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].status, HarnessStatus::RunningHooked);
+        assert_eq!(items[1].status, HarnessStatus::NotInstalled);
+        assert_ne!(
+            launcher.last_thread.lock().unwrap().unwrap(),
+            main_tid,
+            "scanner must execute off the main Bevy thread"
+        );
+
+        // Triggering refresh wakes the thread immediately without waiting for the 5s interval.
+        launcher.running.lock().unwrap().clear();
+        poller.trigger_refresh();
+        let wake_deadline = Instant::now() + Duration::from_secs(1);
+        let mut refreshed = None;
+        while Instant::now() < wake_deadline {
+            if let Some(items) = poller.take_latest() {
+                refreshed = Some(items);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let refreshed = refreshed.expect("trigger_refresh must wake poller immediately");
+        assert_eq!(refreshed[0].status, HarnessStatus::InstalledHooked);
+
+        // Dropping poller while holding a wakeup handle must exit promptly (< 500ms, not 5s).
+        let wakeup_clone = poller.wakeup_handle();
+        let drop_start = Instant::now();
+        drop(poller);
+        assert!(
+            drop_start.elapsed() < Duration::from_millis(500),
+            "HarnessPoller::drop must wake and join cleanly without waiting for poll interval"
+        );
+        wakeup_clone.trigger();
+    }
+
+    #[test]
+    fn launch_harness_outcomes_emit_accurate_toasts_and_parse_remote_json() {
+        use station_launcher::LaunchOutcome;
+
+        let (t_focus, b_focus) =
+            launch_outcome_toast("Claude", &LaunchOutcome::FocusedExisting { pid: 4242 });
+        assert!(t_focus.contains("Focused") && t_focus.contains("Claude"));
+        assert!(b_focus.contains("4242"));
+
+        let (t_new, b_new) = launch_outcome_toast("Codex", &LaunchOutcome::LaunchedNew);
+        assert!(t_new.contains("Launched") && t_new.contains("Codex"));
+        assert!(b_new.contains("Codex"));
+
+        let (t_miss, b_miss) = launch_outcome_toast("ZCode", &LaunchOutcome::NotInstalled);
+        assert!(t_miss.contains("not installed") && t_miss.contains("ZCode"));
+        assert!(!b_miss.is_empty());
+
+        assert_eq!(
+            parse_launch_outcome_from_json(&json!({
+                "ok": true,
+                "result": { "outcome": "focused_existing", "pid": 9001 }
+            })),
+            Some(LaunchOutcome::FocusedExisting { pid: 9001 })
+        );
+        assert_eq!(
+            parse_launch_outcome_from_json(&json!({
+                "ok": true,
+                "result": { "outcome": "launched_new" }
+            })),
+            Some(LaunchOutcome::LaunchedNew)
+        );
+        assert_eq!(
+            parse_launch_outcome_from_json(&json!({
+                "ok": true,
+                "result": { "outcome": "not_installed" }
+            })),
+            Some(LaunchOutcome::NotInstalled)
+        );
+
+        // End-to-end: UiAction::LaunchHarness("nonexistent") pushes NotInstalled toast into UiState.
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(UiState::default())
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, (process_ui_actions, sync_live_state_to_ui).chain());
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.toasts.clear();
+            ui.push_action(UiAction::LaunchHarness("definitely_not_installed".to_owned()));
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_not_installed_toast = false;
+        while Instant::now() < deadline {
+            app.update();
+            if app
+                .world()
+                .resource::<UiState>()
+                .toasts
+                .iter()
+                .any(|t| t.title.contains("not installed"))
+            {
+                saw_not_installed_toast = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(
+            saw_not_installed_toast,
+            "launching an uninstalled harness must push an accurate NotInstalled toast into UiState"
         );
     }
 }
