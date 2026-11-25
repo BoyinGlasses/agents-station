@@ -366,6 +366,15 @@ impl ChatEngine {
         })
     }
 
+    pub fn set_deny(&mut self, id: &str, state: &str) -> Option<&ChatMessage> {
+        let m = self.msgs.iter_mut().find(|m| m.id == id && m.kind == "deny")?;
+        if let Some(Value::Object(cur)) = &mut m.deny {
+            cur.insert("state".to_owned(), Value::String(state.to_owned()));
+            cur.insert("until".to_owned(), Value::from(0u64));
+        }
+        Some(m)
+    }
+
     pub fn react(&mut self, id: &str, by: &str, emoji: &str) -> bool {
         if !REACTIONS.contains(&emoji) {
             return false;

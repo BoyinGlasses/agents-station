@@ -3,19 +3,18 @@ use crate::atomic::write_json_atomic;
 use crate::redact::redact;
 use crate::shared::cache_clock::CacheState;
 use crate::shared::chat_engine::ChatEngine;
-use crate::shared::danger::danger_key;
 use crate::state::loops::LoopGuard;
 use crate::state::overlap::{OverlapTracker, file_of, is_edit_tool};
 use crate::state::undo::UndoManager;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 
 pub const DESKS: usize = 9;
 pub const FEED_MAX: usize = 80;
@@ -109,7 +108,7 @@ pub fn read_replay_range(
     items
 }
 
-fn clip(s: &str, max_chars: usize) -> String {
+pub(crate) fn clip(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() > max_chars {
         let mut out: String = chars[..max_chars.saturating_sub(1)].iter().collect();
@@ -120,7 +119,7 @@ fn clip(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn one_line(s: &str) -> String {
+pub(crate) fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -179,6 +178,101 @@ pub struct PendingPerm {
     pub created_at: u64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermDecision {
+    Allow,
+    Deny { reason: String },
+    Answers(Map<String, Value>),
+    Retry,
+    Keep,
+}
+
+struct HoldEntry {
+    tx: oneshot::Sender<Value>,
+    kind: String,
+    sess: String,
+    tool_input: Option<Value>,
+}
+
+fn build_decision_payload(
+    kind: &str,
+    tool_input: Option<&Value>,
+    decision: &PermDecision,
+) -> Value {
+    match decision {
+        PermDecision::Allow => {
+            if kind == "plan" {
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                        "updatedInput": tool_input.cloned().unwrap_or_else(|| json!({}))
+                    }
+                })
+            } else {
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "permissionDecision": "allow",
+                        "decision": {
+                            "behavior": "allow"
+                        }
+                    }
+                })
+            }
+        }
+        PermDecision::Deny { reason } => {
+            let msg = if reason.trim().is_empty() {
+                "Denied from Agents Station".to_owned()
+            } else {
+                reason.clone()
+            };
+            if kind == "plan" || kind == "ask" {
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": msg
+                    }
+                })
+            } else {
+                json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PermissionRequest",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": msg,
+                        "decision": {
+                            "behavior": "deny",
+                            "message": msg
+                        }
+                    }
+                })
+            }
+        }
+        PermDecision::Answers(answers) => {
+            let mut updated = tool_input
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            updated.insert("answers".to_owned(), Value::Object(answers.clone()));
+            json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": Value::Object(updated)
+                }
+            })
+        }
+        PermDecision::Retry => json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionDenied",
+                "retry": true
+            }
+        }),
+        PermDecision::Keep => json!({}),
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionStats {
     pub events: u64,
@@ -194,6 +288,7 @@ pub struct OfficeState {
     pub sessions: HashMap<String, SessionRecord>,
     pub feed: VecDeque<FeedItem>,
     pub pending_perms: HashMap<String, PendingPerm>,
+    holds: HashMap<String, HoldEntry>,
     pub pins: HashMap<String, Vec<String>>,
     pub todos: Vec<Value>,
     pub stats: SessionStats,
@@ -226,6 +321,7 @@ impl OfficeState {
             sessions: HashMap::new(),
             feed: VecDeque::with_capacity(FEED_MAX),
             pending_perms: HashMap::new(),
+            holds: HashMap::new(),
             pins,
             todos: Vec::new(),
             stats: SessionStats::default(),
@@ -247,9 +343,111 @@ impl OfficeState {
         self.seq.load(Ordering::Relaxed)
     }
 
+    pub fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn broadcast(&self, msg: Value) {
         self.seq.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(msg);
+    }
+
+    pub fn register_hold(&mut self, perm: PendingPerm, tx: oneshot::Sender<Value>) {
+        self.register_hold_with_input(perm, tx, None);
+    }
+
+    pub fn register_hold_with_input(
+        &mut self,
+        perm: PendingPerm,
+        tx: oneshot::Sender<Value>,
+        tool_input: Option<Value>,
+    ) {
+        let id = perm.id.clone();
+        let sess_id = perm.sess.clone();
+        let entry = HoldEntry {
+            tx,
+            kind: perm.kind.clone(),
+            sess: sess_id.clone(),
+            tool_input,
+        };
+        self.holds.insert(id.clone(), entry);
+        self.pending_perms.insert(id, perm.clone());
+
+        if let Some(s) = self.sessions.get_mut(&sess_id)
+            && s.status != "wait"
+        {
+            s.status = "wait".to_owned();
+            let s_clone = s.clone();
+            self.broadcast(json!({ "k": "sess", "s": s_clone }));
+        }
+        self.broadcast(json!({ "k": "perm", "p": perm }));
+    }
+
+    pub fn hold_tool_input(&self, id: &str) -> Option<&Value> {
+        self.holds.get(id).and_then(|h| h.tool_input.as_ref())
+    }
+
+    pub fn resolve_hold(&mut self, id: &str, decision: PermDecision) -> Option<Value> {
+        let hold = self.holds.remove(id);
+        let perm = self.pending_perms.remove(id);
+        if hold.is_none() && perm.is_none() {
+            return None;
+        }
+        let kind = hold
+            .as_ref()
+            .map(|h| h.kind.as_str())
+            .or_else(|| perm.as_ref().map(|p| p.kind.as_str()))
+            .unwrap_or("perm");
+        let sess_id = hold
+            .as_ref()
+            .map(|h| h.sess.clone())
+            .or_else(|| perm.as_ref().map(|p| p.sess.clone()))
+            .unwrap_or_default();
+        let response = build_decision_payload(
+            kind,
+            hold.as_ref().and_then(|h| h.tool_input.as_ref()),
+            &decision,
+        );
+
+        if kind == "denied" {
+            let next_state = if matches!(decision, PermDecision::Retry) {
+                "retry"
+            } else {
+                "kept"
+            };
+            self.chat.set_deny(id, next_state);
+            let _ = self.save_chat();
+        }
+        if let Some(h) = hold {
+            let _ = h.tx.send(response.clone());
+        }
+        self.broadcast(json!({ "k": "permDone", "id": id }));
+        if !sess_id.is_empty() && !self.pending_perms.values().any(|p| p.sess == sess_id) {
+            if let Some(s) = self.sessions.get_mut(&sess_id)
+                && s.status == "wait"
+            {
+                s.status = "work".to_owned();
+                let s_clone = s.clone();
+                self.broadcast(json!({ "k": "sess", "s": s_clone }));
+            }
+        }
+        Some(response)
+    }
+
+    pub fn cancel_hold(&mut self, id: &str) -> bool {
+        let hold = self.holds.remove(id);
+        let perm = self.pending_perms.remove(id);
+        if hold.is_none() && perm.is_none() {
+            return false;
+        }
+        let is_denied = hold.as_ref().is_some_and(|h| h.kind == "denied")
+            || perm.as_ref().is_some_and(|p| p.kind == "denied");
+        if is_denied {
+            self.chat.set_deny(id, "kept");
+            let _ = self.save_chat();
+        }
+        self.broadcast(json!({ "k": "permDone", "id": id }));
+        true
     }
 
     fn next_desk(&self) -> usize {
@@ -320,6 +518,7 @@ impl OfficeState {
             "SessionEnd" => {
                 self.sessions.remove(&ev.session_id);
                 self.pending_perms.retain(|_, p| p.sess != ev.session_id);
+                self.holds.retain(|id, _| self.pending_perms.contains_key(id));
                 let msg = json!({ "k": "gone", "id": ev.session_id });
                 let _ = append_replay_event(&self.data_dir, ts, &msg);
                 self.broadcast(msg);
@@ -384,23 +583,6 @@ impl OfficeState {
                 sess.status = "wait".to_owned();
                 let tname = ev.tool_name.as_deref().unwrap_or("tool");
                 let summary = classify_tool(tname, &ev.tool_input);
-                let detail = redact(&ev.tool_input.to_string());
-                let dk = danger_key(Some("perm"), Some(&summary.kind), Some(&detail)).map(str::to_owned);
-                let perm_id = format!("p_{}_{}", ts, self.seq());
-                self.pending_perms.insert(
-                    perm_id.clone(),
-                    PendingPerm {
-                        id: perm_id,
-                        sess: ev.session_id.clone(),
-                        name: sname.clone(),
-                        kind: "perm".to_owned(),
-                        tool_type: summary.kind.clone(),
-                        label: summary.label.clone(),
-                        detail: clip(&detail, 240),
-                        danger: dk,
-                        created_at: ts,
-                    },
-                );
                 ("wait".to_owned(), summary.label)
             }
             "Notification" => ("ask".to_owned(), clip(&redact(ev.prompt.as_deref().unwrap_or("")), 80)),
@@ -516,6 +698,7 @@ impl OfficeState {
         self.pending_perms.retain(|_, p| {
             now.saturating_sub(p.created_at) < PERM_TTL_MS && !reaped_sids.contains(&p.sess)
         });
+        self.holds.retain(|id, _| self.pending_perms.contains_key(id));
         let reaped_perms = perms_before - self.pending_perms.len();
         let reaped_undo_dirs = self.undo.prune_stale_disk();
 
@@ -527,7 +710,7 @@ impl OfficeState {
     }
 }
 
-fn classify_tool(name: &str, input: &Value) -> ToolSummary {
+pub(crate) fn classify_tool(name: &str, input: &Value) -> ToolSummary {
     let base_of = |key: &str| {
         input
             .get(key)
