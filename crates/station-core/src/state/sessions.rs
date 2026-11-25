@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,6 +27,60 @@ pub fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+pub fn append_replay_event(data_dir: &Path, now_ms: u64, compact_event: &Value) -> Result<()> {
+    let replay_dir = data_dir.join("replay");
+    std::fs::create_dir_all(&replay_dir)?;
+    let day = crate::store::otel::day_key(now_ms);
+    let path = replay_dir.join(format!("{day}.jsonl"));
+    let mut line = serde_json::to_string(&json!({ "t": now_ms, "m": compact_event }))?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    file.write_all(line.as_bytes())?;
+    Ok(())
+}
+
+pub fn read_replay_range(
+    data_dir: &Path,
+    from_ms: u64,
+    to_ms: u64,
+) -> Vec<crate::shared::timeline::ReplayItem> {
+    let replay_dir = data_dir.join("replay");
+    let end_ms = to_ms.max(from_ms);
+    let end_day = crate::store::otel::day_key(end_ms);
+    let mut day_keys: Vec<String> = Vec::new();
+    let mut cur = from_ms;
+    for _ in 0..14 {
+        let dk = crate::store::otel::day_key(cur);
+        if !day_keys.contains(&dk) {
+            day_keys.push(dk.clone());
+        }
+        if dk >= end_day {
+            break;
+        }
+        cur = cur.saturating_add(86_400_000);
+    }
+    if !day_keys.contains(&end_day) {
+        day_keys.push(end_day);
+    }
+    let mut items = Vec::new();
+    for dk in day_keys {
+        let Ok(text) = std::fs::read_to_string(replay_dir.join(format!("{dk}.jsonl"))) else {
+            continue;
+        };
+        for line in text.lines() {
+            if let Ok(item) = serde_json::from_str::<crate::shared::timeline::ReplayItem>(line)
+                && item.t <= end_ms
+            {
+                items.push(item);
+            }
+        }
+    }
+    items
 }
 
 fn clip(s: &str, max_chars: usize) -> String {
@@ -238,7 +293,10 @@ impl OfficeState {
             }
             "SessionEnd" => {
                 self.sessions.remove(&ev.session_id);
-                self.broadcast(json!({ "k": "gone", "id": ev.session_id }));
+                self.pending_perms.retain(|_, p| p.sess != ev.session_id);
+                let msg = json!({ "k": "gone", "id": ev.session_id });
+                let _ = append_replay_event(&self.data_dir, ts, &msg);
+                self.broadcast(msg);
                 let _ = self.loops.on_event(&ev.raw, ts);
                 return Some(ev);
             }
@@ -342,7 +400,9 @@ impl OfficeState {
         self.feed.push_back(item.clone());
 
         let sess_json = self.sessions.get(&ev.session_id).cloned();
-        self.broadcast(json!({ "k": "ev", "e": item, "s": sess_json }));
+        let msg = json!({ "k": "ev", "e": item, "s": sess_json });
+        let _ = append_replay_event(&self.data_dir, ts, &msg);
+        self.broadcast(msg);
         Some(ev)
     }
 
@@ -511,5 +571,60 @@ mod tests {
 
         let reloaded = OfficeState::new(dir.path().to_path_buf());
         assert_eq!(reloaded.pins["s1"][0], *saved);
+    }
+
+    #[test]
+    fn append_replay_event_writes_local_date_jsonl_on_every_live_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = OfficeState::new(dir.path().to_path_buf());
+
+        let before_ms = now_ms();
+        let ev1 = st
+            .ingest_raw_event(json!({
+                "session_id": "s-replay",
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": "D:/repo/app",
+                "prompt": "build replay log"
+            }))
+            .unwrap();
+        assert_eq!(ev1.session_id, "s-replay");
+        st.ingest_raw_event(json!({
+            "session_id": "s-replay",
+            "hook_event_name": "Stop",
+            "cwd": "D:/repo/app"
+        }))
+        .unwrap();
+        st.ingest_raw_event(json!({
+            "session_id": "s-replay",
+            "hook_event_name": "SessionEnd"
+        }))
+        .unwrap();
+
+        let day = crate::store::otel::day_key(before_ms);
+        let replay_file = dir.path().join("replay").join(format!("{day}.jsonl"));
+        assert!(
+            replay_file.exists(),
+            "expected replay JSONL at {} immediately without flush_all",
+            replay_file.display()
+        );
+        let text = std::fs::read_to_string(&replay_file).unwrap();
+        let items: Vec<crate::shared::timeline::ReplayItem> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].m["k"], "ev");
+        assert_eq!(items[0].m["e"]["type"], "prompt");
+        assert_eq!(items[1].m["k"], "ev");
+        assert_eq!(items[1].m["e"]["type"], "stop");
+        assert_eq!(items[2].m["k"], "gone");
+
+        // Direct call to append_replay_event writes with Local day key.
+        let fixed_ts = 1_793_091_600_000u64;
+        append_replay_event(dir.path(), fixed_ts, &json!({ "k": "ev", "e": { "type": "commit" } }))
+            .unwrap();
+        let fixed_day = crate::store::otel::day_key(fixed_ts);
+        let fixed_file = dir.path().join("replay").join(format!("{fixed_day}.jsonl"));
+        assert!(fixed_file.exists());
     }
 }
