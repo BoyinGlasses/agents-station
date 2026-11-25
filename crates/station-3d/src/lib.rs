@@ -1,7 +1,9 @@
 pub mod camera;
+pub mod entrance;
 pub mod layout;
 pub mod lights;
 pub mod palette;
+pub mod rooms;
 
 use bevy::prelude::*;
 pub use layout::{LayoutSpec, OfficeLayout};
