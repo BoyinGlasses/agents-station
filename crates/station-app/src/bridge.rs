@@ -27,7 +27,7 @@ use station_ui::state::{
     ChatImagePreview, ChatMessage, ChatPollOptUi, ChatPollUi, ChatRemindUi, ChatReplyRefUi,
     CleanupRowUi, ClipShape, DevServerUi, FeedEntry, HarnessDockItem, MacDrawerState,
     PendingPermCard, PhotoSize, PlaceCardAction, PlaceCardInfo, PlaceCardRow,
-    PromptReportExampleUi, PromptReportUi, ReplayRange, SessionCard, SessionLogItem,
+    PromptReportExampleUi, PromptReportUi, QuotaWindowUi, ReplayRange, SessionCard, SessionLogItem,
     SessionUndoView, StrandedItemUi, SysProcRow, SysSnapshot, TodoItem, UiAction, UndoFileEntry,
     VaultListItem, VaultMsgUi, VaultTranscriptUi, WrappedSummaryUi, normalize_feed_kind,
     normalize_status,
@@ -85,7 +85,7 @@ enum RemoteQueryCmd {
     FetchWrapped,
     FetchImage { id: String },
     FetchBurn(BurnRange),
-    FetchVaultList { query: String, fresh: bool },
+    FetchVaultList { query: String, fresh: bool, seq: u64 },
     FetchVaultTranscript { sid: String },
     FetchVaultReport,
     FetchStranded { fresh: bool },
@@ -106,6 +106,7 @@ enum RemoteQueryCmd {
         body: Value,
         toast_title: String,
         toast_ok: String,
+        toast_empty: Option<String>,
         toast_err: String,
     },
 }
@@ -126,6 +127,7 @@ enum BridgeAsyncResult {
     ChatImage(Result<ChatImagePreview, String>),
     BurnData(Result<BurnDrawerState, String>),
     VaultList {
+        seq: u64,
         items: Vec<VaultListItem>,
         total_count: usize,
         total_bytes: u64,
@@ -149,6 +151,13 @@ enum BridgeAsyncResult {
         ag_away: bool,
         ag_pending: Option<String>,
         ag_note: String,
+    },
+    AiAccountNotice {
+        title: String,
+        ok: bool,
+        code: Option<String>,
+        ok_msg: String,
+        err_msg: String,
     },
     PhoneStatus {
         lan_on: bool,
@@ -1892,6 +1901,91 @@ fn parse_stranded_from_json(val: &Value) -> (Vec<StrandedItemUi>, usize) {
     (items, repos)
 }
 
+fn parse_quota_windows(a: &Value) -> Vec<QuotaWindowUi> {
+    let mut out = Vec::new();
+    if let Some(arr) = a
+        .get("windows")
+        .or_else(|| a.get("rows"))
+        .and_then(Value::as_array)
+    {
+        for item in arr {
+            let Some(pct) = item
+                .get("pct")
+                .or_else(|| item.get("used"))
+                .or_else(|| item.get("utilization"))
+                .and_then(Value::as_f64)
+            else {
+                continue;
+            };
+            let key = item
+                .get("key")
+                .or_else(|| item.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let label = item
+                .get("label")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or(key.as_str())
+                .to_owned();
+            let resets_at_ms = item
+                .get("resetsAt")
+                .or_else(|| item.get("resets_at"))
+                .or_else(|| item.get("resetAt"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            out.push(QuotaWindowUi {
+                key,
+                label,
+                pct: pct.clamp(0.0, 100.0) as f32,
+                resets_at_ms,
+            });
+        }
+        return out;
+    }
+
+    // Fallback for object-shaped usage payloads (`usage.fiveHour` / `usage.weekly` / `pct`).
+    let src = a.get("usage").or_else(|| a.get("limits")).unwrap_or(a);
+    for (field, key) in [
+        ("fiveHour", "session"),
+        ("session", "session"),
+        ("weekly", "weekly"),
+        ("week", "weekly"),
+    ] {
+        if out.iter().any(|w| w.key == key) {
+            continue;
+        }
+        if let Some(w) = src.get(field)
+            && let Some(pct) = w
+                .as_f64()
+                .or_else(|| w.get("pct").or_else(|| w.get("used")).and_then(Value::as_f64))
+        {
+            out.push(QuotaWindowUi {
+                key: key.to_owned(),
+                label: key.to_owned(),
+                pct: pct.clamp(0.0, 100.0) as f32,
+                resets_at_ms: w
+                    .get("resetsAt")
+                    .or_else(|| w.get("resetAt"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            });
+        }
+    }
+    if out.is_empty()
+        && let Some(pct) = a.get("pct").and_then(Value::as_f64)
+    {
+        out.push(QuotaWindowUi {
+            key: "session".to_owned(),
+            label: "5h".to_owned(),
+            pct: pct.clamp(0.0, 100.0) as f32,
+            resets_at_ms: 0,
+        });
+    }
+    out
+}
+
 fn parse_ai_slots(arr: Option<&Vec<Value>>) -> Vec<AiAccountEntry> {
     arr.map(|list| {
         list.iter()
@@ -1912,12 +2006,33 @@ fn parse_ai_slots(arr: Option<&Vec<Value>>) -> Vec<AiAccountEntry> {
                         .and_then(Value::as_bool)
                         .unwrap_or(true),
                     note: a.get("note").and_then(Value::as_str).unwrap_or("").to_owned(),
-                    windows: Vec::new(),
+                    windows: parse_quota_windows(a),
                 })
             })
             .collect()
     })
     .unwrap_or_default()
+}
+
+fn resolve_ai_error_code(i18n: &I18nStore, code: &str) -> Option<String> {
+    if code.is_empty() {
+        return None;
+    }
+    let clean: String = code
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if clean.is_empty() {
+        return None;
+    }
+    for prefix in ["server.ai", "server.account"] {
+        let key = format!("{prefix}.{clean}");
+        let val = i18n.tr_vars(&key, &[("app", "Antigravity"), ("n", "1")]);
+        if val != key && !val.trim().is_empty() {
+            return Some(val);
+        }
+    }
+    None
 }
 
 fn parse_ai_accounts_from_json(val: &Value) -> BridgeAsyncResult {
@@ -2535,7 +2650,7 @@ fn spawn_attached_sse_client(
                                         };
                                         let _ = async_q.try_send(BridgeAsyncResult::BurnData(res));
                                     }
-                                    RemoteQueryCmd::FetchVaultList { query, fresh } => {
+                                    RemoteQueryCmd::FetchVaultList { query, fresh, seq } => {
                                         let url = format!("{base_q}/api/vault");
                                         let mut params: Vec<(&str, &str)> = vec![("limit", "60")];
                                         if !query.is_empty() {
@@ -2561,6 +2676,7 @@ fn spawn_attached_sse_client(
                                             _ => (Vec::new(), 0, 0),
                                         };
                                         let _ = async_q.try_send(BridgeAsyncResult::VaultList {
+                                            seq,
                                             items,
                                             total_count,
                                             total_bytes,
@@ -2735,7 +2851,7 @@ fn spawn_attached_sse_client(
                                         } else {
                                             String::new()
                                         };
-                                        let (ok, err_detail) = if url.is_empty() {
+                                        let (ok, code) = if url.is_empty() {
                                             (false, None)
                                         } else {
                                             match client_q
@@ -2749,24 +2865,24 @@ fn spawn_attached_sse_client(
                                                 Ok(r) if r.status().is_success() => match r.json::<Value>().await {
                                                     Ok(v) => {
                                                         let ok = v.get("ok").and_then(Value::as_bool).unwrap_or(true);
-                                                        let msg = v
-                                                            .get("message")
-                                                            .or_else(|| v.get("code"))
+                                                        let code = v
+                                                            .get("code")
                                                             .and_then(Value::as_str)
                                                             .map(str::to_owned);
-                                                        (ok, msg)
+                                                        (ok, code)
                                                     }
                                                     Err(_) => (true, None),
                                                 },
                                                 _ => (false, None),
                                             }
                                         };
-                                        let msg = if ok {
-                                            toast_ok
-                                        } else {
-                                            err_detail.unwrap_or(toast_err)
-                                        };
-                                        let _ = toast_q.try_send((toast_title, msg));
+                                        let _ = async_q.try_send(BridgeAsyncResult::AiAccountNotice {
+                                            title: toast_title,
+                                            ok,
+                                            code,
+                                            ok_msg: toast_ok,
+                                            err_msg: toast_err,
+                                        });
                                         if let Ok(r) = client_q
                                             .get(format!("{base_q}/api/accounts"))
                                             .header("host", &host_q)
@@ -2801,6 +2917,14 @@ fn spawn_attached_sse_client(
                                             _ => None,
                                         };
                                         if let Some(t) = tun {
+                                            if let Some(pin) = t
+                                                .get("pin")
+                                                .and_then(Value::as_str)
+                                                .filter(|s| !s.is_empty())
+                                                && let Ok(mut snap) = snap_q.lock()
+                                            {
+                                                snap.pairing_pin = Some(pin.to_owned());
+                                            }
                                             let _ = async_q.try_send(parse_phone_status_from_json(&t, push.as_ref()));
                                         }
                                     }
@@ -2809,10 +2933,11 @@ fn spawn_attached_sse_client(
                                         body,
                                         toast_title,
                                         toast_ok,
+                                        toast_empty,
                                         toast_err,
                                     } => {
                                         let url = format!("{base_q}{path}");
-                                        let ok = match client_q
+                                        let resp_val = match client_q
                                             .post(url)
                                             .header("host", &host_q)
                                             .timeout(Duration::from_secs(12))
@@ -2820,18 +2945,37 @@ fn spawn_attached_sse_client(
                                             .send()
                                             .await
                                         {
-                                            Ok(r) if r.status().is_success() => r
-                                                .json::<Value>()
-                                                .await
-                                                .ok()
-                                                .and_then(|v| v.get("ok").and_then(Value::as_bool))
-                                                .unwrap_or(true),
-                                            _ => false,
+                                            Ok(r) if r.status().is_success() => {
+                                                Some(r.json::<Value>().await.unwrap_or_else(|_| json!({ "ok": true })))
+                                            }
+                                            _ => None,
                                         };
-                                        let _ = toast_q.try_send((
-                                            toast_title,
-                                            if ok { toast_ok } else { toast_err },
-                                        ));
+                                        let ok = resp_val
+                                            .as_ref()
+                                            .and_then(|v| v.get("ok").and_then(Value::as_bool))
+                                            .unwrap_or(resp_val.is_some());
+                                        if let Some(pin) = resp_val
+                                            .as_ref()
+                                            .and_then(|v| v.get("pin"))
+                                            .and_then(Value::as_str)
+                                            .filter(|s| !s.is_empty())
+                                            && let Ok(mut snap) = snap_q.lock()
+                                        {
+                                            snap.pairing_pin = Some(pin.to_owned());
+                                        }
+                                        let sent_zero = resp_val
+                                            .as_ref()
+                                            .and_then(|v| v.get("sent"))
+                                            .and_then(Value::as_u64)
+                                            == Some(0);
+                                        let toast_body = if !ok {
+                                            toast_err
+                                        } else if sent_zero && let Some(empty_msg) = toast_empty {
+                                            empty_msg
+                                        } else {
+                                            toast_ok
+                                        };
+                                        let _ = toast_q.try_send((toast_title, toast_body));
                                         let tun = match client_q
                                             .get(format!("{base_q}/api/tunnel"))
                                             .header("host", &host_q)
@@ -2853,6 +2997,14 @@ fn spawn_attached_sse_client(
                                             _ => None,
                                         };
                                         if let Some(t) = tun {
+                                            if let Some(pin) = t
+                                                .get("pin")
+                                                .and_then(Value::as_str)
+                                                .filter(|s| !s.is_empty())
+                                                && let Ok(mut snap) = snap_q.lock()
+                                            {
+                                                snap.pairing_pin = Some(pin.to_owned());
+                                            }
                                             let _ = async_q.try_send(parse_phone_status_from_json(&t, push.as_ref()));
                                         }
                                     }
@@ -4589,15 +4741,18 @@ fn sync_live_state_to_ui(
                 }
             },
             BridgeAsyncResult::VaultList {
+                seq,
                 items,
                 total_count,
                 total_bytes,
             } => {
-                ui.vault_drawer.loading = false;
-                ui.vault_drawer.loaded = true;
-                ui.vault_drawer.items = items;
-                ui.vault_drawer.total_count = total_count;
-                ui.vault_drawer.total_bytes = total_bytes;
+                if seq >= ui.vault_drawer.req_seq {
+                    ui.vault_drawer.loading = false;
+                    ui.vault_drawer.loaded = true;
+                    ui.vault_drawer.items = items;
+                    ui.vault_drawer.total_count = total_count;
+                    ui.vault_drawer.total_bytes = total_bytes;
+                }
             }
             BridgeAsyncResult::VaultTranscript(rec) => {
                 ui.vault_drawer.transcript_loading = None;
@@ -4655,6 +4810,22 @@ fn sync_live_state_to_ui(
                     })
                     .collect();
                 ui.ai_accounts.claude = claude;
+            }
+            BridgeAsyncResult::AiAccountNotice {
+                title,
+                ok,
+                code,
+                ok_msg,
+                err_msg,
+            } => {
+                let body = if ok {
+                    ok_msg
+                } else {
+                    code.as_deref()
+                        .and_then(|c| i18n.as_deref().and_then(|tr| resolve_ai_error_code(tr, c)))
+                        .unwrap_or(err_msg)
+                };
+                ui.push_toast(title, body);
             }
             BridgeAsyncResult::PhoneStatus {
                 lan_on,
@@ -7820,17 +7991,20 @@ fn process_ui_actions(
                     BridgeBackend::BindError { .. } => {
                         ui.burn_drawer.loading = false;
                         ui.burn_drawer.loaded_range = Some(range);
-                        ui.burn_drawer.error = Some(i18n.tr("burn.err"));
-                        ui.push_toast(i18n.tr("burn.title"), i18n.tr("burn.err"));
+                        ui.burn_drawer.error = Some(i18n.tr("burn.unreachable"));
+                        ui.push_toast(i18n.tr("burn.title"), i18n.tr("burn.unreachable"));
                         continue;
                     }
                 }
             }
-            UiAction::FetchVaultList { query, fresh } => {
+            UiAction::FetchVaultList { query, fresh, seq } => {
+                if seq > ui.vault_drawer.req_seq {
+                    ui.vault_drawer.req_seq = seq;
+                }
                 ui.vault_drawer.loading = true;
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
-                        let _ = query_tx.try_send(RemoteQueryCmd::FetchVaultList { query, fresh });
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchVaultList { query, fresh, seq });
                     }
                     BridgeBackend::InProcess { app_state, .. } => {
                         let state = Arc::clone(app_state);
@@ -7849,6 +8023,7 @@ fn process_ui_actions(
                             let val = json!({ "stats": stats, "items": items });
                             let (parsed_items, total_count, total_bytes) = parse_vault_list_from_json(&val);
                             let _ = async_tx.try_send(BridgeAsyncResult::VaultList {
+                                seq,
                                 items: parsed_items,
                                 total_count,
                                 total_bytes,
@@ -7858,7 +8033,7 @@ fn process_ui_actions(
                     BridgeBackend::BindError { .. } => {
                         ui.vault_drawer.loading = false;
                         ui.vault_drawer.loaded = true;
-                        ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.err"));
+                        ui.push_toast(i18n.tr("vault.title"), i18n.tr("drawer.unreachable"));
                         continue;
                     }
                 }
@@ -7866,7 +8041,7 @@ fn process_ui_actions(
             UiAction::FetchVaultTranscript(sid) => {
                 if !station_core::store::vault::is_valid_sid(&sid) {
                     ui.vault_drawer.transcript_loading = None;
-                    ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.err"));
+                    ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.gotIt"));
                     continue;
                 }
                 ui.vault_drawer.transcript_loading = Some(sid.clone());
@@ -7890,7 +8065,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.vault_drawer.transcript_loading = None;
-                        ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.err"));
+                        ui.push_toast(i18n.tr("vault.title"), i18n.tr("drawer.unreachable"));
                         continue;
                     }
                 }
@@ -7924,8 +8099,8 @@ fn process_ui_actions(
                     BridgeBackend::BindError { .. } => {
                         ui.vault_drawer.report.loading = false;
                         ui.vault_drawer.report.loaded = true;
-                        ui.vault_drawer.report.error = Some(i18n.tr("vault.rep.err"));
-                        ui.push_toast(i18n.tr("vault.tab.report"), i18n.tr("vault.rep.err"));
+                        ui.vault_drawer.report.error = Some(i18n.tr("drawer.unreachable"));
+                        ui.push_toast(i18n.tr("vault.tabReport"), i18n.tr("drawer.unreachable"));
                         continue;
                     }
                 }
@@ -7936,7 +8111,7 @@ fn process_ui_actions(
                 toast_body,
             } => {
                 let toast_tx = bridge.toast_tx.clone();
-                let fail_msg = i18n.tr("err.network");
+                let fail_msg = i18n.tr("drawer.copyFailed");
                 std::thread::spawn(move || {
                     let ok = arboard::Clipboard::new()
                         .and_then(|mut cb| cb.set_text(text))
@@ -7950,9 +8125,9 @@ fn process_ui_actions(
                 force,
                 start,
             } => {
-                let title = i18n.tr("mac.title");
-                let ok_msg = i18n.tr("mac.closed");
-                let err_msg = i18n.tr("mac.err");
+                let title = i18n.tr("ui.macDrawer.title");
+                let ok_msg = i18n.tr("mac.action.done");
+                let err_msg = i18n.tr("mac.action.failed");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::SysMutate {
@@ -7979,20 +8154,20 @@ fn process_ui_actions(
                         });
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast(title, err_msg);
+                        ui.push_toast(title, i18n.tr("mac.action.unreachable"));
                         continue;
                     }
                 }
             }
             UiAction::SetSysAutoClose(hours) => {
                 ui.mac_drawer.auto_close_hours = hours;
-                let title = i18n.tr("mac.auto");
+                let title = i18n.tr("mac.auto.label");
                 let ok_msg = if hours == 0 {
-                    i18n.tr("mac.autoOff")
+                    i18n.tr("mac.auto.savedOff")
                 } else {
-                    format!("{hours}h")
+                    i18n.tr_vars("mac.auto.saved", &[("n", &hours.to_string())])
                 };
-                let err_msg = i18n.tr("mac.err");
+                let err_msg = i18n.tr("mac.action.failed");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::SysMutate {
@@ -8013,7 +8188,7 @@ fn process_ui_actions(
                         ui.push_toast(title, if ok { ok_msg } else { err_msg });
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast(title, err_msg);
+                        ui.push_toast(title, i18n.tr("mac.action.unreachable"));
                         continue;
                     }
                 }
@@ -8042,15 +8217,18 @@ fn process_ui_actions(
                     BridgeBackend::BindError { .. } => {
                         ui.mac_drawer.stranded_loading = false;
                         ui.mac_drawer.stranded_loaded = true;
-                        ui.push_toast(i18n.tr("stranded.h"), i18n.tr("stranded.err"));
+                        ui.push_toast(
+                            i18n.tr("mac.stranded.title"),
+                            i18n.tr("mac.action.unreachable"),
+                        );
                         continue;
                     }
                 }
             }
             UiAction::OpenStranded(id) => {
-                let title = i18n.tr("stranded.h");
-                let ok_msg = i18n.tr("stranded.open");
-                let err_msg = i18n.tr("stranded.err");
+                let title = i18n.tr("mac.stranded.title");
+                let ok_msg = i18n.tr("mac.stranded.open");
+                let err_msg = i18n.tr("mac.action.failed");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::StrandedMutate {
@@ -8075,19 +8253,19 @@ fn process_ui_actions(
                                 let _ = toast_tx.try_send((title, if ok { ok_msg } else { err_msg }));
                             });
                         } else {
-                            ui.push_toast(title, i18n.tr("stranded.gone"));
+                            ui.push_toast(title, i18n.tr("mac.stranded.gone"));
                         }
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast(title, err_msg);
+                        ui.push_toast(title, i18n.tr("mac.action.unreachable"));
                         continue;
                     }
                 }
             }
             UiAction::RemoveStranded(id) => {
-                let title = i18n.tr("stranded.h");
-                let ok_msg = i18n.tr("stranded.removed");
-                let err_msg = i18n.tr("stranded.err");
+                let title = i18n.tr("mac.stranded.title");
+                let ok_msg = i18n.tr("mac.action.done");
+                let err_msg = i18n.tr("mac.action.failed");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::StrandedMutate {
@@ -8124,7 +8302,7 @@ fn process_ui_actions(
                         });
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast(title, err_msg);
+                        ui.push_toast(title, i18n.tr("mac.action.unreachable"));
                         continue;
                     }
                 }
@@ -8142,7 +8320,7 @@ fn process_ui_actions(
                 }
                 BridgeBackend::BindError { .. } => {
                     ui.ai_accounts.loaded = true;
-                    ui.push_toast(i18n.tr("acct.h"), i18n.tr("err.network"));
+                    ui.push_toast(i18n.tr("ai.title"), i18n.tr("drawer.unreachable"));
                     continue;
                 }
             },
@@ -8152,9 +8330,9 @@ fn process_ui_actions(
                 body,
             } => {
                 let clean_body = redact_ai_mutate_body(body);
-                let title = i18n.tr("acct.h");
-                let ok_msg = i18n.tr("acct.switched");
-                let err_msg = i18n.tr("err.network");
+                let title = i18n.tr("ai.title");
+                let ok_msg = i18n.tr("mac.action.done");
+                let err_msg = i18n.tr("ai.failed");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::AiAccountMutate {
@@ -8169,7 +8347,6 @@ fn process_ui_actions(
                     BridgeBackend::InProcess { app_state, .. } => {
                         let state = Arc::clone(app_state);
                         let async_tx = bridge.async_tx.clone();
-                        let toast_tx = bridge.toast_tx.clone();
                         std::thread::spawn(move || {
                             let res = match provider {
                                 AiProviderTab::Claude => state
@@ -8189,24 +8366,22 @@ fn process_ui_actions(
                                     .mutate(&action, &clean_body),
                             };
                             let ok = res.get("ok").and_then(Value::as_bool).unwrap_or(false);
-                            let detail = res
-                                .get("message")
-                                .or_else(|| res.get("code"))
+                            let code = res
+                                .get("code")
                                 .and_then(Value::as_str)
                                 .map(str::to_owned);
-                            let _ = toast_tx.try_send((
+                            let _ = async_tx.try_send(BridgeAsyncResult::AiAccountNotice {
                                 title,
-                                if ok {
-                                    ok_msg
-                                } else {
-                                    detail.unwrap_or(err_msg)
-                                },
-                            ));
+                                ok,
+                                code,
+                                ok_msg,
+                                err_msg,
+                            });
                             let _ = async_tx.try_send(build_in_process_ai_accounts(&state));
                         });
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast(title, err_msg);
+                        ui.push_toast(title, i18n.tr("drawer.unreachable"));
                         continue;
                     }
                 }
@@ -8224,18 +8399,18 @@ fn process_ui_actions(
                 }
                 BridgeBackend::BindError { .. } => {
                     ui.phone_modal.loaded = true;
-                    ui.push_toast(i18n.tr("phone.title"), i18n.tr("err.network"));
+                    ui.push_toast(i18n.tr("ui.phoneModal.title"), i18n.tr("drawer.unreachable"));
                     continue;
                 }
             },
             UiAction::ToggleLan(on) => {
-                let title = i18n.tr("phone.title");
-                let ok_msg = if on {
-                    i18n.tr("phone.lan.on")
+                let title = i18n.tr("ui.phoneModal.title");
+                let ok_msg = i18n.tr(if on {
+                    "topbar.phone.isOn"
                 } else {
-                    i18n.tr("phone.lan.off")
-                };
-                let err_msg = i18n.tr("err.network");
+                    "topbar.phone.isOff"
+                });
+                let err_msg = i18n.tr("drawer.unreachable");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
@@ -8243,6 +8418,7 @@ fn process_ui_actions(
                             body: json!({ "on": on }),
                             toast_title: title,
                             toast_ok: ok_msg,
+                            toast_empty: None,
                             toast_err: err_msg,
                         });
                     }
@@ -8266,13 +8442,13 @@ fn process_ui_actions(
                 }
             }
             UiAction::ToggleTunnel(on) => {
-                let title = i18n.tr("phone.anywhere");
-                let ok_msg = if on {
-                    i18n.tr("phone.cf.starting")
+                let title = i18n.tr("topbar.phone.tabAway");
+                let ok_msg = i18n.tr(if on {
+                    "topbar.phone.tunStarting"
                 } else {
-                    i18n.tr("phone.lan.off")
-                };
-                let err_msg = i18n.tr("err.network");
+                    "topbar.phone.isOff"
+                });
+                let err_msg = i18n.tr("drawer.unreachable");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
@@ -8280,6 +8456,7 @@ fn process_ui_actions(
                             body: json!({ "on": on }),
                             toast_title: title,
                             toast_ok: ok_msg,
+                            toast_empty: None,
                             toast_err: err_msg,
                         });
                     }
@@ -8322,13 +8499,13 @@ fn process_ui_actions(
             }
             UiAction::SetTunnelDomain(host) => {
                 let clean = station_core::redact::redact(&host).trim().to_ascii_lowercase();
-                let title = i18n.tr("phone.anywhere");
-                let err_msg = i18n.tr("err.network");
+                let title = i18n.tr("topbar.phone.fixedTitle");
+                let err_msg = i18n.tr("mac.action.failed");
                 if !clean.is_empty() && !is_valid_tunnel_host_input(&clean) {
                     ui.push_toast(title, err_msg);
                     continue;
                 }
-                let ok_msg = i18n.tr("phone.cf.domainSave");
+                let ok_msg = i18n.tr("mac.action.done");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
@@ -8336,6 +8513,7 @@ fn process_ui_actions(
                             body: json!({ "host": clean }),
                             toast_title: title,
                             toast_ok: ok_msg,
+                            toast_empty: None,
                             toast_err: err_msg,
                         });
                     }
@@ -8361,19 +8539,19 @@ fn process_ui_actions(
                         ui.push_toast(title, ok_msg);
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast(title, err_msg);
+                        ui.push_toast(title, i18n.tr("drawer.unreachable"));
                         continue;
                     }
                 }
             }
             UiAction::TogglePhoneApprove(approve) => {
-                let title = i18n.tr("phone.approve");
-                let ok_msg = if approve {
-                    i18n.tr("phone.lan.on")
+                let title = i18n.tr("topbar.phone.approve");
+                let ok_msg = i18n.tr(if approve {
+                    "topbar.phone.isOn"
                 } else {
-                    i18n.tr("phone.lan.off")
-                };
-                let err_msg = i18n.tr("err.network");
+                    "topbar.phone.isOff"
+                });
+                let err_msg = i18n.tr("drawer.unreachable");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
@@ -8381,6 +8559,7 @@ fn process_ui_actions(
                             body: json!({ "approve": approve }),
                             toast_title: title,
                             toast_ok: ok_msg,
+                            toast_empty: None,
                             toast_err: err_msg,
                         });
                     }
@@ -8411,10 +8590,10 @@ fn process_ui_actions(
                 }
             }
             UiAction::UpdatePin { pin } => {
-                let title = i18n.tr("phone.pin");
-                let ok_msg = i18n.tr("phone.pin.saved");
+                let title = i18n.tr("topbar.phone.pinTitle");
+                let ok_msg = i18n.tr("topbar.phone.pinSaved");
                 let weak_msg = i18n.tr("station.pinWeak");
-                let err_msg = i18n.tr("err.network");
+                let err_msg = i18n.tr("drawer.unreachable");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let body = match pin {
@@ -8426,6 +8605,7 @@ fn process_ui_actions(
                             body,
                             toast_title: title,
                             toast_ok: ok_msg,
+                            toast_empty: None,
                             toast_err: weak_msg,
                         });
                     }
@@ -8456,16 +8636,19 @@ fn process_ui_actions(
                 }
             }
             UiAction::TestWebPush => {
-                let title = i18n.tr("phone.push.title");
-                let ok_msg = i18n.tr("phone.push.sent");
-                let err_msg = i18n.tr("err.network");
+                let title = i18n.tr("server.push.testTitle");
+                let body_txt = i18n.tr("server.push.testBody");
+                let ok_msg = i18n.tr("topbar.phone.notifySent");
+                let empty_msg = i18n.tr("topbar.phone.pushNone");
+                let err_msg = i18n.tr("drawer.unreachable");
                 match &bridge.backend {
                     BridgeBackend::AttachedHttp { query_tx, .. } => {
                         let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
                             path: "/api/push/test",
-                            body: json!({}),
+                            body: json!({ "title": title, "body": body_txt }),
                             toast_title: title,
                             toast_ok: ok_msg,
+                            toast_empty: Some(empty_msg),
                             toast_err: err_msg,
                         });
                     }
@@ -8476,7 +8659,7 @@ fn process_ui_actions(
                     } => {
                         let msg = station_core::store::push::PushMessage {
                             title: title.clone(),
-                            body: ok_msg.clone(),
+                            body: body_txt,
                             tag: Some("station-test".to_owned()),
                             url: "/phone".to_owned(),
                             urgent: false,
@@ -8487,7 +8670,7 @@ fn process_ui_actions(
                             .unwrap_or_else(|e| e.into_inner())
                             .prepare_deliveries(&msg, now_ms() / 1000);
                         if deliveries.is_empty() {
-                            ui.push_toast(title, i18n.tr("phone.push.empty"));
+                            ui.push_toast(title, empty_msg);
                         } else if let Some(rt) = runtime_handle.clone() {
                             let state = Arc::clone(app_state);
                             let toast_tx = bridge.toast_tx.clone();
@@ -11761,6 +11944,7 @@ mod tests {
             ui.push_action(UiAction::FetchVaultList {
                 query: String::new(),
                 fresh: false,
+                seq: 1,
             });
             ui.push_action(UiAction::FetchVaultReport);
             ui.push_action(UiAction::FetchAiAccounts);
@@ -11769,9 +11953,14 @@ mod tests {
             ui.push_action(UiAction::TogglePhoneApprove(true));
             ui.push_action(UiAction::SetSysAutoClose(4));
             ui.push_action(UiAction::UpdatePin { pin: None });
+            ui.push_action(UiAction::TestWebPush);
         }
         app.update();
 
+        let expected_push_none = app
+            .world()
+            .resource::<I18nStore>()
+            .tr("topbar.phone.pushNone");
         let deadline = std::time::Instant::now() + Duration::from_secs(6);
         let mut all_ok = false;
         while std::time::Instant::now() < deadline {
@@ -11785,8 +11974,9 @@ mod tests {
                 && ui.phone_modal.phone_approve
                 && ui.pairing_pin.len() == 6
                 && ui.pairing_pin != old_pin;
+            let push_none_ok = ui.toasts.iter().any(|t| t.body == expected_push_none);
             let auto_ok = daemon_state.prefs.lock().unwrap().auto_close() == 4;
-            if burn_ok && vault_ok && accts_ok && phone_ok && auto_ok {
+            if burn_ok && vault_ok && accts_ok && phone_ok && push_none_ok && auto_ok {
                 all_ok = true;
                 break;
             }
@@ -11794,8 +11984,173 @@ mod tests {
         }
         assert!(
             all_ok,
-            "AttachedHttp must load Burn 30d, Vault + Report, AI Accounts, Phone status, LAN/Approve/AutoClose, and regenerate PIN"
+            "AttachedHttp must load Burn 30d, Vault + Report, AI Accounts, Phone status, LAN/Approve/AutoClose, toast pushNone when sent==0, and regenerate PIN"
         );
+
+        // Regression check (#3): next sync tick applying RemoteSnapshot MUST NOT overwrite the new PIN back to old_pin.
+        let new_pin = app.world().resource::<UiState>().pairing_pin.clone();
+        {
+            let snap_clone = match &app.world().resource::<LiveServerBridge>().backend {
+                BridgeBackend::AttachedHttp { snapshot, .. } => {
+                    snapshot.lock().unwrap().clone()
+                }
+                _ => panic!("expected AttachedHttp"),
+            };
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            apply_remote_snapshot_to_ui(&snap_clone, &mut ui);
+            assert_eq!(
+                ui.pairing_pin, new_pin,
+                "RemoteSnapshot must carry the updated PIN so sync_timer never reverts it"
+            );
+        }
         drop(daemon);
+    }
+
+    #[test]
+    fn parse_ai_slots_parses_windows_and_rows_and_localizes_error_codes() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let payload = json!({
+            "auto": true,
+            "accounts": [
+                {
+                    "name": "",
+                    "label": "Main",
+                    "active": true,
+                    "windows": [
+                        { "key": "session", "label": "5h", "pct": 42.5, "resetsAt": 1700000000000u64 },
+                        { "key": "weekly", "label": "7d", "pct": 78.0, "resetsAt": 1700500000000u64 }
+                    ]
+                }
+            ],
+            "codex": {
+                "auto": false,
+                "accounts": [
+                    {
+                        "slug": "cx1",
+                        "label": "Codex",
+                        "active": true,
+                        "rows": [{ "key": "session", "label": "5h", "used": 61.0 }]
+                    }
+                ]
+            },
+            "ag": {
+                "auto": true,
+                "away": true,
+                "pending": "ag-2",
+                "accounts": [
+                    {
+                        "slug": "ag-1",
+                        "label": "AG",
+                        "active": true,
+                        "windows": [{ "key": "model", "label": "Claude", "pct": 88.0 }]
+                    }
+                ]
+            }
+        });
+        let parsed = parse_ai_accounts_from_json(&payload);
+        match parsed {
+            BridgeAsyncResult::AiAccountsData { claude, codex, ag, ag_away, ag_pending, .. } => {
+                assert_eq!(claude[0].windows.len(), 2);
+                assert_eq!(claude[0].windows[0].key, "session");
+                assert!((claude[0].windows[0].pct - 42.5).abs() < 0.01);
+                assert_eq!(codex[0].windows.len(), 1);
+                assert!((codex[0].windows[0].pct - 61.0).abs() < 0.01);
+                assert_eq!(ag[0].windows.len(), 1);
+                assert!(ag_away);
+                assert_eq!(ag_pending.as_deref(), Some("ag-2"));
+            }
+            _ => panic!("expected AiAccountsData"),
+        }
+
+        for lang in ["en", "vi", "th"] {
+            let tr = I18nStore::load_from_assets(&assets_dir, lang);
+            for code in ["noCopy", "inSeat", "badName", "noAccount", "noDb"] {
+                let resolved = resolve_ai_error_code(&tr, code);
+                assert!(
+                    resolved.is_some(),
+                    "account error code '{code}' must resolve in locale '{lang}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn task7_all_i18n_keys_resolve_cleanly_in_en_vi_th() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let keys = [
+            // Bridge handlers
+            "burn.title",
+            "burn.unreachable",
+            "vault.title",
+            "vault.tabReport",
+            "vault.gotIt",
+            "drawer.unreachable",
+            "drawer.copyFailed",
+            "ui.macDrawer.title",
+            "mac.action.done",
+            "mac.action.failed",
+            "mac.action.unreachable",
+            "mac.auto.label",
+            "mac.auto.savedOff",
+            "mac.auto.saved",
+            "mac.auto.hours",
+            "mac.stranded.title",
+            "mac.stranded.open",
+            "mac.stranded.gone",
+            "ai.title",
+            "ai.failed",
+            "ai.ag.pending",
+            "ai.ag.cancelPending",
+            "ai.ag.awayOk",
+            "ui.phoneModal.title",
+            "topbar.phone.isOn",
+            "topbar.phone.isOff",
+            "topbar.phone.tabAway",
+            "topbar.phone.tunStarting",
+            "topbar.phone.fixedTitle",
+            "topbar.phone.approve",
+            "topbar.phone.pinTitle",
+            "topbar.phone.pinSaved",
+            "topbar.phone.notifySent",
+            "topbar.phone.pushNone",
+            "server.push.testTitle",
+            "server.push.testBody",
+            // Newly added station.* keys for Task 7
+            "station.burn30d",
+            "station.privateWs",
+            "station.addAppTitle",
+            "station.addAppDesc",
+            "station.addAppId",
+            "station.addAppLabel",
+            "station.addAppPath",
+            "station.addAppSave",
+            "station.addAppAdded",
+            "station.customApps",
+            "station.remove",
+            "station.saveSeat",
+            "station.moveUp",
+            "station.moveDown",
+            "station.emailLabel",
+            "station.accountsOpen",
+            "station.pinWeak",
+            "station.kb",
+            "station.cpu",
+            "station.loadEarlier",
+            "station.streamerRedacted",
+        ];
+        for lang in ["en", "vi", "th"] {
+            let tr = I18nStore::load_from_assets(&assets_dir, lang);
+            for key in keys {
+                let val = tr.tr(key);
+                assert_ne!(
+                    val, key,
+                    "i18n key '{key}' failed to resolve in locale '{lang}'"
+                );
+                assert!(
+                    !val.trim().is_empty(),
+                    "i18n key '{key}' resolved to empty string in locale '{lang}'"
+                );
+            }
+        }
     }
 }

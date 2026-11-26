@@ -9,10 +9,10 @@ pub mod vault;
 pub mod whiteboard;
 
 use crate::i18n::I18nStore;
-use crate::state::{ActiveDrawer, UiState};
+use crate::state::{ActiveDrawer, TopBarPopover, UiState};
 use bevy_egui::egui;
 
-/// Dispatches the active drawer or modal, dropping transient GPU caches when closed.
+/// Dispatches the active drawer or modal, dropping transient GPU caches and stale state when closed.
 pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
     if state.timelapse_recording {
         modals::draw_timelapse_overlay(ctx, state, i18n);
@@ -24,6 +24,15 @@ pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nS
     }
     if drawer != ActiveDrawer::PhoneQr {
         modals::clear_phone_qr_cache(ctx);
+        state.phone_modal.loaded = false;
+        state.phone_modal.last_poll_secs = 0.0;
+    }
+    if drawer != ActiveDrawer::Vault {
+        state.vault_drawer.open_transcript = None;
+        state.vault_drawer.transcript_visible_msgs = 0;
+    }
+    if drawer != ActiveDrawer::Accounts && state.open_popover != Some(TopBarPopover::Plan) {
+        state.ai_accounts.loaded = false;
     }
 
     match drawer {

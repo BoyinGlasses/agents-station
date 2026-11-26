@@ -433,13 +433,31 @@ pub fn draw_timelapse_overlay(ctx: &egui::Context, state: &mut UiState, i18n: &I
 pub fn draw_phone_modal(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
     if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.active_drawer = ActiveDrawer::None;
+        state.phone_modal.loaded = false;
+        state.phone_modal.last_poll_secs = 0.0;
         clear_phone_qr_cache(ctx);
         return;
     }
 
+    let now_secs = ctx.input(|i| i.time);
     if !state.phone_modal.loaded {
         state.phone_modal.loaded = true;
+        state.phone_modal.last_poll_secs = now_secs;
         state.push_action(UiAction::FetchPhoneStatus);
+    } else if state.phone_modal.tunnel_on
+        && (state.phone_modal.tunnel_state == "starting"
+            || state.phone_modal.tunnel_state == "download"
+            || state
+                .phone_modal
+                .tunnel_url
+                .as_deref()
+                .is_none_or(str::is_empty))
+    {
+        if now_secs - state.phone_modal.last_poll_secs >= 1.5 {
+            state.phone_modal.last_poll_secs = now_secs;
+            state.push_action(UiAction::FetchPhoneStatus);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 
     let mut open = true;
@@ -622,15 +640,35 @@ pub fn draw_phone_modal(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSto
                             }
                         }
 
-                        // Real ISO-18004 QR image + URL + Copy button
+                        // Real ISO-18004 QR image + URL + Copy button (gated on LAN ON / tunnel ready; redacted in streamer mode)
                         let show_qr = match state.phone_modal.tab {
-                            PhoneTab::Home => true,
+                            PhoneTab::Home => state.phone_modal.lan_on,
                             PhoneTab::Away => active_tunnel_url.is_some(),
                         };
+                        if !show_qr || state.streamer_mode {
+                            clear_phone_qr_cache(ctx);
+                        }
                         if show_qr {
                             ui.add_space(8.0);
                             ui.horizontal(|ui| {
-                                if let Some(tex) = get_or_build_phone_qr_texture(ctx, &qr_url) {
+                                if state.streamer_mode {
+                                    egui::Frame::NONE
+                                        .fill(BG)
+                                        .corner_radius(CornerRadius::same(8))
+                                        .inner_margin(Margin::same(8))
+                                        .stroke(Stroke::new(1.0_f32, LINE_2))
+                                        .show(ui, |ui| {
+                                            ui.set_min_size(vec2(140.0, 140.0));
+                                            ui.set_max_size(vec2(140.0, 140.0));
+                                            ui.centered_and_justified(|ui| {
+                                                ui.label(
+                                                    RichText::new(i18n.tr("station.streamerRedacted"))
+                                                        .size(10.5)
+                                                        .color(MUTED),
+                                                );
+                                            });
+                                        });
+                                } else if let Some(tex) = get_or_build_phone_qr_texture(ctx, &qr_url) {
                                     egui::Frame::NONE
                                         .fill(Color32::WHITE)
                                         .corner_radius(CornerRadius::same(8))
@@ -821,6 +859,8 @@ pub fn draw_phone_modal(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSto
 
     if !open {
         state.active_drawer = ActiveDrawer::None;
+        state.phone_modal.loaded = false;
+        state.phone_modal.last_poll_secs = 0.0;
         clear_phone_qr_cache(ctx);
     }
 }
@@ -1295,5 +1335,75 @@ mod tests {
                 "QR texture cache must be dropped when PhoneModal closes"
             );
         }
+    }
+
+    #[test]
+    fn phone_modal_streamer_mode_redacts_qr_and_evicts_cached_texture() {
+        let tr = i18n("en");
+        let ctx = setup_ctx();
+        let mut st = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        st.active_drawer = ActiveDrawer::PhoneQr;
+        st.phone_modal.lan_on = true;
+        st.phone_modal.lan_ip = Some("192.168.1.42".to_owned());
+        st.streamer_mode = false;
+
+        // First render with streamer_mode=false allocates the cached QR texture.
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(
+            ctx.data(|d| d.get_temp::<CachedPhoneQr>(egui::Id::new(PHONE_QR_CACHE_ID)))
+                .is_some(),
+            "QR texture should cache when LAN is ON and streamer mode is OFF"
+        );
+
+        // Enabling streamer_mode MUST immediately evict the QR texture and never allocate a new one.
+        st.streamer_mode = true;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(
+            ctx.data(|d| d.get_temp::<CachedPhoneQr>(egui::Id::new(PHONE_QR_CACHE_ID)))
+                .is_none(),
+            "streamer_mode must evict QR texture so real LAN/tunnel URL cannot be scanned"
+        );
+    }
+
+    #[test]
+    fn phone_modal_gates_home_qr_on_lan_on_and_resets_loaded_on_close() {
+        let tr = i18n("en");
+        let ctx = setup_ctx();
+        let mut st = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        st.active_drawer = ActiveDrawer::PhoneQr;
+        st.phone_modal.lan_on = false;
+        st.phone_modal.lan_ip = Some("192.168.1.42".to_owned());
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(
+            ctx.data(|d| d.get_temp::<CachedPhoneQr>(egui::Id::new(PHONE_QR_CACHE_ID)))
+                .is_none(),
+            "Home tab must hide QR when LAN is OFF"
+        );
+        assert!(st.phone_modal.loaded);
+
+        // Closing PhoneQr must reset loaded so reopening fetches fresh status.
+        st.active_drawer = ActiveDrawer::None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(
+            !st.phone_modal.loaded,
+            "closing PhoneModal must reset loaded for fresh reopen fetch"
+        );
     }
 }

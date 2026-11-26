@@ -9,6 +9,9 @@ use bevy_egui::egui::{
     self, Align, Color32, CornerRadius, Margin, Rect, RichText, Sense, Stroke, vec2,
 };
 
+const TRANSCRIPT_PAGE_SIZE: usize = 80;
+const VAULT_SEARCH_DEBOUNCE_SECS: f64 = 0.25;
+
 fn fmt_bytes(bytes: u64, i18n: &I18nStore) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         let s = format!("{:.1}", bytes as f64 / (1024.0 * 1024.0 * 1024.0));
@@ -18,8 +21,17 @@ fn fmt_bytes(bytes: u64, i18n: &I18nStore) -> String {
         i18n.tr_vars("time.mb", &[("n", &s)])
     } else {
         let kb = (bytes as f64 / 1024.0).max(1.0);
-        format!("{kb:.0} KB")
+        i18n.tr_vars("station.kb", &[("n", &format!("{kb:.0}"))])
     }
+}
+
+fn dispatch_vault_list_fetch(state: &mut UiState, fresh: bool) {
+    state.vault_drawer.req_seq = state.vault_drawer.req_seq.wrapping_add(1).max(1);
+    let seq = state.vault_drawer.req_seq;
+    let query = state.vault_query.clone();
+    state.vault_drawer.pending_query_at = None;
+    state.vault_drawer.loading = true;
+    state.push_action(UiAction::FetchVaultList { query, fresh, seq });
 }
 
 fn project_basename(cwd: &str) -> &str {
@@ -53,6 +65,7 @@ pub fn draw_vault_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSt
     if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         if state.vault_drawer.open_transcript.is_some() {
             state.vault_drawer.open_transcript = None;
+            state.vault_drawer.transcript_visible_msgs = 0;
         } else {
             state.active_drawer = ActiveDrawer::None;
         }
@@ -60,9 +73,7 @@ pub fn draw_vault_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSt
     }
 
     if !state.vault_drawer.loaded && !state.vault_drawer.loading {
-        state.vault_drawer.loading = true;
-        let query = state.vault_query.clone();
-        state.push_action(UiAction::FetchVaultList { query, fresh: false });
+        dispatch_vault_list_fetch(state, false);
     }
     if state.vault_drawer.tab == VaultTab::Report
         && !state.vault_drawer.report.loaded
@@ -155,6 +166,7 @@ fn draw_vault_list_or_transcript(ui: &mut egui::Ui, state: &mut UiState, i18n: &
                 .corner_radius(CornerRadius::same(7));
             if ui.add(back_btn).clicked() {
                 state.vault_drawer.open_transcript = None;
+                state.vault_drawer.transcript_visible_msgs = 0;
             }
             let title = if streamer {
                 redacted.clone()
@@ -209,9 +221,33 @@ fn draw_vault_list_or_transcript(ui: &mut egui::Ui, state: &mut UiState, i18n: &
         }
 
         ui.add_space(6.0);
+        let visible_cap = if state.vault_drawer.transcript_visible_msgs == 0 {
+            TRANSCRIPT_PAGE_SIZE
+        } else {
+            state.vault_drawer.transcript_visible_msgs
+        };
+        let total_msgs = rec.msgs.len();
+        let start_idx = total_msgs.saturating_sub(visible_cap);
+
         egui::ScrollArea::vertical().max_height(430.0).show(ui, |ui| {
-            for (idx, m) in rec.msgs.iter().enumerate() {
-                ui.push_id(("vmsg", idx), |ui| {
+            if start_idx > 0 {
+                let batch = start_idx.min(TRANSCRIPT_PAGE_SIZE);
+                let more_lbl =
+                    i18n.tr_vars("station.loadEarlier", &[("n", &batch.to_string())]);
+                let more_btn = egui::Button::new(heading_bold(more_lbl, 11.0).color(ACCENT_HI))
+                    .fill(CARD_2)
+                    .stroke(Stroke::new(1.0_f32, LINE_2))
+                    .corner_radius(CornerRadius::same(7))
+                    .min_size(vec2(ui.available_width(), 28.0));
+                if ui.add(more_btn).clicked() {
+                    state.vault_drawer.transcript_visible_msgs =
+                        visible_cap.saturating_add(TRANSCRIPT_PAGE_SIZE);
+                }
+                ui.add_space(6.0);
+            }
+            for (rel_idx, m) in rec.msgs[start_idx..].iter().enumerate() {
+                let abs_idx = start_idx + rel_idx;
+                ui.push_id(("vmsg", abs_idx), |ui| {
                     let is_user = m.role == "u";
                     let who = if is_user {
                         i18n.tr("vault.you")
@@ -245,8 +281,8 @@ fn draw_vault_list_or_transcript(ui: &mut egui::Ui, state: &mut UiState, i18n: &
         return;
     }
 
-    // Search bar + Refresh
-    let mut query_changed = false;
+    // Search bar + Refresh (250ms debounce + monotonic req_seq)
+    let now_secs = ui.ctx().input(|i| i.time);
     ui.horizontal(|ui| {
         let resp = ui.add(
             egui::TextEdit::singleline(&mut state.vault_query)
@@ -254,21 +290,26 @@ fn draw_vault_list_or_transcript(ui: &mut egui::Ui, state: &mut UiState, i18n: &
                 .hint_text(i18n.tr("vault.search")),
         );
         if resp.changed() {
-            query_changed = true;
+            state.vault_drawer.pending_query_at = Some(now_secs);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(260));
         }
         let refresh = egui::Button::new(RichText::new(i18n.tr("ui.macDrawer.refresh")).size(10.5))
             .fill(CARD_2)
             .stroke(Stroke::new(1.0_f32, LINE_2))
             .corner_radius(CornerRadius::same(7));
         if ui.add(refresh).clicked() {
-            state.vault_drawer.loading = true;
-            let query = state.vault_query.clone();
-            state.push_action(UiAction::FetchVaultList { query, fresh: true });
+            dispatch_vault_list_fetch(state, true);
         }
     });
-    if query_changed {
-        let query = state.vault_query.clone();
-        state.push_action(UiAction::FetchVaultList { query, fresh: false });
+    if let Some(t0) = state.vault_drawer.pending_query_at {
+        if now_secs - t0 >= VAULT_SEARCH_DEBOUNCE_SECS {
+            dispatch_vault_list_fetch(state, false);
+        } else {
+            let rem_ms = ((VAULT_SEARCH_DEBOUNCE_SECS - (now_secs - t0)).max(0.02) * 1000.0) as u64;
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(rem_ms));
+        }
     }
 
     let stats_line = i18n.tr_vars(
@@ -348,6 +389,7 @@ fn draw_vault_list_or_transcript(ui: &mut egui::Ui, state: &mut UiState, i18n: &
                         }
                     });
                 if frame.response.interact(Sense::click()).clicked() {
+                    state.vault_drawer.transcript_visible_msgs = 0;
                     state.vault_drawer.transcript_loading = Some(it.sid.clone());
                     state.push_action(UiAction::FetchVaultTranscript(it.sid.clone()));
                 }
@@ -460,4 +502,89 @@ fn draw_vault_report_tab(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStor
         ui.add_space(6.0);
         ui.label(RichText::new(i18n.tr("vault.report.note")).size(10.0).color(FAINT));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{VaultMsgUi, VaultTranscriptUi};
+
+    fn test_i18n(lang: &str) -> I18nStore {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        I18nStore::load_from_assets(&dir, lang)
+    }
+
+    #[test]
+    fn vault_debounces_search_and_clears_transcript_when_closed() {
+        let tr = test_i18n("en");
+        let ctx = egui::Context::default();
+        let mut defs = egui::FontDefinitions::default();
+        let fb = defs
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        defs.families
+            .insert(egui::FontFamily::Name(crate::theme::FONT_BOLD.into()), fb);
+        ctx.set_fonts(defs);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let mut st = UiState::new_live(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        st.active_drawer = ActiveDrawer::Vault;
+        st.vault_drawer.loaded = true;
+        st.vault_query = "hello".to_owned();
+        st.vault_drawer.pending_query_at = Some(1.0);
+
+        // At t = 1.1s (< 0.25s debounce), no FetchVaultList action should fire yet.
+        let mut raw = egui::RawInput::default();
+        raw.time = Some(1.1);
+        let _ = ctx.run(raw, |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(st.drain_actions().is_empty());
+
+        // At t = 1.3s (>= 0.25s debounce), exactly one FetchVaultList with req_seq == 1 fires.
+        let mut raw2 = egui::RawInput::default();
+        raw2.time = Some(1.3);
+        let _ = ctx.run(raw2, |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        let actions = st.drain_actions();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            &actions[0],
+            UiAction::FetchVaultList { query, fresh: false, seq: 1 } if query == "hello"
+        ));
+
+        // Open a huge 200-msg transcript, verify it renders cleanly and drops from RAM on close.
+        st.vault_drawer.open_transcript = Some(VaultTranscriptUi {
+            sid: "sid-big".to_owned(),
+            title: "Huge".to_owned(),
+            cwd: "/tmp/proj".to_owned(),
+            msgs: (0..200)
+                .map(|i| VaultMsgUi {
+                    role: if i % 2 == 0 { "u".to_owned() } else { "c".to_owned() },
+                    text: format!("msg {i}"),
+                    at_ms: i as u64,
+                })
+                .collect(),
+            ..Default::default()
+        });
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(st.vault_drawer.open_transcript.is_some());
+
+        st.active_drawer = ActiveDrawer::None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(
+            st.vault_drawer.open_transcript.is_none(),
+            "closing Vault drawer must drop open transcript from RAM"
+        );
+    }
 }

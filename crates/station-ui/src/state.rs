@@ -433,8 +433,11 @@ pub struct VaultDrawerState {
     pub total_bytes: u64,
     pub loading: bool,
     pub loaded: bool,
+    pub req_seq: u64,
+    pub pending_query_at: Option<f64>,
     pub open_transcript: Option<VaultTranscriptUi>,
     pub transcript_loading: Option<String>,
+    pub transcript_visible_msgs: usize,
     pub report: PromptReportUi,
 }
 
@@ -603,6 +606,7 @@ pub enum PhoneTab {
 pub struct PhoneModalState {
     pub tab: PhoneTab,
     pub loaded: bool,
+    pub last_poll_secs: f64,
     pub lan_on: bool,
     pub lan_ip: Option<String>,
     pub tunnel_on: bool,
@@ -980,6 +984,7 @@ pub enum UiAction {
     FetchVaultList {
         query: String,
         fresh: bool,
+        seq: u64,
     },
     FetchVaultTranscript(String),
     FetchVaultReport,
