@@ -354,18 +354,6 @@ fn topbar_action_button(
     resp
 }
 
-fn draw_meter_bar(ui: &mut egui::Ui, pct: f32, fill_color: Color32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(84.0, 6.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(3), CARD_3);
-    let clamped = pct.clamp(0.0, 1.0);
-    if clamped > 0.0 {
-        let filled = Rect::from_min_size(rect.min, vec2((rect.width() * clamped).max(3.0), rect.height()));
-        ui.painter()
-            .rect_filled(filled, CornerRadius::same(3), fill_color);
-    }
-}
-
 fn level_colors(pct: f32) -> (Color32, Color32) {
     if pct >= 0.88 {
         (RED, RED_SOFT)
@@ -740,95 +728,10 @@ fn draw_apps_popover(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
 }
 
 fn draw_plan_popover(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
-    popover_header(ui, i18n.tr("ui.topBar.planLimits"), state, i18n);
-
-    // Claude | Codex | Antigravity provider tabs
-    egui::Frame::NONE
-        .fill(CARD)
-        .corner_radius(CornerRadius::same(11))
-        .inner_margin(Margin::same(3))
-        .stroke(Stroke::new(1.0_f32, LINE))
-        .show(ui, |ui| {
-            ui.columns(3, |cols| {
-                for (idx, key) in [
-                    (0u8, "station.planProviders.claude"),
-                    (1u8, "station.planProviders.codex"),
-                    (2u8, "station.planProviders.antigravity"),
-                ] {
-                    let active = state.plan_tab == idx;
-                    let btn = egui::Button::new(
-                        heading_bold(i18n.tr(key), 11.5).color(if active { INK } else { MUTED }),
-                    )
-                    .fill(if active { ACCENT_SOFT } else { Color32::TRANSPARENT })
-                    .stroke(if active {
-                        Stroke::new(1.0_f32, ACCENT_LINE)
-                    } else {
-                        Stroke::NONE
-                    })
-                    .corner_radius(CornerRadius::same(8))
-                    .min_size(vec2(cols[idx as usize].available_width(), 28.0));
-                    if cols[idx as usize].add(btn).clicked() {
-                        state.plan_tab = idx;
-                    }
-                }
-            });
-        });
-
-    ui.add_space(8.0);
-    let usd_str = format!("${:.2}", state.burn.today_usd);
-    let summary = i18n.tr_vars("station.planSummary", &[("usd", usd_str.as_str())]);
-    let month_usd_str = format!("${:.2}", state.burn.month_usd);
-    let month_summary = i18n.tr_vars("station.planMonth", &[("usd", month_usd_str.as_str())]);
-    ui.horizontal(|ui| {
-        ui.label(heading_bold(summary, 13.0));
-        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            ui.label(
-                RichText::new(month_summary)
-                    .font(FontId::new(11.5, FontFamily::Monospace))
-                    .color(MUTED),
-            );
-        });
+    popover_header(ui, i18n.tr("ai.title"), state, i18n);
+    egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+        crate::drawers::accounts::draw_accounts_panel(ui, state, i18n);
     });
-
-    if state.burn.per_model.is_empty() {
-        ui.add_space(4.0);
-        ui.label(RichText::new(i18n.tr("ui.topBar.planEmpty")).size(11.5).color(MUTED));
-    } else {
-        ui.add_space(6.0);
-        let max_usd = state
-            .burn
-            .per_model
-            .iter()
-            .map(|(_, v)| *v)
-            .fold(0.01_f64, f64::max);
-        for (model, usd) in &state.burn.per_model {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(model).size(11.5).color(INK));
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(format!("${usd:.2}"))
-                            .font(FontId::new(11.0, FontFamily::Monospace))
-                            .color(MUTED),
-                    );
-                    let pct = (*usd / max_usd) as f32;
-                    let (bar_col, _) = level_colors(pct * 0.75);
-                    draw_meter_bar(ui, pct, bar_col);
-                });
-            });
-            ui.add_space(3.0);
-        }
-    }
-
-    ui.add_space(8.0);
-    let burn_btn = egui::Button::new(heading_bold(i18n.tr("station.openBurn"), 12.0))
-        .fill(CARD_2)
-        .stroke(Stroke::new(1.0_f32, LINE_2))
-        .corner_radius(CornerRadius::same(10))
-        .min_size(vec2(ui.available_width(), 32.0));
-    if ui.add(burn_btn).clicked() {
-        state.open_popover = None;
-        state.active_drawer = ActiveDrawer::Burn;
-    }
 }
 
 fn draw_settings_popover(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {

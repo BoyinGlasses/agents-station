@@ -34,6 +34,7 @@ pub enum ActiveDrawer {
     PhoneQr,
     Whiteboard,
     AddHarness,
+    Accounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -273,6 +274,348 @@ pub struct BurnSnapshot {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub per_model: Vec<(String, f64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BurnRange {
+    #[default]
+    Today,
+    Days7,
+    Days30,
+}
+
+impl BurnRange {
+    pub fn api_str(self) -> &'static str {
+        match self {
+            Self::Today => "today",
+            Self::Days7 => "7d",
+            Self::Days30 => "30d",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BurnDetailRow {
+    pub name: String,
+    pub kind: String,
+    pub usd: f64,
+    pub tokens: f64,
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BurnRoleRowUi {
+    pub role: String,
+    pub model: String,
+    pub usd: f64,
+    pub tokens: f64,
+    pub share: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BurnProjectRowUi {
+    pub name: String,
+    pub cwd: String,
+    pub usd: f64,
+    pub share: f64,
+    pub sessions: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BurnSessionRowUi {
+    pub sid: String,
+    pub name: String,
+    pub project: String,
+    pub cwd: String,
+    pub usd: f64,
+    pub tokens: f64,
+    pub req: u64,
+    pub share: f64,
+    pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BurnDayBucketUi {
+    pub day: String,
+    pub usd: f64,
+    pub models: Vec<(String, f64)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BurnDrawerState {
+    pub range: BurnRange,
+    pub loading: bool,
+    pub loaded_range: Option<BurnRange>,
+    pub error: Option<String>,
+    pub setup: String,
+    pub money: bool,
+    pub total_usd: f64,
+    pub total_tokens: f64,
+    pub req: u64,
+    pub err: u64,
+    pub prompts: u64,
+    pub plain_usd: f64,
+    pub plain_share: f64,
+    pub ranked: Vec<BurnDetailRow>,
+    pub by_model: Vec<BurnDetailRow>,
+    pub by_source: Vec<BurnDetailRow>,
+    pub roles: Vec<BurnRoleRowUi>,
+    pub projects: Vec<BurnProjectRowUi>,
+    pub sessions: Vec<BurnSessionRowUi>,
+    pub per_day: Vec<BurnDayBucketUi>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VaultTab {
+    #[default]
+    List,
+    Report,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VaultListItem {
+    pub sid: String,
+    pub title: String,
+    pub cwd: String,
+    pub first: String,
+    pub end_ms: u64,
+    pub msg_count: usize,
+    pub gone_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VaultMsgUi {
+    pub role: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VaultTranscriptUi {
+    pub sid: String,
+    pub title: String,
+    pub cwd: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub gone_ms: u64,
+    pub msgs: Vec<VaultMsgUi>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PromptReportExampleUi {
+    pub text: String,
+    pub ph: usize,
+    pub hint: String,
+    pub phrase: String,
+    pub n: usize,
+    pub at_ms: u64,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PromptReportUi {
+    pub loaded: bool,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub n: usize,
+    pub clear: usize,
+    pub pct: Option<u32>,
+    pub convs: usize,
+    pub by: Vec<(String, usize)>,
+    pub examples: Vec<PromptReportExampleUi>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VaultDrawerState {
+    pub tab: VaultTab,
+    pub items: Vec<VaultListItem>,
+    pub total_count: usize,
+    pub total_bytes: u64,
+    pub loading: bool,
+    pub loaded: bool,
+    pub open_transcript: Option<VaultTranscriptUi>,
+    pub transcript_loading: Option<String>,
+    pub report: PromptReportUi,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SysProcRow {
+    pub name: String,
+    pub pid: u32,
+    pub start: u64,
+    pub count: usize,
+    pub cpu: f32,
+    pub mem_bytes: u64,
+    pub can_quit: bool,
+    pub busy: bool,
+    pub idle_sec: u64,
+    pub dir: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DevServerUi {
+    pub pid: u32,
+    pub start: u64,
+    pub label: String,
+    pub ports: Vec<u16>,
+    pub dir: String,
+    pub up_sec: u64,
+    pub cpu: i64,
+    pub mem_bytes: u64,
+    pub conns: u32,
+    pub idle_sec: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CleanupRowUi {
+    pub id: String,
+    pub title: String,
+    pub note: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StrandedItemUi {
+    pub id: String,
+    pub path: String,
+    pub repo: String,
+    pub branch: String,
+    pub main: bool,
+    pub locked: bool,
+    pub dirty: usize,
+    pub ahead: u32,
+    pub stashes: usize,
+    pub ok: bool,
+    pub in_use: bool,
+    pub removable: bool,
+    pub work: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MacDrawerState {
+    pub loading: bool,
+    pub swap_used_gb: f32,
+    pub swap_total_gb: f32,
+    pub mem_pressure: String,
+    pub disk_free_gb: f32,
+    pub disk_total_gb: f32,
+    pub cpu_cores: usize,
+    pub cpu_load: f32,
+    pub auto_close_hours: u8,
+    pub claude_procs: Vec<SysProcRow>,
+    pub apps: Vec<SysProcRow>,
+    pub dev_servers: Vec<DevServerUi>,
+    pub cleanups: Vec<CleanupRowUi>,
+    pub stranded: Vec<StrandedItemUi>,
+    pub stranded_loaded: bool,
+    pub stranded_loading: bool,
+    pub stranded_repos: usize,
+    pub armed_action: Option<String>,
+    pub stranded_confirm_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiProviderTab {
+    #[default]
+    Claude,
+    Codex,
+    Antigravity,
+}
+
+impl AiProviderTab {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Claude => 0,
+            Self::Codex => 1,
+            Self::Antigravity => 2,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Codex,
+            2 => Self::Antigravity,
+            _ => Self::Claude,
+        }
+    }
+
+    pub fn api_prefix(self) -> &'static str {
+        match self {
+            Self::Claude => "/api/accounts",
+            Self::Codex => "/api/ai/codex",
+            Self::Antigravity => "/api/ai/ag",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuotaWindowUi {
+    pub key: String,
+    pub label: String,
+    pub pct: f32,
+    pub resets_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AiAccountEntry {
+    pub slug: String,
+    pub label: String,
+    pub email: String,
+    pub plan: String,
+    pub active: bool,
+    pub has_credentials: bool,
+    pub note: String,
+    pub windows: Vec<QuotaWindowUi>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AiAccountsState {
+    pub tab: AiProviderTab,
+    pub loaded: bool,
+    pub claude: Vec<AiAccountEntry>,
+    pub claude_auto: bool,
+    pub claude_move: bool,
+    pub claude_resume: bool,
+    pub codex: Vec<AiAccountEntry>,
+    pub codex_auto: bool,
+    pub codex_seat_note: String,
+    pub ag: Vec<AiAccountEntry>,
+    pub ag_auto: bool,
+    pub ag_away: bool,
+    pub ag_pending: Option<String>,
+    pub ag_note: String,
+    pub adding_provider: Option<AiProviderTab>,
+    pub add_name_draft: String,
+    pub add_email_draft: String,
+    pub renaming: Option<(AiProviderTab, String)>,
+    pub rename_draft: String,
+    pub remove_armed: Option<(AiProviderTab, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhoneTab {
+    #[default]
+    Home,
+    Away,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhoneModalState {
+    pub tab: PhoneTab,
+    pub loaded: bool,
+    pub lan_on: bool,
+    pub lan_ip: Option<String>,
+    pub tunnel_on: bool,
+    pub tunnel_state: String,
+    pub tunnel_url: Option<String>,
+    pub tunnel_domain: String,
+    pub tunnel_domain_draft: String,
+    pub tunnel_error: Option<String>,
+    pub phone_approve: bool,
+    pub push_count: usize,
+    pub editing_pin: bool,
+    pub pin_draft: String,
+    pub pin_regen_armed: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -633,6 +976,45 @@ pub enum UiAction {
         copy_clipboard: bool,
     },
     CancelTimelapseClip,
+    FetchBurn(BurnRange),
+    FetchVaultList {
+        query: String,
+        fresh: bool,
+    },
+    FetchVaultTranscript(String),
+    FetchVaultReport,
+    CopyToClipboard {
+        text: String,
+        toast_title: String,
+        toast_body: String,
+    },
+    SysAction {
+        action: String,
+        target: Value,
+        force: bool,
+        start: Option<u64>,
+    },
+    SetSysAutoClose(u8),
+    FetchStranded {
+        fresh: bool,
+    },
+    OpenStranded(String),
+    RemoveStranded(String),
+    FetchAiAccounts,
+    AiAccountMutate {
+        provider: AiProviderTab,
+        action: String,
+        body: Value,
+    },
+    FetchPhoneStatus,
+    ToggleLan(bool),
+    ToggleTunnel(bool),
+    SetTunnelDomain(String),
+    TogglePhoneApprove(bool),
+    UpdatePin {
+        pin: Option<String>,
+    },
+    TestWebPush,
     RefreshTelemetry,
     MinimizeToTray,
 }
@@ -755,6 +1137,11 @@ pub struct UiState {
     pub timelapse_recording: bool,
     pub timelapse_progress: f32,
     pub timelapse_elapsed_sec: u32,
+    pub burn_drawer: BurnDrawerState,
+    pub vault_drawer: VaultDrawerState,
+    pub mac_drawer: MacDrawerState,
+    pub ai_accounts: AiAccountsState,
+    pub phone_modal: PhoneModalState,
     pub pending_actions: Vec<UiAction>,
     next_toast_id: u64,
 }
@@ -885,6 +1272,11 @@ impl UiState {
             timelapse_recording: false,
             timelapse_progress: 0.0,
             timelapse_elapsed_sec: 0,
+            burn_drawer: BurnDrawerState::default(),
+            vault_drawer: VaultDrawerState::default(),
+            mac_drawer: MacDrawerState::default(),
+            ai_accounts: AiAccountsState::default(),
+            phone_modal: PhoneModalState::default(),
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
@@ -1321,6 +1713,107 @@ impl UiState {
             timelapse_recording: false,
             timelapse_progress: 0.0,
             timelapse_elapsed_sec: 0,
+            burn_drawer: BurnDrawerState {
+                range: BurnRange::Days7,
+                loaded_range: Some(BurnRange::Days7),
+                money: true,
+                total_usd: 42.6,
+                total_tokens: 1_840_000.0,
+                req: 312,
+                prompts: 68,
+                by_model: vec![
+                    BurnDetailRow {
+                        name: "claude-opus-4-6".to_owned(),
+                        usd: 29.8,
+                        share: 0.70,
+                        ..Default::default()
+                    },
+                    BurnDetailRow {
+                        name: "claude-sonnet-4-6".to_owned(),
+                        usd: 12.8,
+                        share: 0.30,
+                        ..Default::default()
+                    },
+                ],
+                per_day: vec![
+                    BurnDayBucketUi {
+                        day: "2026-11-24".to_owned(),
+                        usd: 14.2,
+                        models: vec![("claude-opus-4-6".to_owned(), 10.0), ("claude-sonnet-4-6".to_owned(), 4.2)],
+                    },
+                    BurnDayBucketUi {
+                        day: "2026-11-25".to_owned(),
+                        usd: 28.4,
+                        models: vec![("claude-opus-4-6".to_owned(), 19.8), ("claude-sonnet-4-6".to_owned(), 8.6)],
+                    },
+                ],
+                ..Default::default()
+            },
+            vault_drawer: VaultDrawerState {
+                loaded: true,
+                total_count: 1,
+                total_bytes: 4096,
+                items: vec![VaultListItem {
+                    sid: "demo-vault-1".to_owned(),
+                    title: "agents-station".to_owned(),
+                    cwd: "D:\\mystation\\agents-station".to_owned(),
+                    first: "Native Rust rebuild with 100% parity".to_owned(),
+                    end_ms: 1_764_000_000_000,
+                    msg_count: 14,
+                    gone_ms: 0,
+                }],
+                ..Default::default()
+            },
+            mac_drawer: MacDrawerState {
+                disk_free_gb: 210.0,
+                disk_total_gb: 512.0,
+                cpu_cores: 8,
+                cpu_load: 1.4,
+                mem_pressure: "normal".to_owned(),
+                stranded_loaded: true,
+                stranded_repos: 1,
+                ..Default::default()
+            },
+            ai_accounts: AiAccountsState {
+                loaded: true,
+                claude: vec![
+                    AiAccountEntry {
+                        slug: String::new(),
+                        label: "Main".to_owned(),
+                        active: true,
+                        has_credentials: true,
+                        windows: vec![
+                            QuotaWindowUi {
+                                key: "session".to_owned(),
+                                label: "5 h".to_owned(),
+                                pct: 24.0,
+                                resets_at_ms: 0,
+                            },
+                            QuotaWindowUi {
+                                key: "weekly".to_owned(),
+                                label: "Week".to_owned(),
+                                pct: 41.0,
+                                resets_at_ms: 0,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    AiAccountEntry {
+                        slug: "work".to_owned(),
+                        label: "Work".to_owned(),
+                        active: false,
+                        has_credentials: true,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            phone_modal: PhoneModalState {
+                loaded: true,
+                lan_on: true,
+                lan_ip: Some("192.168.1.42".to_owned()),
+                ..Default::default()
+            },
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
