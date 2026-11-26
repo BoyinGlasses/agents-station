@@ -21,6 +21,7 @@ pub const ROOM_LAMP_NIGHT_LUMENS: f32 = 42_000.0;
 pub struct LightingState {
     pub night: bool,
     pub photo_hour: Option<f32>,
+    pub room_lights_off: bool,
 }
 
 impl Default for LightingState {
@@ -28,6 +29,7 @@ impl Default for LightingState {
         Self {
             night: false,
             photo_hour: None,
+            room_lights_off: false,
         }
     }
 }
@@ -37,6 +39,7 @@ impl LightingState {
         Self {
             night,
             photo_hour: None,
+            room_lights_off: false,
         }
     }
 
@@ -154,7 +157,11 @@ pub fn sync_lighting_system(
     }
 
     for (lamp, mut pt) in &mut lamp_q {
-        pt.intensity = if night { lamp.base_intensity } else { 0.0 };
+        pt.intensity = if night && !lighting.room_lights_off {
+            lamp.base_intensity
+        } else {
+            0.0
+        };
     }
 
     for (env_opt, bloom_opt, exp_opt) in &mut cam_q {

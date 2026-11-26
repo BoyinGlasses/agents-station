@@ -154,11 +154,12 @@ fn sfx_for_prop(id: &str) -> SfxKind {
     match id {
         "cat" => SfxKind::Meow,
         "arcade" => SfxKind::Coin,
-        "printer" => SfxKind::Print,
+        "printer" | "shredder" => SfxKind::Print,
         "billiards" => SfxKind::Pock,
         "aquarium" => SfxKind::Bloop,
         "karaoke" => SfxKind::Bell,
         "microwave" => SfxKind::Micro,
+        "vacuum" => SfxKind::Pop,
         "whiteboard" => SfxKind::Rustle,
         _ => SfxKind::Click,
     }

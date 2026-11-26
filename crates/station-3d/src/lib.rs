@@ -16,6 +16,7 @@ pub mod palette;
 pub mod people;
 pub mod pro_floor;
 pub mod props;
+pub mod props_detail;
 pub mod replay;
 pub mod rooms;
 
@@ -37,6 +38,7 @@ pub use people::{LiveSessionWorker, LiveWorkerSpec};
 pub use pro_floor::{
     CoolerScreen, DiningTable, FoosballTable, PhoneBooth, ReceptionCounter, RestroomStall,
 };
+pub use props_detail::{DeskPropTelemetry, DevServerSpec, PropsLiveTelemetry};
 pub use rooms::WindowBlind;
 use station_canvas2d::{BrandRegistry, FontEngine};
 use std::path::{Path, PathBuf};
@@ -107,6 +109,7 @@ fn register_office_runtime(
         .insert_resource(interact::PlaceCardState::default())
         .insert_resource(furniture::RocketLaunchQueue::default())
         .insert_resource(furniture::ServerRackTelemetry::default())
+        .insert_resource(props_detail::PropsLiveTelemetry::default())
         .insert_resource(SharedFontEngine::new(assets_dir))
         .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
@@ -119,6 +122,9 @@ fn register_office_runtime(
                 desks::animate_desks_system,
                 furniture::animate_furniture_system,
                 props::animate_props_system,
+                props_detail::cat::animate_cat_system,
+                props_detail::microwave::animate_microwaves_system,
+                props_detail::shredder_cups::animate_shredder_bins_and_cups_system,
                 people::animate_chibis_system,
                 backdrops::animate_backdrop_traffic_system,
                 life::update_rain_system,

@@ -4965,6 +4965,7 @@ fn sync_live_sessions_to_3d(
     mut commands: Commands,
     ui: Res<UiState>,
     mut rack_telemetry: Option<ResMut<station_3d::ServerRackTelemetry>>,
+    mut props_telemetry: Option<ResMut<station_3d::PropsLiveTelemetry>>,
     pal: Option<ResMut<WorldPalette>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     screen_mats: Option<Res<station_3d::desks::ScreenMaterials>>,
@@ -4993,6 +4994,42 @@ fn sync_live_sessions_to_3d(
 ) {
     if let Some(ref mut rack) = rack_telemetry {
         rack.cpu_load = (ui.sys.cpu_pct / 100.0).clamp(0.0, 1.0);
+    }
+    if let Some(ref mut ptel) = props_telemetry {
+        ptel.live_synced = true;
+        ptel.desks.clear();
+        for s in &ui.sessions {
+            let warmth = match s.cache_warmth {
+                CacheWarmth::Warm(mins) => (mins as f32 / 5.0).clamp(0.15, 1.0),
+                CacheWarmth::Cold => 0.0,
+                CacheWarmth::Unknown => -1.0,
+            };
+            ptel.desks.push(station_3d::DeskPropTelemetry {
+                desk_index: s.desk,
+                occupied: true,
+                resting: s.status == "rest",
+                ctx_pct: s.ctx_pct.clamp(0.0, 1.0),
+                cache_warmth: warmth,
+            });
+        }
+        ptel.dev_servers.clear();
+        for srv in &ui.mac_drawer.dev_servers {
+            let owner_desk = if srv.dir.is_empty() {
+                None
+            } else {
+                ui.sessions
+                    .iter()
+                    .find(|s| !s.dir.is_empty() && s.dir.eq_ignore_ascii_case(&srv.dir))
+                    .map(|s| s.desk)
+            };
+            ptel.dev_servers.push(station_3d::DevServerSpec {
+                port: srv.ports.first().copied(),
+                desk_index: owner_desk,
+                alive: owner_desk.is_some(),
+                cpu_pct: srv.cpu.max(0) as f32,
+                label: srv.label.clone(),
+            });
+        }
     }
     let (Some(mut pal), Some(mut mats), Some(scr_mats)) = (pal, materials, screen_mats) else {
         return;
@@ -11110,6 +11147,7 @@ mod tests {
             .insert_resource(station_3d::lights::LightingState {
                 night: !expected_night,
                 photo_hour: Some(22.0),
+                room_lights_off: false,
             })
             .insert_resource(i18n)
             .insert_resource(UiState::with_demo_seed(
@@ -12230,5 +12268,64 @@ mod tests {
             0.0,
             "cpu_load must clamp to 0.0 below 0%"
         );
+    }
+
+    #[test]
+    fn sync_live_sessions_to_3d_populates_props_live_telemetry_for_cups_stacks_and_dev_servers() {
+        let mut app = App::new();
+        let mut ui = UiState::default();
+        ui.sessions.push(SessionCard {
+            id: "sess-props-1".into(),
+            agent: "claude".into(),
+            project: "agents-station".into(),
+            dir: r"D:\mystation\agents-station".into(),
+            status: "rest".into(),
+            desk: 2,
+            ctx_pct: 0.91,
+            cache_warmth: CacheWarmth::Warm(4),
+            ..Default::default()
+        });
+        ui.mac_drawer.dev_servers.push(DevServerUi {
+            pid: 4242,
+            start: 0,
+            label: "vite".into(),
+            ports: vec![5173],
+            dir: r"d:\mystation\agents-station".into(),
+            up_sec: 120,
+            cpu: 28,
+            mem_bytes: 0,
+            conns: 1,
+            idle_sec: 0,
+        });
+        ui.mac_drawer.dev_servers.push(DevServerUi {
+            pid: 9001,
+            start: 0,
+            label: "orphan-api".into(),
+            ports: vec![8080],
+            dir: r"d:\other\closed-repo".into(),
+            up_sec: 500,
+            cpu: 5,
+            mem_bytes: 0,
+            conns: 0,
+            idle_sec: 300,
+        });
+        app.insert_resource(ui);
+        app.insert_resource(station_3d::PropsLiveTelemetry::default());
+        app.add_systems(Update, sync_live_sessions_to_3d);
+
+        app.update();
+        let tel = app.world().resource::<station_3d::PropsLiveTelemetry>();
+        assert!(tel.live_synced);
+        assert_eq!(tel.desks.len(), 1);
+        assert_eq!(tel.desks[0].desk_index, 2);
+        assert!(tel.desks[0].resting);
+        assert!((tel.desks[0].ctx_pct - 0.91).abs() < 1e-4);
+        assert!((tel.desks[0].cache_warmth - 0.8).abs() < 1e-4);
+        assert_eq!(tel.dev_servers.len(), 2);
+        assert!(tel.dev_servers[0].alive);
+        assert_eq!(tel.dev_servers[0].desk_index, Some(2));
+        assert_eq!(tel.dev_servers[0].port, Some(5173));
+        assert!(!tel.dev_servers[1].alive);
+        assert_eq!(tel.dev_servers[1].desk_index, None);
     }
 }
