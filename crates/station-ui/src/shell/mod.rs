@@ -256,7 +256,7 @@ fn draw_stage_camera_dock(
 
                         // Camera photo trigger
                         if dock_icon_btn(ui, IconKind::Camera, false)
-                            .on_hover_text(i18n.tr("ui.cameraToolbar.home"))
+                            .on_hover_text(i18n.tr("ui.photo.openTitle"))
                             .clicked()
                         {
                             state.push_action(UiAction::TriggerPhoto);
