@@ -2,6 +2,7 @@ pub mod drawers;
 pub mod fonts;
 pub mod hud;
 pub mod i18n;
+pub mod icons;
 pub mod launcher_dock;
 pub mod lite_view;
 pub mod state;
