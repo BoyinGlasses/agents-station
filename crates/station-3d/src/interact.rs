@@ -3,9 +3,11 @@ use crate::camera::UiInputCapture;
 use crate::desks::DeskSlot;
 use crate::palette::{WorldEntity, WorldPalette};
 use crate::people::LiveSessionWorker;
+use bevy::picking::Pickable;
 use bevy::picking::events::{Click, Out, Over, Pointer};
 use bevy::picking::pointer::PointerButton;
 use bevy::prelude::*;
+use std::collections::HashSet;
 
 #[derive(Component, Debug, Clone)]
 pub struct InteractiveProp {
@@ -40,6 +42,8 @@ pub struct PlaceCardState {
     pub active_prop_label: Option<String>,
     pub hovered_label: Option<String>,
     pub selected_session_id: Option<String>,
+    hovered_root: Option<Entity>,
+    hovered_parts: HashSet<Entity>,
 }
 
 #[derive(Component)]
@@ -54,6 +58,7 @@ pub fn spawn_hover_ring(
     commands.spawn((
         WorldEntity,
         HoverRing,
+        Pickable::IGNORE,
         Mesh3d(palette.unit_torus.clone()),
         MeshMaterial3d(ring_m),
         Transform::from_xyz(0.0, -50.0, 0.0).with_scale(Vec3::new(0.8, 0.15, 0.8)),
@@ -103,30 +108,39 @@ fn resolve_pick_target(
     desks_q: &Query<&DeskSlot>,
     g_q: &Query<&GlobalTransform>,
     t_q: &Query<&Transform, Without<HoverRing>>,
-) -> Option<PickTarget> {
+) -> Option<(Entity, PickTarget)> {
     let mut cur = start;
     for _ in 0..8 {
         if let Ok(w) = workers_q.get(cur) {
-            return Some(PickTarget::Worker {
-                session_id: w.session_id.clone(),
-                agent: w.agent.clone(),
-                name: w.name.clone(),
-                pos: entity_pos(cur, g_q, t_q),
-            });
+            return Some((
+                cur,
+                PickTarget::Worker {
+                    session_id: w.session_id.clone(),
+                    agent: w.agent.clone(),
+                    name: w.name.clone(),
+                    pos: entity_pos(cur, g_q, t_q),
+                },
+            ));
         }
         if let Ok(p) = props_q.get(cur) {
-            return Some(PickTarget::Prop {
-                id: p.id,
-                place: p.place,
-                label: p.label,
-                pos: entity_pos(cur, g_q, t_q),
-            });
+            return Some((
+                cur,
+                PickTarget::Prop {
+                    id: p.id,
+                    place: p.place,
+                    label: p.label,
+                    pos: entity_pos(cur, g_q, t_q),
+                },
+            ));
         }
         if let Ok(d) = desks_q.get(cur) {
-            return Some(PickTarget::Desk {
-                index: d.index,
-                pos: entity_pos(cur, g_q, t_q),
-            });
+            return Some((
+                cur,
+                PickTarget::Desk {
+                    index: d.index,
+                    pos: entity_pos(cur, g_q, t_q),
+                },
+            ));
         }
         let Ok(parent) = parents_q.get(cur) else {
             break;
@@ -152,7 +166,7 @@ fn sfx_for_prop(id: &str) -> SfxKind {
 
 #[allow(clippy::too_many_arguments)]
 fn on_pointer_over(
-    trigger: Trigger<Pointer<Over>>,
+    mut trigger: Trigger<Pointer<Over>>,
     ui_capture: Option<Res<UiInputCapture>>,
     mut place_card: Option<ResMut<PlaceCardState>>,
     mut ring_q: Query<(&mut Transform, &mut Visibility), With<HoverRing>>,
@@ -166,8 +180,9 @@ fn on_pointer_over(
     if ui_capture.as_ref().is_some_and(|c| c.wants_pointer) {
         return;
     }
-    let Some(target) = resolve_pick_target(
-        trigger.target(),
+    let hit_ent = trigger.target();
+    let Some((root, target)) = resolve_pick_target(
+        hit_ent,
         &parents_q,
         &props_q,
         &workers_q,
@@ -177,6 +192,7 @@ fn on_pointer_over(
     ) else {
         return;
     };
+    trigger.propagate(false);
     let (pos, label) = match target {
         PickTarget::Prop { label, pos, .. } => (pos, label.to_owned()),
         PickTarget::Worker { agent, name, pos, .. } => {
@@ -189,12 +205,17 @@ fn on_pointer_over(
         *vis = Visibility::Visible;
     }
     if let Some(pc) = place_card.as_deref_mut() {
+        if pc.hovered_root != Some(root) {
+            pc.hovered_parts.clear();
+            pc.hovered_root = Some(root);
+        }
+        pc.hovered_parts.insert(hit_ent);
         pc.hovered_label = Some(label);
     }
 }
 
 fn on_pointer_out(
-    trigger: Trigger<Pointer<Out>>,
+    mut trigger: Trigger<Pointer<Out>>,
     mut place_card: Option<ResMut<PlaceCardState>>,
     mut ring_q: Query<&mut Visibility, With<HoverRing>>,
     parents_q: Query<&ChildOf>,
@@ -204,30 +225,39 @@ fn on_pointer_out(
     g_q: Query<&GlobalTransform>,
     t_q: Query<&Transform, Without<HoverRing>>,
 ) {
-    if resolve_pick_target(
-        trigger.target(),
+    let hit_ent = trigger.target();
+    let Some((root, _)) = resolve_pick_target(
+        hit_ent,
         &parents_q,
         &props_q,
         &workers_q,
         &desks_q,
         &g_q,
         &t_q,
-    )
-    .is_none()
-    {
+    ) else {
         return;
+    };
+    trigger.propagate(false);
+    if let Some(pc) = place_card.as_deref_mut() {
+        if pc.hovered_root != Some(root) {
+            return;
+        }
+        pc.hovered_parts.remove(&hit_ent);
+        if !pc.hovered_parts.is_empty() {
+            // Pointer moved to a sibling child mesh of the same interactive root: keep hover ring visible.
+            return;
+        }
+        pc.hovered_root = None;
+        pc.hovered_label = None;
     }
     for mut vis in &mut ring_q {
         *vis = Visibility::Hidden;
-    }
-    if let Some(pc) = place_card.as_deref_mut() {
-        pc.hovered_label = None;
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn on_pointer_click(
-    trigger: Trigger<Pointer<Click>>,
+    mut trigger: Trigger<Pointer<Click>>,
     ui_capture: Option<Res<UiInputCapture>>,
     mut place_card: Option<ResMut<PlaceCardState>>,
     mut sfx: Option<ResMut<SfxEngine>>,
@@ -246,7 +276,7 @@ fn on_pointer_click(
     if trigger.event().button != PointerButton::Primary {
         return;
     }
-    let Some(target) = resolve_pick_target(
+    let Some((_, target)) = resolve_pick_target(
         trigger.target(),
         &parents_q,
         &props_q,
@@ -257,6 +287,7 @@ fn on_pointer_click(
     ) else {
         return;
     };
+    trigger.propagate(false);
 
     match target {
         PickTarget::Prop {
@@ -451,5 +482,112 @@ mod tests {
         );
         app.update();
         assert_eq!(*app.world().get::<Visibility>(ring).unwrap(), Visibility::Hidden);
+    }
+
+    #[test]
+    fn picking_child_meshes_dedupes_click_and_keeps_hover_across_sibling_children() {
+        let mut app = App::new();
+        app.insert_resource(PlaceCardState::default())
+            .insert_resource(UiInputCapture::default())
+            .insert_resource(SfxEngine::new(false))
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .add_event::<PropActivated>()
+            .add_event::<WorkerSelected>();
+        register_picking_observers(&mut app);
+
+        // Spawn HoverRing via spawn_hover_ring and verify Pickable::IGNORE is attached.
+        app.world_mut().resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                let mut pal = WorldPalette::new(&mut meshes);
+                let mut cmds = world.commands();
+                spawn_hover_ring(&mut cmds, &mut pal, &mut mats);
+            });
+        });
+        app.world_mut().flush();
+        let (ring, pickable) = app
+            .world_mut()
+            .query_filtered::<(Entity, &Pickable), With<HoverRing>>()
+            .single(app.world())
+            .expect("HoverRing must exist with Pickable");
+        assert_eq!(*pickable, Pickable::IGNORE, "HoverRing must not self-pick");
+
+        let worker_root = app
+            .world_mut()
+            .spawn((
+                LiveSessionWorker {
+                    session_id: "sess-child-test".to_owned(),
+                    agent: "claude".to_owned(),
+                    name: "agents-station".to_owned(),
+                    desk_index: 0,
+                    status: "work".to_owned(),
+                    tool_label: Some("Edit".to_owned()),
+                },
+                Transform::from_xyz(2.0, 0.0, 3.0),
+                GlobalTransform::from_xyz(2.0, 0.0, 3.0),
+            ))
+            .id();
+        let child_a = app.world_mut().spawn(Mesh3d(Handle::default())).id();
+        let child_b = app.world_mut().spawn(Mesh3d(Handle::default())).id();
+        app.world_mut()
+            .entity_mut(worker_root)
+            .add_children(&[child_a, child_b]);
+        app.world_mut().flush();
+
+        let hit = HitData::new(Entity::PLACEHOLDER, 1.0, None, None);
+
+        // Clicking child_a must NOT propagate to worker_root and duplicate WorkerSelected.
+        app.world_mut().trigger_targets(
+            Pointer::new(
+                PointerId::Mouse,
+                dummy_location(),
+                child_a,
+                Click {
+                    button: PointerButton::Primary,
+                    hit: hit.clone(),
+                    duration: std::time::Duration::from_millis(40),
+                },
+            ),
+            child_a,
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<Events<WorkerSelected>>().len(),
+            1,
+            "clicking a child mesh must emit exactly ONE WorkerSelected event"
+        );
+
+        // Hover child_a -> hover child_b -> out of child_a must keep HoverRing visible & label intact.
+        app.world_mut().trigger_targets(
+            Pointer::new(PointerId::Mouse, dummy_location(), child_a, Over { hit: hit.clone() }),
+            child_a,
+        );
+        app.world_mut().trigger_targets(
+            Pointer::new(PointerId::Mouse, dummy_location(), child_b, Over { hit: hit.clone() }),
+            child_b,
+        );
+        app.world_mut().trigger_targets(
+            Pointer::new(PointerId::Mouse, dummy_location(), child_a, Out { hit: hit.clone() }),
+            child_a,
+        );
+        app.update();
+        assert_eq!(
+            *app.world().get::<Visibility>(ring).unwrap(),
+            Visibility::Visible,
+            "HoverRing must remain Visible when moving between sibling child meshes"
+        );
+        assert!(
+            app.world().resource::<PlaceCardState>().hovered_label.is_some(),
+            "hovered_label must remain set while sibling child_b is still hovered"
+        );
+
+        // Out of child_b clears hover completely.
+        app.world_mut().trigger_targets(
+            Pointer::new(PointerId::Mouse, dummy_location(), child_b, Out { hit }),
+            child_b,
+        );
+        app.update();
+        assert_eq!(*app.world().get::<Visibility>(ring).unwrap(), Visibility::Hidden);
+        assert!(app.world().resource::<PlaceCardState>().hovered_label.is_none());
     }
 }
