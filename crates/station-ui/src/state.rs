@@ -1,7 +1,9 @@
+use crate::icons::IconKind;
+use crate::labels3d::ProjectedLabel;
 use bevy::prelude::*;
 use bevy_egui::egui;
 use serde::{Deserialize, Serialize};
-use station_3d::{BackdropKind, ChibiLook, OfficeLayout};
+use station_3d::{BackdropKind, CameraPreset, ChibiLook, OfficeLayout};
 use station_launcher::HarnessStatus;
 
 /// Logical `egui::Rect` of the transparent central 3D stage area, updated each frame by the shell.
@@ -185,6 +187,83 @@ pub struct ToastNotice {
     pub ttl_sec: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhotoSize {
+    Screen,
+    #[default]
+    Fhd,
+    Uhd4k,
+}
+
+impl PhotoSize {
+    pub fn dimensions_tag(self) -> &'static str {
+        match self {
+            Self::Screen => "screen",
+            Self::Fhd => "1920x1080",
+            Self::Uhd4k => "3840x2160",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhotoTimeMode {
+    #[default]
+    Auto,
+    Day,
+    Night,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipShape {
+    #[default]
+    Square,
+    Tall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReplayRange {
+    #[default]
+    H1,
+    H3,
+    Today,
+    Yesterday,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BilliardsHudState {
+    pub score_label: String,
+    pub turn_label: String,
+    /// Power meter in `0.0..=1.0`.
+    pub power: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaceCardRow {
+    pub title: String,
+    pub subtitle: String,
+    pub session_id: Option<String>,
+    pub accent_tone: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaceCardAction {
+    pub id: String,
+    pub label: String,
+    pub primary: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaceCardInfo {
+    pub place_id: String,
+    pub icon: IconKind,
+    pub title: String,
+    pub subtitle: String,
+    pub rows: Vec<PlaceCardRow>,
+    pub empty_text: String,
+    pub footer_note: Option<String>,
+    pub actions: Vec<PlaceCardAction>,
+}
+
 #[derive(Debug, Clone)]
 pub enum UiAction {
     LaunchHarness(String),
@@ -204,10 +283,36 @@ pub enum UiAction {
     SetWeatherCity(String),
     SetSound(bool),
     SetGpuPref(GpuPrefUi),
+    SelectCameraPreset(CameraPreset),
+    ZoomCamera(f32),
+    ResetCameraZoom,
+    ToggleFullscreenStage,
+    SetPhotoMode(bool),
+    CapturePhoto {
+        size: PhotoSize,
+        show_names: bool,
+        show_mark: bool,
+    },
+    TriggerTimelapseClip {
+        shape: ClipShape,
+        music: bool,
+    },
     ToggleCameraFp,
+    TriggerFirstPersonInteract,
     TriggerPhoto,
     ToggleDemo,
     ToggleReplay,
+    ReplayTogglePlay,
+    ReplayScrub(f32),
+    ReplaySetSpeed(f32),
+    ReplaySetRange(ReplayRange),
+    ReplayClose,
+    OpenPlaceCard(String),
+    ClosePlaceCard,
+    TriggerPlaceAction {
+        place_id: String,
+        action_id: String,
+    },
     DecidePermission {
         id: String,
         decision: String,
@@ -263,6 +368,27 @@ pub struct UiState {
     pub new_harness_path: String,
     pub fullscreen_stage: bool,
     pub photo_mode: bool,
+    pub camera_preset: CameraPreset,
+    pub camera_zoom_pct: u32,
+    pub projected_labels: Vec<ProjectedLabel>,
+    pub show_zone_chips: bool,
+    pub hovered_label_id: Option<String>,
+    pub photo_size: PhotoSize,
+    pub photo_show_names: bool,
+    pub photo_show_mark: bool,
+    pub photo_time_mode: PhotoTimeMode,
+    pub clip_shape: ClipShape,
+    pub clip_music: bool,
+    pub replay_active: bool,
+    pub replay_progress: f32,
+    pub replay_speed: f32,
+    pub replay_range: ReplayRange,
+    pub replay_time_label: String,
+    pub replay_span_label: String,
+    pub replay_heatmap: Vec<f32>,
+    pub fp_near_label: Option<String>,
+    pub fp_billiards: Option<BilliardsHudState>,
+    pub active_place_card: Option<PlaceCardInfo>,
     pub session_filter_status: Option<String>,
     pub session_search: String,
     pub activity_attention_only: bool,
@@ -331,6 +457,27 @@ impl UiState {
             new_harness_path: String::new(),
             fullscreen_stage: false,
             photo_mode: false,
+            camera_preset: CameraPreset::Home,
+            camera_zoom_pct: 100,
+            projected_labels: Vec::new(),
+            show_zone_chips: true,
+            hovered_label_id: None,
+            photo_size: PhotoSize::Fhd,
+            photo_show_names: true,
+            photo_show_mark: true,
+            photo_time_mode: PhotoTimeMode::Auto,
+            clip_shape: ClipShape::Square,
+            clip_music: true,
+            replay_active: false,
+            replay_progress: 0.0,
+            replay_speed: 1.0,
+            replay_range: ReplayRange::H1,
+            replay_time_label: "--:--".to_owned(),
+            replay_span_label: String::new(),
+            replay_heatmap: Vec::new(),
+            fp_near_label: None,
+            fp_billiards: None,
+            active_place_card: None,
             session_filter_status: None,
             session_search: String::new(),
             activity_attention_only: false,
@@ -576,6 +723,30 @@ impl UiState {
             new_harness_path: String::new(),
             fullscreen_stage: false,
             photo_mode: false,
+            camera_preset: CameraPreset::Home,
+            camera_zoom_pct: 100,
+            projected_labels: Vec::new(),
+            show_zone_chips: true,
+            hovered_label_id: None,
+            photo_size: PhotoSize::Fhd,
+            photo_show_names: true,
+            photo_show_mark: true,
+            photo_time_mode: PhotoTimeMode::Auto,
+            clip_shape: ClipShape::Square,
+            clip_music: true,
+            replay_active: false,
+            replay_progress: 0.35,
+            replay_speed: 2.0,
+            replay_range: ReplayRange::H1,
+            replay_time_label: "16:22".to_owned(),
+            replay_span_label: "15:45 – 16:45".to_owned(),
+            replay_heatmap: vec![
+                0.15, 0.28, 0.45, 0.80, 0.62, 0.35, 0.90, 0.72, 0.50, 0.25, 0.40, 0.85, 0.95, 0.60,
+                0.30, 0.55,
+            ],
+            fp_near_label: None,
+            fp_billiards: None,
+            active_place_card: None,
             session_filter_status: None,
             session_search: String::new(),
             activity_attention_only: false,
