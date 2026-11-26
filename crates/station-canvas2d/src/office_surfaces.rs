@@ -805,9 +805,10 @@ pub fn draw_room_plaque(
     } else {
         256.0
     };
+    let sub = sub.filter(|s| !s.is_empty());
     let title_y = if sub.is_some() { 34.0 } else { 52.0 };
     fonts.draw_text(&mut c, title, cx, title_y, 50.0, hex(fg_hex), TextAlign::Center, Some(450.0), true, false);
-    if let Some(sub_txt) = sub.filter(|s| !s.is_empty()) {
+    if let Some(sub_txt) = sub {
         fonts.draw_text(&mut c, sub_txt, cx, 108.0, 24.0, hex(sub_hex), TextAlign::Center, Some(450.0), false, false);
     }
     c.into_surface()
