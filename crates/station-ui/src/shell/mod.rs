@@ -126,7 +126,6 @@ pub fn draw_shell(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) ->
             .show(ctx, |ui| {
                 crate::lite_view::render_lite_stage_center(ui, state, i18n);
             });
-        stage_overlays::draw_perm_stack(ctx, stage_rect, state, i18n);
         draw_stage_toasts(ctx, stage_rect, state);
         return stage_rect;
     }

@@ -185,6 +185,29 @@ fn perm_verb_text(p: &PendingPermCard, i18n: &I18nStore) -> String {
     }
 }
 
+/// Renders rich non-simple prompt/alert cards (`ask`, `plan`, `denied`, `stuck`, `ci`) in static
+/// flow inside 2D Lite so they never float over the 2D header tabs or duplicate inline session
+/// approval buttons (matches Oracle `lite.css:23` `.v2-perms .perm-stack { position: static }`).
+pub fn draw_rich_perm_cards_inline(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
+    let rich: Vec<PendingPermCard> = state
+        .pending_perms
+        .iter()
+        .filter(|p| matches!(p.kind.as_str(), "ask" | "plan" | "denied" | "stuck" | "ci"))
+        .cloned()
+        .collect();
+    for p in rich {
+        ui.push_id(("lite_rich_perm", &p.id), |ui| match p.kind.as_str() {
+            "ask" => draw_ask_card(ui, &p, state, i18n),
+            "plan" => draw_plan_card(ui, &p, state, i18n),
+            "denied" => draw_denied_card(ui, &p, state, i18n),
+            "stuck" => draw_stuck_card(ui, &p, state, i18n),
+            "ci" => draw_ci_card(ui, &p, state, i18n),
+            _ => {}
+        });
+        ui.add_space(8.0);
+    }
+}
+
 /// Interactive `perm-stack` rendering all 6 prompt/alert card types inside `stage_rect`:
 /// `Permission`, `AskUserQuestion`, `ExitPlanMode`, `PermissionDenied`, `Stuck`, and `CI`.
 pub fn draw_perm_stack(

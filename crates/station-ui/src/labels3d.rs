@@ -367,7 +367,7 @@ pub fn draw_projected_labels(
     }
 
     egui::Area::new(egui::Id::new("station_stage_labels3d"))
-        .order(egui::Order::Middle)
+        .order(egui::Order::Background)
         .fade_in(false)
         .fixed_pos(stage_rect.min)
         .show(ctx, |ui| {

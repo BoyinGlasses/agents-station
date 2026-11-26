@@ -326,10 +326,15 @@ pub fn render_lite_stage_center(ui: &mut egui::Ui, state: &mut UiState, i18n: &I
         .id_salt("station_lite_stage_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            // Render any orphaned pending permissions at the top so no approval is ever hidden.
+            // Render rich non-simple cards (ask/plan/denied/stuck/ci) in static flow so they never
+            // float over the 2D header tabs, followed by any orphaned simple permission cards.
+            crate::shell::stage_overlays::draw_rich_perm_cards_inline(ui, state, i18n);
             let orphan_perms: Vec<&PendingPermCard> = perms_snapshot
                 .iter()
-                .filter(|p| !sessions_snapshot.iter().any(|s| s.id == p.session_id))
+                .filter(|p| {
+                    !matches!(p.kind.as_str(), "ask" | "plan" | "denied" | "stuck" | "ci")
+                        && !sessions_snapshot.iter().any(|s| s.id == p.session_id)
+                })
                 .collect();
             for perm in orphan_perms {
                 draw_orphan_perm_card(ui, perm, state, i18n);
