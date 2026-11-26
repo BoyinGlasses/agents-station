@@ -132,7 +132,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     let is_lite_2d = is_lite_or_panel(cli);
     app.add_plugins(build_default_plugins(cli))
         .add_plugins(MeshPickingPlugin)
-        .insert_resource(DirectionalLightShadowMap { size: 1024 })
+        .insert_resource(DirectionalLightShadowMap { size: 2048 })
         .insert_resource(PointLightShadowMap { size: 256 });
     app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
