@@ -5009,6 +5009,7 @@ struct LiveSync3dParams<'w, 's> {
             Option<&'static mut station_3d::WorkerLifecycle>,
             Option<&'static station_3d::ActivePropEntity>,
             Option<&'static Children>,
+            Option<&'static station_3d::ActiveRoutine>,
         ),
     >,
     subagents_q: Query<

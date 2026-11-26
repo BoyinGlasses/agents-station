@@ -460,6 +460,7 @@ pub fn sync_live_workers_and_screens(
         Option<&mut WorkerLifecycle>,
         Option<&ActivePropEntity>,
         Option<&Children>,
+        Option<&crate::cast::ActiveRoutine>,
     )>,
     subagents_q: &mut Query<
         (Entity, &mut SubagentWorker, &ChibiWorker),
@@ -526,7 +527,9 @@ pub fn sync_live_workers_and_screens(
     }
 
     // 3. Reconcile existing LiveSessionWorker entities: update in-place or despawn ended ones.
-    for (ent, mut live, mut chibi, walker, lifecycle, active_prop, children) in workers_q.iter_mut() {
+    for (ent, mut live, mut chibi, walker, lifecycle, active_prop, children, routine_opt) in
+        workers_q.iter_mut()
+    {
         let Some(&(spec_idx, target_desk)) = scratch.desired_indices.get(live.session_id.as_str()) else {
             commands.entity(ent).try_despawn();
             continue;
@@ -544,56 +547,60 @@ pub fn sync_live_workers_and_screens(
             None
         };
 
-        // Route via NavGraph if the active tool station or resting state changed.
-        if let (Some(mut wlk), Some(mut lc)) = (walker, lifecycle) {
-            let current_station = match *lc {
-                WorkerLifecycle::StationWalk(st) => Some(st),
-                _ => None,
-            };
-            let is_arriving = *lc == WorkerLifecycle::Arriving && wlk.is_walking();
-            if !is_arriving {
-                if let Some(st) = desired_station {
-                    if current_station != Some(st) {
-                        let spot = nav.station_spot_for(st, stable_seed(&spec.session_id));
-                        wlk.set_destination(
-                            nav,
-                            chibi.base_pos,
-                            spot.pos,
-                            spot.face,
-                            spot.sit,
-                            WorkerAnim::Work,
-                        );
-                        *lc = WorkerLifecycle::StationWalk(st);
-                    }
-                } else if current_station.is_some() {
-                    if let Some(desk_spot) = nav.desk_spot(target_desk) {
-                        wlk.set_destination(
-                            nav,
-                            chibi.base_pos,
-                            desk_spot.pos,
-                            desk_spot.face,
-                            true,
-                            next_anim,
-                        );
-                    }
-                    *lc = if next_anim == WorkerAnim::Sleep {
-                        WorkerLifecycle::Resting
+        // Protect ActiveRoutine participants: skip walker/lifecycle/anim/prop mutation until the
+        // cultural routine finishes returning them to their desk and removes ActiveRoutine.
+        if routine_opt.is_none() {
+            // Route via NavGraph if the active tool station or resting state changed.
+            if let (Some(mut wlk), Some(mut lc)) = (walker, lifecycle) {
+                let current_station = match *lc {
+                    WorkerLifecycle::StationWalk(st) => Some(st),
+                    _ => None,
+                };
+                let is_arriving = *lc == WorkerLifecycle::Arriving && wlk.is_walking();
+                if !is_arriving {
+                    if let Some(st) = desired_station {
+                        if current_station != Some(st) {
+                            let spot = nav.station_spot_for(st, stable_seed(&spec.session_id));
+                            wlk.set_destination(
+                                nav,
+                                chibi.base_pos,
+                                spot.pos,
+                                spot.face,
+                                spot.sit,
+                                WorkerAnim::Work,
+                            );
+                            *lc = WorkerLifecycle::StationWalk(st);
+                        }
+                    } else if current_station.is_some() {
+                        if let Some(desk_spot) = nav.desk_spot(target_desk) {
+                            wlk.set_destination(
+                                nav,
+                                chibi.base_pos,
+                                desk_spot.pos,
+                                desk_spot.face,
+                                true,
+                                next_anim,
+                            );
+                        }
+                        *lc = if next_anim == WorkerAnim::Sleep {
+                            WorkerLifecycle::Resting
+                        } else {
+                            WorkerLifecycle::Seated
+                        };
                     } else {
-                        WorkerLifecycle::Seated
-                    };
-                } else {
-                    if !wlk.is_walking() && chibi.anim != next_anim {
-                        chibi.anim = next_anim;
+                        if !wlk.is_walking() && chibi.anim != next_anim {
+                            chibi.anim = next_anim;
+                        }
+                        *lc = if next_anim == WorkerAnim::Sleep {
+                            WorkerLifecycle::Resting
+                        } else {
+                            WorkerLifecycle::Seated
+                        };
                     }
-                    *lc = if next_anim == WorkerAnim::Sleep {
-                        WorkerLifecycle::Resting
-                    } else {
-                        WorkerLifecycle::Seated
-                    };
                 }
+            } else if chibi.anim != next_anim {
+                chibi.anim = next_anim;
             }
-        } else if chibi.anim != next_anim {
-            chibi.anim = next_anim;
         }
 
         // Update halo color only if needed.
@@ -608,10 +615,13 @@ pub fn sync_live_workers_and_screens(
             }
         }
 
-        // Lazy prop attachment: ONLY call set_active_prop when desired prop actually changed.
-        let desired_prop = prop_for_worker_state(desired_station, next_anim);
-        if active_prop.map(|p| p.kind) != desired_prop {
-            set_active_prop(commands, chibi_cache, palette, materials, ent, desired_prop);
+        // Lazy prop attachment: ONLY call set_active_prop when desired prop actually changed
+        // and no cultural routine currently owns this worker's held prop.
+        if routine_opt.is_none() {
+            let desired_prop = prop_for_worker_state(desired_station, next_anim);
+            if active_prop.map(|p| p.kind) != desired_prop {
+                set_active_prop(commands, chibi_cache, palette, materials, ent, desired_prop);
+            }
         }
 
         if live.status != spec.status {
@@ -849,6 +859,7 @@ pub fn sync_live_workers_in_world(world: &mut World, specs: &[LiveWorkerSpec], l
             Option<&mut WorkerLifecycle>,
             Option<&ActivePropEntity>,
             Option<&Children>,
+            Option<&crate::cast::ActiveRoutine>,
         )>,
         Query<(Entity, &mut SubagentWorker, &ChibiWorker), Without<LiveSessionWorker>>,
         Query<(Entity, &TeamLineDash)>,

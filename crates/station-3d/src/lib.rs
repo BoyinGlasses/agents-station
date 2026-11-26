@@ -281,6 +281,10 @@ pub fn unload_full_office_world(
     commands.remove_resource::<NavGraph>();
     commands.remove_resource::<desks::ScreenMaterials>();
     commands.remove_resource::<camera::CameraRig>();
+    commands.insert_resource(cast::RoutineCoordinator::default());
+    commands.insert_resource(cast::OfficeGamesState::default());
+    commands.insert_resource(cast::MealsBreaksState::default());
+    commands.insert_resource(cast::StreetOutingsState::default());
 }
 
 pub struct OfficeWorldPlugin {
