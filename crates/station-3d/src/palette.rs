@@ -289,6 +289,87 @@ impl WorldPalette {
         mat
     }
 
+    /// Uploads a `RENDER_WORLD` emissive canvas texture (e.g. `SHIP IT` neon sign) tracked in
+    /// `owned_materials` / `owned_images` so it purges cleanly on unload.
+    pub fn textured_emissive(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        surface: RgbaSurface,
+        strength: f32,
+    ) -> Handle<StandardMaterial> {
+        let tex = self.upload_surface(images, surface);
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(tex.clone()),
+            emissive: LinearRgba::new(strength, strength, strength, 1.0),
+            emissive_texture: Some(tex),
+            perceptual_roughness: 0.35,
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        mat
+    }
+
+    /// Uploads a vertically-repeating 2×-height scrolling desk screen (`RENDER_WORLD`) with a
+    /// `0.5` V-window `uv_transform` so `animate_desks_system` can scroll it in-place with zero allocations.
+    pub fn repeating_screen_mat(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        surface: RgbaSurface,
+    ) -> Handle<StandardMaterial> {
+        let mut img = Image::new(
+            Extent3d {
+                width: surface.width.max(1),
+                height: surface.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            surface.rgba,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::ClampToEdge,
+            address_mode_v: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mipmap_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+        let tex = images.add(img);
+        self.owned_images.push(tex.clone());
+        let mat = materials.add(StandardMaterial {
+            base_color_texture: Some(tex),
+            unlit: true,
+            uv_transform: Affine2::from_scale(Vec2::new(1.0, 0.5)),
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        mat
+    }
+
+    /// Creates a double-sided PBR material reusing an uploaded texture handle tinted by `tint_hex`.
+    pub fn tinted_textured_double_sided(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        tex: Handle<Image>,
+        tint_hex: &str,
+        roughness: f32,
+    ) -> Handle<StandardMaterial> {
+        let mat = materials.add(StandardMaterial {
+            base_color: srgb_hex(tint_hex),
+            base_color_texture: Some(tex),
+            perceptual_roughness: roughness.clamp(0.05, 1.0),
+            cull_mode: None,
+            double_sided: true,
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        mat
+    }
+
     /// Uploads a compact repeating tile (`RENDER_WORLD` + `ImageAddressMode::Repeat` on U & V)
     /// and tracks its GPU footprint in `floor_tile_vram_bytes`.
     pub fn upload_repeating_surface(
@@ -538,6 +619,26 @@ pub fn spawn_cone_rot(
         .spawn((
             WorldEntity,
             Mesh3d(palette.unit_cone.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos)
+                .with_rotation(rot)
+                .with_scale(scale),
+        ))
+        .id()
+}
+
+pub fn spawn_torus_rot(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    scale: Vec3,
+    rot: Quat,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_torus.clone()),
             MeshMaterial3d(mat),
             Transform::from_translation(pos)
                 .with_rotation(rot)

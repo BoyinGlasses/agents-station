@@ -5446,6 +5446,7 @@ name = "station-3d"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "chrono",
  "serde",
  "station-canvas2d",
  "station-core",
