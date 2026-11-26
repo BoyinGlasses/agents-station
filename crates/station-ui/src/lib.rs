@@ -166,7 +166,7 @@ fn render_capture_station_ui(
     }
 }
 
-pub fn install_egui_fonts(ctx: &egui::Context, bundle: &fonts::FontBundle) {
+pub fn build_egui_font_definitions(bundle: &fonts::FontBundle) -> egui::FontDefinitions {
     let mut defs = egui::FontDefinitions::default();
 
     let mut prop_names = Vec::new();
@@ -175,6 +175,14 @@ pub fn install_egui_fonts(ctx: &egui::Context, bundle: &fonts::FontBundle) {
         defs.font_data
             .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes.clone())));
         prop_names.push(name);
+    }
+
+    let mut bold_names = Vec::new();
+    for (idx, bytes) in bundle.ui_bold.iter().enumerate() {
+        let name = format!("be_vietnam_pro_700_{idx}");
+        defs.font_data
+            .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes.clone())));
+        bold_names.push(name);
     }
 
     let mut mono_names = Vec::new();
@@ -193,6 +201,23 @@ pub fn install_egui_fonts(ctx: &egui::Context, bundle: &fonts::FontBundle) {
     prop_names.push(thai_name.clone());
     mono_names.push(thai_name);
 
+    let thai_bold_name = "plex_thai_looped_700".to_owned();
+    defs.font_data.insert(
+        thai_bold_name.clone(),
+        Arc::new(egui::FontData::from_owned(bundle.thai_bold.clone())),
+    );
+    bold_names.push(thai_bold_name);
+
+    // Keep egui's built-in fallback fonts at the tail of the bold family for symbols/emoji.
+    let default_prop_tail = defs
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    bold_names.extend(default_prop_tail);
+    defs.families
+        .insert(egui::FontFamily::Name(theme::FONT_BOLD.into()), bold_names);
+
     let prop_family = defs.families.entry(egui::FontFamily::Proportional).or_default();
     for name in prop_names.into_iter().rev() {
         prop_family.insert(0, name);
@@ -203,7 +228,11 @@ pub fn install_egui_fonts(ctx: &egui::Context, bundle: &fonts::FontBundle) {
         mono_family.insert(0, name);
     }
 
-    ctx.set_fonts(defs);
+    defs
+}
+
+pub fn install_egui_fonts(ctx: &egui::Context, bundle: &fonts::FontBundle) {
+    ctx.set_fonts(build_egui_font_definitions(bundle));
 }
 
 fn draw_smoke_badge(ctx: &egui::Context) {
@@ -331,5 +360,38 @@ mod tests {
             after.viewport_height, before.viewport_height,
             "MouseWheel must be blocked on the exact same frame EguiPostUpdateSet::EndPass sets wants_pointer"
         );
+    }
+
+    #[test]
+    fn install_egui_fonts_registers_named_bold_family_with_vietnamese_and_thai_700() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = fonts::load_font_bundle(&assets_dir).expect("load_font_bundle");
+        let defs = build_egui_font_definitions(&bundle);
+        let bold_family = defs
+            .families
+            .get(&egui::FontFamily::Name(theme::FONT_BOLD.into()))
+            .expect("named bold font family must be registered");
+        assert!(
+            bold_family.iter().any(|n| n.starts_with("be_vietnam_pro_700_")),
+            "bold family must include BeVietnamPro-700 fonts"
+        );
+        assert!(
+            bold_family.iter().any(|n| n == "plex_thai_looped_700"),
+            "bold family must include PlexThaiLooped-700 Thai fallback"
+        );
+
+        let ctx = egui::Context::default();
+        install_egui_fonts(&ctx, &bundle);
+        let mut rendered = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(theme::heading_bold(
+                    "Agents Station · Tiếng Việt · ภาษาไทย",
+                    15.0,
+                ));
+                rendered = true;
+            });
+        });
+        assert!(rendered);
     }
 }
