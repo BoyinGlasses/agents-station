@@ -332,6 +332,14 @@ pub struct OfficeState {
     tx: broadcast::Sender<Value>,
 }
 
+fn perm_wire_json(perm: &PendingPerm, tool_input: Option<&Value>) -> Value {
+    let mut val = json!(perm);
+    if let (Some(obj), Some(ti)) = (val.as_object_mut(), tool_input) {
+        obj.insert("tool_input".to_owned(), crate::redact::redact_json_value(ti));
+    }
+    val
+}
+
 impl OfficeState {
     pub fn new(data_dir: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(512);
@@ -400,6 +408,7 @@ impl OfficeState {
     ) {
         let id = perm.id.clone();
         let sess_id = perm.sess.clone();
+        let wire_perm = perm_wire_json(&perm, tool_input.as_ref());
         let entry = HoldEntry {
             tx,
             kind: perm.kind.clone(),
@@ -407,7 +416,7 @@ impl OfficeState {
             tool_input,
         };
         self.holds.insert(id.clone(), entry);
-        self.pending_perms.insert(id, perm.clone());
+        self.pending_perms.insert(id, perm);
 
         if let Some(s) = self.sessions.get_mut(&sess_id)
             && s.status != "wait"
@@ -416,7 +425,7 @@ impl OfficeState {
             let s_clone = s.clone();
             self.broadcast(json!({ "k": "sess", "s": s_clone }));
         }
-        self.broadcast(json!({ "k": "perm", "p": perm }));
+        self.broadcast(json!({ "k": "perm", "p": wire_perm }));
     }
 
     pub fn hold_tool_input(&self, id: &str) -> Option<&Value> {
@@ -805,7 +814,11 @@ impl OfficeState {
 
     pub fn snapshot_json(&self, local: bool, lang: &str) -> Value {
         let sessions: Vec<&SessionRecord> = self.sessions.values().collect();
-        let perms: Vec<&PendingPerm> = self.pending_perms.values().collect();
+        let perms: Vec<Value> = self
+            .pending_perms
+            .values()
+            .map(|p| perm_wire_json(p, self.hold_tool_input(&p.id)))
+            .collect();
         let feed: Vec<&FeedItem> = self.feed.iter().collect();
         json!({
             "k": "snap",
@@ -817,6 +830,7 @@ impl OfficeState {
             "feed": feed,
             "stats": self.stats,
             "todos": self.todos,
+            "pins": self.pins,
         })
     }
 
