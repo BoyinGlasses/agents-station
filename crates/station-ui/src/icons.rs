@@ -29,10 +29,21 @@ pub enum IconKind {
     Close,
     Check,
     Alert,
+    Minus,
+    Plus,
+    Play,
+    Pause,
+    Record,
+    Book,
+    Coffee,
+    Rocket,
+    Sparkle,
+    Door,
+    Music,
 }
 
 impl IconKind {
-    pub const ALL: [IconKind; 26] = [
+    pub const ALL: [IconKind; 37] = [
         IconKind::Logo,
         IconKind::Home,
         IconKind::Monitor,
@@ -59,6 +70,17 @@ impl IconKind {
         IconKind::Close,
         IconKind::Check,
         IconKind::Alert,
+        IconKind::Minus,
+        IconKind::Plus,
+        IconKind::Play,
+        IconKind::Pause,
+        IconKind::Record,
+        IconKind::Book,
+        IconKind::Coffee,
+        IconKind::Rocket,
+        IconKind::Sparkle,
+        IconKind::Door,
+        IconKind::Music,
     ];
 }
 
@@ -367,6 +389,63 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, kind: IconKind, color: Co
             c.line(12.0, 9.0, 12.0, 13.5);
             c.circle_filled(12.0, 17.2, 1.1);
         }
+        IconKind::Minus => {
+            c.line(5.0, 12.0, 19.0, 12.0);
+        }
+        IconKind::Plus => {
+            c.line(12.0, 5.0, 12.0, 19.0);
+            c.line(5.0, 12.0, 19.0, 12.0);
+        }
+        IconKind::Play => {
+            c.polygon_stroke(&[(6.0, 4.0), (19.5, 12.0), (6.0, 20.0)]);
+        }
+        IconKind::Pause => {
+            c.rect_filled(6.0, 4.5, 4.0, 15.0, CornerRadius::same(1));
+            c.rect_filled(14.0, 4.5, 4.0, 15.0, CornerRadius::same(1));
+        }
+        IconKind::Record => {
+            c.circle_filled(12.0, 12.0, 6.2);
+        }
+        IconKind::Book => {
+            c.polyline(&[(4.0, 19.5), (4.0, 5.0), (12.0, 7.0), (20.0, 5.0), (20.0, 19.5)]);
+            c.polyline(&[(4.0, 19.5), (12.0, 21.0), (20.0, 19.5)]);
+            c.line(12.0, 7.0, 12.0, 21.0);
+        }
+        IconKind::Coffee => {
+            c.rect_stroke(4.0, 8.0, 12.0, 11.0, 2.5);
+            c.arc(16.0, 12.5, 3.5, 3.5, -std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2, 8);
+            c.line(7.0, 4.0, 7.0, 6.0);
+            c.line(12.0, 3.5, 12.0, 6.0);
+        }
+        IconKind::Rocket => {
+            c.polygon_stroke(&[(12.0, 2.5), (16.5, 9.0), (15.0, 17.5), (9.0, 17.5), (7.5, 9.0)]);
+            c.circle_stroke(12.0, 10.5, 2.0);
+            c.line(7.5, 14.0, 4.0, 18.0);
+            c.line(16.5, 14.0, 20.0, 18.0);
+            c.line(10.0, 20.5, 14.0, 20.5);
+        }
+        IconKind::Sparkle => {
+            c.polygon_stroke(&[
+                (12.0, 2.5),
+                (14.5, 9.5),
+                (21.5, 12.0),
+                (14.5, 14.5),
+                (12.0, 21.5),
+                (9.5, 14.5),
+                (2.5, 12.0),
+                (9.5, 9.5),
+            ]);
+        }
+        IconKind::Door => {
+            c.rect_stroke(6.0, 3.0, 12.0, 18.0, 1.5);
+            c.circle_filled(14.5, 12.0, 1.1);
+            c.line(3.0, 21.0, 21.0, 21.0);
+        }
+        IconKind::Music => {
+            c.polyline(&[(9.0, 17.5), (9.0, 6.0), (19.0, 4.0), (19.0, 15.5)]);
+            c.circle_stroke(6.5, 18.0, 2.5);
+            c.circle_stroke(16.5, 16.0, 2.5);
+        }
     }
 }
 
@@ -376,7 +455,7 @@ mod tests {
 
     #[test]
     fn paint_icon_emits_vector_shapes_for_every_icon_kind_variant() {
-        assert_eq!(IconKind::ALL.len(), 26);
+        assert_eq!(IconKind::ALL.len(), 37);
         let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(16.0, 16.0));
         for kind in IconKind::ALL {
             let ctx = egui::Context::default();
