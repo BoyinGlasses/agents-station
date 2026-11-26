@@ -458,6 +458,7 @@ fn paint_zone_chip(
         Color32::from_rgba_unmultiplied(0xEC, 0xF0, 0xF7, 224)
     };
     let live_str = label.subtitle.as_deref().filter(|s| !s.is_empty());
+    let total_avail = (inner_right - text_x).max(16.0);
     let live_galley = live_str.map(|live| {
         let rich = egui::RichText::new(format!("· {live}"))
             .font(FontId::new(9.5, FontFamily::Proportional))
@@ -465,7 +466,7 @@ fn paint_zone_chip(
         egui::WidgetText::from(rich).into_galley(
             ui,
             Some(egui::TextWrapMode::Truncate),
-            ((inner_right - text_x) * 0.45).max(24.0),
+            (total_avail * 0.55).max(24.0),
             egui::FontSelection::Default,
         )
     });
@@ -473,7 +474,7 @@ fn paint_zone_chip(
         .as_ref()
         .map(|g| g.size().x + 5.0)
         .unwrap_or(0.0);
-    let title_max_w = (inner_right - text_x - live_reserve).max(16.0);
+    let title_max_w = (total_avail - live_reserve).max(16.0);
     let title_rich = egui::RichText::new(label.text.to_uppercase())
         .font(FontId::new(9.5, FontFamily::Name(crate::theme::FONT_BOLD.into())))
         .color(title_color);
