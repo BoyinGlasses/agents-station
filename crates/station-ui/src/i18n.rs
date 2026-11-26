@@ -307,6 +307,8 @@ mod tests {
             "station.status.running",
             "station.gpu",
             "station.tray",
+            "station.planMonth",
+            "ui.photo.openTitle",
         ];
 
         for lang in ["en", "vi", "th"] {

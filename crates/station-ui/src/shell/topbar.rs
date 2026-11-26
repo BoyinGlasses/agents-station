@@ -777,11 +777,13 @@ fn draw_plan_popover(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
     ui.add_space(8.0);
     let usd_str = format!("${:.2}", state.burn.today_usd);
     let summary = i18n.tr_vars("station.planSummary", &[("usd", usd_str.as_str())]);
+    let month_usd_str = format!("${:.2}", state.burn.month_usd);
+    let month_summary = i18n.tr_vars("station.planMonth", &[("usd", month_usd_str.as_str())]);
     ui.horizontal(|ui| {
         ui.label(heading_bold(summary, 13.0));
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new(format!("30d: ${:.2}", state.burn.month_usd))
+                RichText::new(month_summary)
                     .font(FontId::new(11.5, FontFamily::Monospace))
                     .color(MUTED),
             );

@@ -5553,6 +5553,7 @@
       "th": "ภาษาไทย"
     },
     "approval": "Approval needed",
-    "streamerRedacted": "Hidden in streamer mode"
+    "streamerRedacted": "Hidden in streamer mode",
+    "planMonth": "30d: {usd}"
   }
 }

@@ -5244,6 +5244,7 @@
       "th": "ภาษาไทย"
     },
     "approval": "Cần bạn duyệt",
-    "streamerRedacted": "Đã ẩn ở chế độ quay màn hình"
+    "streamerRedacted": "Đã ẩn ở chế độ quay màn hình",
+    "planMonth": "30 ngày: {usd}"
   }
 }

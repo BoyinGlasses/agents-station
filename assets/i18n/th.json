@@ -5522,6 +5522,7 @@
       "th": "ภาษาไทย"
     },
     "approval": "รอการอนุมัติ",
-    "streamerRedacted": "ซ่อนในโหมดสตรีมเมอร์"
+    "streamerRedacted": "ซ่อนในโหมดสตรีมเมอร์",
+    "planMonth": "30 วัน: {usd}"
   }
 }
