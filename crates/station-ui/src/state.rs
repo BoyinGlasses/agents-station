@@ -3,8 +3,10 @@ use crate::labels3d::ProjectedLabel;
 use bevy::prelude::*;
 use bevy_egui::egui;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use station_3d::{BackdropKind, CameraPreset, ChibiLook, OfficeLayout};
 use station_launcher::HarnessStatus;
+use std::collections::HashMap;
 
 /// Logical `egui::Rect` of the transparent central 3D stage area, updated each frame by the shell.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
@@ -137,14 +139,109 @@ pub struct SessionCard {
     pub subagents: Vec<SubagentItem>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PendingPermCard {
     pub id: String,
     pub session_id: String,
     pub agent: String,
     pub tool: String,
     pub summary: String,
-    pub kind: String, // "permission" | "denied" | "ci"
+    /// `"perm" | "permission" | "ask" | "plan" | "denied" | "stuck" | "ci"`
+    pub kind: String,
+    /// Optional danger key (e.g. `"rmRf"`, `"gitPush"`) when a risky command is detected.
+    pub danger: Option<String>,
+    /// Optional structured tool input JSON (e.g. `AskUserQuestion` `questions[]` or `ExitPlanMode` `plan`).
+    pub tool_input: Option<Value>,
+    /// Optional extra metadata (`rule`, `reason`, `wf`, `repo`, `branch`, `url`, `stuck_kind`, `stuck_n`, `stuck_mins`, `stuck_usd`).
+    pub meta: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AskOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AskQuestion {
+    pub header: String,
+    pub question: String,
+    pub options: Vec<AskOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AskCardDraft {
+    pub picks: Vec<Vec<usize>>,
+    pub others: Vec<String>,
+}
+
+impl AskCardDraft {
+    pub fn ensure_len(&mut self, len: usize) {
+        if self.picks.len() < len {
+            self.picks.resize_with(len, Vec::new);
+        }
+        if self.others.len() < len {
+            self.others.resize_with(len, String::new);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionDrawerTab {
+    #[default]
+    Chat,
+    Steps,
+    Subagents,
+    Pins,
+    Undo,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionLogItem {
+    pub role: String, // "user" | "assistant" | "tool" | "note" | "summary"
+    pub text: String,
+    pub ts: String,
+    pub tool_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UndoFileEntry {
+    pub file: String,
+    pub action: String, // "restore" | "delete" | "same" | "changedAfter" | "big"
+    pub selected: bool,
+}
+
+impl UndoFileEntry {
+    pub fn is_undoable(&self) -> bool {
+        matches!(self.action.as_str(), "restore" | "delete")
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionUndoView {
+    pub session_id: String,
+    pub loading: bool,
+    pub prompt: String,
+    pub time_label: String,
+    pub files: Vec<UndoFileEntry>,
+    pub done_files: Vec<(String, String)>,
+    pub backup_dir: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountOption {
+    pub slug: String,
+    pub label: String,
+    pub active: bool,
+    pub pct: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TodoItem {
+    pub text: String,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -352,6 +449,67 @@ pub enum UiAction {
         id: String,
         decision: String,
     },
+    SubmitAskAnswers {
+        id: String,
+        answers: Map<String, Value>,
+    },
+    DecidePlan {
+        id: String,
+        approve: bool,
+        feedback: String,
+    },
+    SkipHold(String),
+    DecideDenied {
+        id: String,
+        retry: bool,
+    },
+    LoopStop {
+        session_id: String,
+    },
+    LoopHint {
+        session_id: String,
+        hint: String,
+    },
+    CiFix {
+        id: String,
+    },
+    CiDismiss {
+        id: String,
+    },
+    FetchSessionLog(String),
+    AddSessionPin {
+        session_id: String,
+        text: String,
+    },
+    RemoveSessionPin {
+        session_id: String,
+        index: usize,
+    },
+    FetchSessionUndo(String),
+    ApplySessionUndo {
+        session_id: String,
+        files: Vec<String>,
+    },
+    TellClaudeUndo {
+        session_id: String,
+        files: Vec<String>,
+    },
+    RewritePrompt {
+        text: String,
+        lang: String,
+    },
+    SteerSession {
+        session_id: String,
+        text: String,
+    },
+    StopSessionTask {
+        session_id: String,
+    },
+    OpenSessionWindow(String),
+    SwitchAccount {
+        session_id: String,
+        target: String,
+    },
     SendPrompt {
         session_id: String,
         text: String,
@@ -448,6 +606,21 @@ pub struct UiState {
     pub kpi_reads: u64,
     pub kpi_edits: u64,
     pub kpi_cmds: u64,
+    pub session_tab: SessionDrawerTab,
+    pub session_logs: HashMap<String, Vec<SessionLogItem>>,
+    pub session_log_loaded_for: Option<String>,
+    pub session_pins: HashMap<String, Vec<String>>,
+    pub pin_draft: String,
+    pub session_undo: Option<SessionUndoView>,
+    pub session_todos: Vec<TodoItem>,
+    pub accounts: Vec<AccountOption>,
+    pub account_menu_open: bool,
+    pub compose_rewriting: bool,
+    pub compose_prev_draft: Option<String>,
+    pub perm_ask_drafts: HashMap<String, AskCardDraft>,
+    pub perm_plan_notes: HashMap<String, String>,
+    pub perm_stuck_hints: HashMap<String, String>,
+    pub perm_danger_armed: HashMap<String, bool>,
     pub pending_actions: Vec<UiAction>,
     next_toast_id: u64,
 }
@@ -546,6 +719,21 @@ impl UiState {
             kpi_reads: 0,
             kpi_edits: 0,
             kpi_cmds: 0,
+            session_tab: SessionDrawerTab::Chat,
+            session_logs: HashMap::new(),
+            session_log_loaded_for: None,
+            session_pins: HashMap::new(),
+            pin_draft: String::new(),
+            session_undo: None,
+            session_todos: Vec::new(),
+            accounts: Vec::new(),
+            account_menu_open: false,
+            compose_rewriting: false,
+            compose_prev_draft: None,
+            perm_ask_drafts: HashMap::new(),
+            perm_plan_notes: HashMap::new(),
+            perm_stuck_hints: HashMap::new(),
+            perm_danger_armed: HashMap::new(),
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
@@ -684,6 +872,7 @@ impl UiState {
                 tool: "Bash".to_owned(),
                 summary: "cargo test -p station-core --no-fail-fast".to_owned(),
                 kind: "permission".to_owned(),
+                ..Default::default()
             }],
             harnesses: vec![
                 HarnessDockItem {
@@ -852,6 +1041,62 @@ impl UiState {
             kpi_reads: 42,
             kpi_edits: 18,
             kpi_cmds: 11,
+            session_tab: SessionDrawerTab::Chat,
+            session_logs: HashMap::from([(
+                "sess-claude-1".to_owned(),
+                vec![
+                    SessionLogItem {
+                        role: "user".to_owned(),
+                        text: "Build native Rust 3-column control-room shell".to_owned(),
+                        ts: "16:40".to_owned(),
+                        tool_type: None,
+                    },
+                    SessionLogItem {
+                        role: "assistant".to_owned(),
+                        text: "### Shell Progress\n- Wired `TopBar` + `SessionRail` + `ActivityPanel`\n- Next: **SessionDrawer** markdown view\n```rust\npub fn draw_session_drawer() {}\n```".to_owned(),
+                        ts: "16:42".to_owned(),
+                        tool_type: None,
+                    },
+                ],
+            )]),
+            session_log_loaded_for: Some("sess-claude-1".to_owned()),
+            session_pins: HashMap::from([(
+                "sess-claude-1".to_owned(),
+                vec!["Never modify d:\\mystation\\my-station".to_owned()],
+            )]),
+            pin_draft: String::new(),
+            session_undo: None,
+            session_todos: vec![
+                TodoItem {
+                    text: "Implement 6 interactive perm cards".to_owned(),
+                    done: true,
+                },
+                TodoItem {
+                    text: "Wire SessionDrawer tabs & compose".to_owned(),
+                    done: false,
+                },
+            ],
+            accounts: vec![
+                AccountOption {
+                    slug: String::new(),
+                    label: "Main".to_owned(),
+                    active: true,
+                    pct: Some(24),
+                },
+                AccountOption {
+                    slug: "work".to_owned(),
+                    label: "Work".to_owned(),
+                    active: false,
+                    pct: Some(12),
+                },
+            ],
+            account_menu_open: false,
+            compose_rewriting: false,
+            compose_prev_draft: None,
+            perm_ask_drafts: HashMap::new(),
+            perm_plan_notes: HashMap::new(),
+            perm_stuck_hints: HashMap::new(),
+            perm_danger_armed: HashMap::new(),
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
@@ -1032,6 +1277,7 @@ mod tests {
             tool: "Bash".to_owned(),
             summary: "echo test".to_owned(),
             kind: "permission".to_owned(),
+            ..Default::default()
         });
         assert_eq!(demo.waiting_count(), 2);
 

@@ -21,8 +21,9 @@ use station_ui::labels3d::{
     project_world_to_stage,
 };
 use station_ui::state::{
-    BurnSnapshot, CacheWarmth, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, PhotoSize,
-    PlaceCardAction, PlaceCardInfo, PlaceCardRow, ReplayRange, SessionCard, SysSnapshot, UiAction,
+    AccountOption, BurnSnapshot, CacheWarmth, ChatMessage, FeedEntry, HarnessDockItem,
+    PendingPermCard, PhotoSize, PlaceCardAction, PlaceCardInfo, PlaceCardRow, ReplayRange,
+    SessionCard, SessionLogItem, SessionUndoView, SysSnapshot, TodoItem, UiAction, UndoFileEntry,
     normalize_feed_kind, normalize_status,
 };
 use station_ui::theme::{ACCENT, AMBER, BLUE, GREEN, RED};
@@ -66,6 +67,22 @@ struct RemoteActionCmd {
     body: Value,
     refresh: RefreshKind,
     launch_toast_label: Option<String>,
+}
+
+enum RemoteQueryCmd {
+    FetchLog { session_id: String },
+    FetchUndo { session_id: String },
+    ApplyUndo { session_id: String, files: Vec<String> },
+    RewritePrompt { text: String, lang: String },
+}
+
+enum BridgeAsyncResult {
+    SessionLog {
+        session_id: String,
+        items: Vec<SessionLogItem>,
+    },
+    SessionUndo(SessionUndoView),
+    RewriteResult(Result<String, String>),
 }
 
 #[derive(Clone)]
@@ -209,8 +226,13 @@ struct RemoteSnapshot {
     burn: Option<BurnSnapshot>,
     has_chat: bool,
     chat: Vec<ChatMessage>,
+    ci_alerts: Vec<PendingPermCard>,
     has_vault: bool,
     vault_results: Vec<(String, String)>,
+    has_pins: bool,
+    pins: HashMap<String, Vec<String>>,
+    todos: Vec<TodoItem>,
+    accounts: Vec<AccountOption>,
 }
 
 /// Byte-buffered SSE line decoder that preserves multi-byte UTF-8 sequences split across
@@ -275,6 +297,7 @@ enum BridgeBackend {
     AttachedHttp {
         snapshot: Arc<Mutex<RemoteSnapshot>>,
         action_tx: mpsc::Sender<RemoteActionCmd>,
+        query_tx: mpsc::Sender<RemoteQueryCmd>,
         _shutdown: watch::Sender<bool>,
     },
     BindError {
@@ -519,9 +542,246 @@ fn parse_perms_from_json(val: &Value) -> Vec<PendingPermCard> {
                     .and_then(Value::as_str)
                     .unwrap_or("permission")
                     .to_owned(),
+                danger: p
+                    .get("danger")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+                tool_input: p.get("tool_input").cloned(),
+                meta: p.get("meta").cloned(),
             })
         })
         .collect()
+}
+
+fn parse_ci_alerts_from_chat_json(val: &Value) -> Vec<PendingPermCard> {
+    let Some(arr) = val.get("msgs").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|m| {
+            if m.get("kind").and_then(Value::as_str) != Some("ci") {
+                return None;
+            }
+            let ci = m.get("ci")?;
+            if ci.get("state").and_then(Value::as_str) != Some("red")
+                || ci.get("fix").and_then(Value::as_str).is_some()
+            {
+                return None;
+            }
+            let id = m.get("id").and_then(Value::as_str)?.to_owned();
+            let wf = ci.get("wf").and_then(Value::as_str).unwrap_or("CI");
+            let repo = ci.get("repo").and_then(Value::as_str).unwrap_or("");
+            let branch = ci.get("branch").and_then(Value::as_str).unwrap_or("");
+            let sess = ci
+                .get("sid")
+                .or_else(|| ci.get("sess"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Some(PendingPermCard {
+                id,
+                session_id: sess.to_owned(),
+                agent: repo.to_owned(),
+                tool: wf.to_owned(),
+                summary: format!("{wf} · {repo} ({branch})"),
+                kind: "ci".to_owned(),
+                danger: None,
+                tool_input: None,
+                meta: Some(ci.clone()),
+            })
+        })
+        .collect()
+}
+
+fn parse_todos_from_values(arr: &[Value]) -> Vec<TodoItem> {
+    arr.iter()
+        .filter_map(|t| {
+            let text = t.get("text").and_then(Value::as_str)?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            let done = t.get("done").and_then(Value::as_bool).unwrap_or(false);
+            Some(TodoItem {
+                text: text.to_owned(),
+                done,
+            })
+        })
+        .collect()
+}
+
+fn parse_accounts_from_view(val: &Value) -> Vec<AccountOption> {
+    let active_slug = val.get("active").and_then(Value::as_str).unwrap_or("");
+    let labels = val.get("labels").and_then(Value::as_object);
+    let mut out = Vec::new();
+    let main_lbl = labels
+        .and_then(|m| m.get("_main").or_else(|| m.get("")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Main")
+        .to_owned();
+    out.push(AccountOption {
+        slug: String::new(),
+        label: main_lbl,
+        active: active_slug.is_empty(),
+        pct: None,
+    });
+    if let Some(arr) = val.get("accounts").and_then(Value::as_array) {
+        for a in arr {
+            let Some(name) = a.get("name").and_then(Value::as_str).filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let lbl = a
+                .get("label")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| labels.and_then(|m| m.get(name)).and_then(Value::as_str))
+                .unwrap_or(name)
+                .to_owned();
+            out.push(AccountOption {
+                slug: name.to_owned(),
+                label: lbl,
+                active: active_slug == name,
+                pct: None,
+            });
+        }
+    }
+    out
+}
+
+fn parse_log_items_from_json(session_id: &str, val: &Value) -> Vec<SessionLogItem> {
+    if let Some(arr) = val.get("items").and_then(Value::as_array) {
+        return arr
+            .iter()
+            .filter_map(|it| {
+                let text = it.get("text").and_then(Value::as_str)?.trim();
+                if text.is_empty() {
+                    return None;
+                }
+                let role = it
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("assistant")
+                    .to_owned();
+                let ts = it
+                    .get("ts")
+                    .and_then(Value::as_u64)
+                    .map(format_hhmm_ms)
+                    .unwrap_or_default();
+                let tool_type = it
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                Some(SessionLogItem {
+                    role,
+                    text: text.to_owned(),
+                    ts,
+                    tool_type,
+                })
+            })
+            .collect();
+    }
+    if let Some(arr) = val.get("feed").and_then(Value::as_array) {
+        return arr
+            .iter()
+            .filter(|f| f.get("sess").and_then(Value::as_str) == Some(session_id))
+            .filter_map(|f| {
+                let label = f.get("label").and_then(Value::as_str)?.trim();
+                if label.is_empty() {
+                    return None;
+                }
+                let kind = f.get("type").and_then(Value::as_str).unwrap_or("tool");
+                let role = if kind == "prompt" { "user" } else { "tool" }.to_owned();
+                let ts = format_hhmm_ms(f.get("ts").and_then(Value::as_u64).unwrap_or(0));
+                Some(SessionLogItem {
+                    role,
+                    text: label.to_owned(),
+                    ts,
+                    tool_type: Some(kind.to_owned()),
+                })
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+fn undo_view_from_plan(
+    session_id: &str,
+    plan: Option<station_core::state::undo::UndoPlan>,
+) -> SessionUndoView {
+    match plan {
+        Some(p) => SessionUndoView {
+            session_id: session_id.to_owned(),
+            loading: false,
+            prompt: p.prompt,
+            time_label: format_hhmm_ms(p.at),
+            files: p
+                .files
+                .into_iter()
+                .map(|f| {
+                    let selected = matches!(f.action.as_str(), "restore" | "delete");
+                    UndoFileEntry {
+                        file: f.file,
+                        action: f.action,
+                        selected,
+                    }
+                })
+                .collect(),
+            ..Default::default()
+        },
+        None => SessionUndoView {
+            session_id: session_id.to_owned(),
+            loading: false,
+            ..Default::default()
+        },
+    }
+}
+
+fn parse_undo_view_from_json(session_id: &str, val: &Value) -> SessionUndoView {
+    let plan = val
+        .get("plan")
+        .filter(|v| !v.is_null())
+        .and_then(|v| serde_json::from_value::<station_core::state::undo::UndoPlan>(v.clone()).ok());
+    undo_view_from_plan(session_id, plan)
+}
+
+fn parse_undo_apply_from_json(session_id: &str, val: &Value) -> SessionUndoView {
+    let done_files = val
+        .get("done")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| {
+                    let f = x.get("file").and_then(Value::as_str)?.to_owned();
+                    let a = x.get("action").and_then(Value::as_str).unwrap_or("restore").to_owned();
+                    Some((f, a))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let backup_dir = val
+        .get("after")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let error = if val.get("ok").and_then(Value::as_bool) == Some(false) {
+        Some(
+            val.get("message")
+                .or_else(|| val.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("undo failed")
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    SessionUndoView {
+        session_id: session_id.to_owned(),
+        loading: false,
+        done_files,
+        backup_dir,
+        error,
+        ..Default::default()
+    }
 }
 
 fn parse_feed_from_json(val: &Value) -> Vec<FeedEntry> {
@@ -595,6 +855,13 @@ fn apply_snapshot_to_remote(snap_lock: &Arc<Mutex<RemoteSnapshot>>, val: &Value)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    let pins: Option<HashMap<String, Vec<String>>> = val
+        .get("pins")
+        .and_then(|p| serde_json::from_value(p.clone()).ok());
+    let todos: Option<Vec<TodoItem>> = val
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(|a| parse_todos_from_values(a));
     let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
     snap.has_snapshot = true;
     snap.sessions = sessions;
@@ -602,6 +869,13 @@ fn apply_snapshot_to_remote(snap_lock: &Arc<Mutex<RemoteSnapshot>>, val: &Value)
     snap.feed = feed;
     if let Some(p) = pin {
         snap.pairing_pin = Some(p);
+    }
+    if let Some(pm) = pins {
+        snap.has_pins = true;
+        snap.pins = pm;
+    }
+    if let Some(t) = todos {
+        snap.todos = t;
     }
 }
 
@@ -771,13 +1045,28 @@ fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
     }
     if snap.has_snapshot {
         ui.sessions = snap.sessions.clone();
-        ui.pending_perms = snap.pending_perms.clone();
+        let mut perms = snap.pending_perms.clone();
+        for ci in &snap.ci_alerts {
+            if !perms.iter().any(|p| p.id == ci.id) {
+                perms.push(ci.clone());
+            }
+        }
+        ui.pending_perms = perms;
         ui.feed = snap.feed.clone();
         if let Some(sel) = ui.selected_session.as_deref()
             && !ui.sessions.iter().any(|s| s.id == sel)
         {
             ui.selected_session = None;
         }
+    }
+    if snap.has_pins {
+        ui.session_pins = snap.pins.clone();
+    }
+    if !snap.todos.is_empty() {
+        ui.session_todos = snap.todos.clone();
+    }
+    if !snap.accounts.is_empty() {
+        ui.accounts = snap.accounts.clone();
     }
     if let Some(pin) = &snap.pairing_pin {
         ui.pairing_pin = pin.clone();
@@ -852,8 +1141,10 @@ async fn fetch_remote_chat(
         && let Ok(val) = resp.json::<Value>().await
     {
         let chat = parse_chat_from_json(&val);
+        let ci_alerts = parse_ci_alerts_from_chat_json(&val);
         let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
         snap.chat = chat;
+        snap.ci_alerts = ci_alerts;
         snap.has_chat = true;
     }
 }
@@ -881,12 +1172,13 @@ async fn fetch_remote_telemetry(
         }
     };
 
-    let (sys_v, burn_today, burn_30d, chat_v, vault_v) = tokio::join!(
+    let (sys_v, burn_today, burn_30d, chat_v, vault_v, accts_v) = tokio::join!(
         get_json("/api/sys"),
         get_json("/api/burn?range=today"),
         get_json("/api/burn?range=30d"),
         get_json("/api/chat"),
         get_json("/api/vault?limit=30"),
+        get_json("/api/accounts"),
     );
 
     let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -898,11 +1190,15 @@ async fn fetch_remote_telemetry(
     }
     if let Some(v) = chat_v {
         snap.chat = parse_chat_from_json(&v);
+        snap.ci_alerts = parse_ci_alerts_from_chat_json(&v);
         snap.has_chat = true;
     }
     if let Some(v) = vault_v {
         snap.vault_results = parse_vault_from_json(&v);
         snap.has_vault = true;
+    }
+    if let Some(v) = accts_v {
+        snap.accounts = parse_accounts_from_view(&v);
     }
 }
 
@@ -911,8 +1207,14 @@ fn spawn_attached_sse_client(
     host_header: String,
     snap_lock: Arc<Mutex<RemoteSnapshot>>,
     toast_tx: mpsc::Sender<(String, String)>,
-) -> (mpsc::Sender<RemoteActionCmd>, watch::Sender<bool>) {
+    async_tx: mpsc::Sender<BridgeAsyncResult>,
+) -> (
+    mpsc::Sender<RemoteActionCmd>,
+    mpsc::Sender<RemoteQueryCmd>,
+    watch::Sender<bool>,
+) {
     let (action_tx, mut action_rx) = mpsc::channel::<RemoteActionCmd>(REMOTE_ACTION_QUEUE_CAP);
+    let (query_tx, mut query_rx) = mpsc::channel::<RemoteQueryCmd>(REMOTE_ACTION_QUEUE_CAP);
     let (tx, mut rx) = watch::channel(false);
     let _ = std::thread::Builder::new()
         .name("station-sse-client".to_owned())
@@ -929,6 +1231,135 @@ fn spawn_attached_sse_client(
                     return;
                 };
                 fetch_remote_harnesses(&client, &base_url, &host_header, &snap_lock).await;
+
+                // Dedicated async query worker for /api/log, /api/undo, /api/prompt/rewrite.
+                let client_q = client.clone();
+                let base_q = base_url.clone();
+                let host_q = host_header.clone();
+                let async_q = async_tx.clone();
+                let mut rx_q = rx.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            maybe_q = query_rx.recv() => {
+                                let Some(q) = maybe_q else { break; };
+                                match q {
+                                    RemoteQueryCmd::FetchLog { session_id } => {
+                                        let url = format!("{base_q}/api/log?id={session_id}");
+                                        let items = match client_q
+                                            .get(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(3))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .map(|v| parse_log_items_from_json(&session_id, &v))
+                                                .unwrap_or_default(),
+                                            _ => Vec::new(),
+                                        };
+                                        let _ = async_q
+                                            .try_send(BridgeAsyncResult::SessionLog { session_id, items });
+                                    }
+                                    RemoteQueryCmd::FetchUndo { session_id } => {
+                                        let url = format!("{base_q}/api/undo?id={session_id}");
+                                        let view = match client_q
+                                            .get(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(3))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .map(|v| parse_undo_view_from_json(&session_id, &v))
+                                                .unwrap_or_else(|| SessionUndoView {
+                                                    session_id: session_id.clone(),
+                                                    loading: false,
+                                                    ..Default::default()
+                                                }),
+                                            _ => SessionUndoView {
+                                                session_id: session_id.clone(),
+                                                loading: false,
+                                                ..Default::default()
+                                            },
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::SessionUndo(view));
+                                    }
+                                    RemoteQueryCmd::ApplyUndo { session_id, files } => {
+                                        let url = format!("{base_q}/api/undo");
+                                        let view = match client_q
+                                            .post(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(6))
+                                            .json(&json!({ "id": session_id, "files": files }))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .map(|v| parse_undo_apply_from_json(&session_id, &v))
+                                                .unwrap_or_else(|| SessionUndoView {
+                                                    session_id: session_id.clone(),
+                                                    loading: false,
+                                                    error: Some("invalid undo response".to_owned()),
+                                                    ..Default::default()
+                                                }),
+                                            Err(err) => SessionUndoView {
+                                                session_id: session_id.clone(),
+                                                loading: false,
+                                                error: Some(err.to_string()),
+                                                ..Default::default()
+                                            },
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::SessionUndo(view));
+                                    }
+                                    RemoteQueryCmd::RewritePrompt { text, lang } => {
+                                        let url = format!("{base_q}/api/prompt/rewrite");
+                                        let res = match client_q
+                                            .post(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(20))
+                                            .json(&json!({ "text": text, "lang": lang }))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) => match r.json::<Value>().await {
+                                                Ok(v) if v.get("ok").and_then(Value::as_bool) == Some(true) => {
+                                                    Ok(v.get("text")
+                                                        .and_then(Value::as_str)
+                                                        .unwrap_or("")
+                                                        .to_owned())
+                                                }
+                                                Ok(v) => Err(v
+                                                    .get("message")
+                                                    .or_else(|| v.get("code"))
+                                                    .and_then(Value::as_str)
+                                                    .unwrap_or("rewrite failed")
+                                                    .to_owned()),
+                                                Err(e) => Err(e.to_string()),
+                                            },
+                                            Err(e) => Err(e.to_string()),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::RewriteResult(res));
+                                    }
+                                }
+                            }
+                            changed = rx_q.changed() => {
+                                if changed.is_err() || *rx_q.borrow() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
 
                 // Single pooled outbound POST worker reusing the existing client & runtime.
                 let client_a = client.clone();
@@ -1134,7 +1565,7 @@ fn spawn_attached_sse_client(
                 }
             });
         });
-    (action_tx, tx)
+    (action_tx, query_tx, tx)
 }
 
 #[derive(Resource)]
@@ -1148,9 +1579,12 @@ pub struct LiveServerBridge {
     sys_refresh_due: bool,
     banner_pushed: bool,
     seen_perm_ids: HashSet<String>,
+    dismissed_ci_ids: HashSet<String>,
     last_window_focused: Option<bool>,
     toast_tx: mpsc::Sender<(String, String)>,
     toast_rx: mpsc::Receiver<(String, String)>,
+    async_tx: mpsc::Sender<BridgeAsyncResult>,
+    async_rx: mpsc::Receiver<BridgeAsyncResult>,
 }
 
 impl LiveServerBridge {
@@ -1163,21 +1597,24 @@ impl LiveServerBridge {
         prefer_attach: bool,
     ) -> Self {
         let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let (async_tx, async_rx) = mpsc::channel(TOAST_QUEUE_CAP);
 
         if prefer_attach && probe_local_health(port) {
             let base_url = format!("http://127.0.0.1:{port}");
             let host_header = format!("127.0.0.1:{port}");
             let snapshot = Arc::new(Mutex::new(RemoteSnapshot::default()));
-            let (action_tx, shutdown) = spawn_attached_sse_client(
+            let (action_tx, query_tx, shutdown) = spawn_attached_sse_client(
                 base_url,
                 host_header,
                 snapshot.clone(),
                 toast_tx.clone(),
+                async_tx.clone(),
             );
             return Self {
                 backend: BridgeBackend::AttachedHttp {
                     snapshot,
                     action_tx,
+                    query_tx,
                     _shutdown: shutdown,
                 },
                 data_dir,
@@ -1188,9 +1625,12 @@ impl LiveServerBridge {
                 sys_refresh_due: true,
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
+                dismissed_ci_ids: HashSet::new(),
                 last_window_focused: None,
                 toast_tx,
                 toast_rx,
+                async_tx,
+                async_rx,
             };
         }
 
@@ -1221,9 +1661,12 @@ impl LiveServerBridge {
                     sys_refresh_due: true,
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
+                    dismissed_ci_ids: HashSet::new(),
                     last_window_focused: None,
                     toast_tx,
                     toast_rx,
+                    async_tx,
+                    async_rx,
                 };
             }
         };
@@ -1246,9 +1689,12 @@ impl LiveServerBridge {
                 sys_refresh_due: true,
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
+                dismissed_ci_ids: HashSet::new(),
                 last_window_focused: None,
                 toast_tx,
                 toast_rx,
+                async_tx,
+                async_rx,
             };
         }
 
@@ -1320,9 +1766,12 @@ impl LiveServerBridge {
                     sys_refresh_due: true,
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
+                    dismissed_ci_ids: HashSet::new(),
                     last_window_focused: None,
                     toast_tx,
                     toast_rx,
+                    async_tx,
+                    async_rx,
                 }
             }
             Err(err) => {
@@ -1331,16 +1780,18 @@ impl LiveServerBridge {
                     let base_url = format!("http://127.0.0.1:{port}");
                     let host_header = format!("127.0.0.1:{port}");
                     let snapshot = Arc::new(Mutex::new(RemoteSnapshot::default()));
-                    let (action_tx, shutdown) = spawn_attached_sse_client(
+                    let (action_tx, query_tx, shutdown) = spawn_attached_sse_client(
                         base_url,
                         host_header,
                         snapshot.clone(),
                         toast_tx.clone(),
+                        async_tx.clone(),
                     );
                     Self {
                         backend: BridgeBackend::AttachedHttp {
                             snapshot,
                             action_tx,
+                            query_tx,
                             _shutdown: shutdown,
                         },
                         data_dir,
@@ -1351,9 +1802,12 @@ impl LiveServerBridge {
                         sys_refresh_due: true,
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
+                        dismissed_ci_ids: HashSet::new(),
                         last_window_focused: None,
                         toast_tx,
                         toast_rx,
+                        async_tx,
+                        async_rx,
                     }
                 } else {
                     let harness_poller =
@@ -1374,9 +1828,12 @@ impl LiveServerBridge {
                         sys_refresh_due: true,
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
+                        dismissed_ci_ids: HashSet::new(),
                         last_window_focused: None,
                         toast_tx,
                         toast_rx,
+                        async_tx,
+                        async_rx,
                     }
                 }
             }
@@ -2175,7 +2632,11 @@ fn sync_office_chat_to_ui(office: &station_core::state::sessions::OfficeState, u
         .collect();
 }
 
-fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
+fn sync_office_core_to_ui(
+    app_state: &AppState,
+    dismissed_ci_ids: &HashSet<String>,
+    ui: &mut UiState,
+) {
     if let Ok(office) = app_state.office.lock() {
         let mut sessions: Vec<SessionCard> = office
             .sessions
@@ -2238,18 +2699,88 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
             ui.selected_session = None;
         }
 
-        ui.pending_perms = office
+        let mut perms: Vec<PendingPermCard> = office
             .pending_perms
             .values()
-            .map(|p| PendingPermCard {
-                id: p.id.clone(),
-                session_id: p.sess.clone(),
-                agent: p.name.clone(),
-                tool: p.tool_type.clone(),
-                summary: p.detail.clone(),
-                kind: p.kind.clone(),
+            .map(|p| {
+                let meta = if p.kind == "denied" {
+                    office.chat.by_id(&p.id).and_then(|m| m.deny.clone())
+                } else {
+                    None
+                };
+                PendingPermCard {
+                    id: p.id.clone(),
+                    session_id: p.sess.clone(),
+                    agent: p.name.clone(),
+                    tool: p.tool_type.clone(),
+                    summary: p.detail.clone(),
+                    kind: p.kind.clone(),
+                    danger: p.danger.clone(),
+                    tool_input: office.hold_tool_input(&p.id).cloned(),
+                    meta,
+                }
             })
             .collect();
+
+        // Surface active stuck-loop alerts into `perm-stack`.
+        for s in office.sessions.values() {
+            if let Some(st) = office.loops.stuck_of(&s.id) {
+                let stuck_id = format!("stuck:{}", s.id);
+                if !perms.iter().any(|p| p.id == stuck_id) {
+                    perms.push(PendingPermCard {
+                        id: stuck_id,
+                        session_id: s.id.clone(),
+                        agent: s.name.clone(),
+                        tool: "loop".to_owned(),
+                        summary: st.label.clone().unwrap_or_default(),
+                        kind: "stuck".to_owned(),
+                        danger: None,
+                        tool_input: None,
+                        meta: Some(json!({
+                            "stuck_kind": st.kind,
+                            "stuck_n": st.n.unwrap_or(0),
+                            "stuck_next": st.n.unwrap_or(0) + 1,
+                            "stuck_mins": st.mins.unwrap_or(0),
+                            "stuck_usd": st.usd,
+                        })),
+                    });
+                }
+            }
+        }
+
+        // Surface active red, unfixed CI failure alerts into `perm-stack`.
+        for m in &office.chat.msgs {
+            if m.kind == "ci"
+                && !dismissed_ci_ids.contains(&m.id)
+                && let Some(ci) = &m.ci
+                && ci.get("state").and_then(Value::as_str) == Some("red")
+                && ci.get("fix").and_then(Value::as_str).is_none()
+                && !perms.iter().any(|p| p.id == m.id)
+            {
+                let wf = ci.get("wf").and_then(Value::as_str).unwrap_or("CI");
+                let repo = ci.get("repo").and_then(Value::as_str).unwrap_or("");
+                let branch = ci.get("branch").and_then(Value::as_str).unwrap_or("");
+                let sess = ci
+                    .get("sid")
+                    .or_else(|| ci.get("sess"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                perms.push(PendingPermCard {
+                    id: m.id.clone(),
+                    session_id: sess.to_owned(),
+                    agent: repo.to_owned(),
+                    tool: wf.to_owned(),
+                    summary: format!("{wf} · {repo} ({branch})"),
+                    kind: "ci".to_owned(),
+                    danger: None,
+                    tool_input: None,
+                    meta: Some(ci.clone()),
+                });
+            }
+        }
+        ui.pending_perms = perms;
+        ui.session_pins = office.pins.clone();
+        ui.session_todos = parse_todos_from_values(&office.todos);
 
         ui.feed = office
             .feed
@@ -2285,6 +2816,9 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
             .count() as u64;
 
         sync_office_chat_to_ui(&office, ui);
+    }
+    if let Ok(accts) = app_state.claude_accounts.lock() {
+        ui.accounts = parse_accounts_from_view(&accts.view());
     }
 }
 
@@ -2390,6 +2924,32 @@ fn sync_live_state_to_ui(
         ui.push_toast(title, body);
     }
 
+    while let Ok(res) = bridge.async_rx.try_recv() {
+        match res {
+            BridgeAsyncResult::SessionLog { session_id, items } => {
+                ui.session_logs.insert(session_id, items);
+            }
+            BridgeAsyncResult::SessionUndo(view) => {
+                ui.session_undo = Some(view);
+            }
+            BridgeAsyncResult::RewriteResult(res) => {
+                ui.compose_rewriting = false;
+                match res {
+                    Ok(rewritten) if !rewritten.trim().is_empty() => {
+                        ui.compose_draft = rewritten;
+                        ui.push_toast("Prompt", "Rewritten");
+                    }
+                    Ok(_) => {
+                        ui.push_toast("Prompt", "Rewrite returned empty text");
+                    }
+                    Err(err) => {
+                        ui.push_toast("Prompt", err);
+                    }
+                }
+            }
+        }
+    }
+
     match &mut bridge.backend {
         BridgeBackend::InProcess { harness_poller, .. }
         | BridgeBackend::BindError { harness_poller, .. } => {
@@ -2456,6 +3016,8 @@ fn sync_live_state_to_ui(
             if !ui.demo_running {
                 synced_live_perms = snap.has_snapshot;
                 apply_remote_snapshot_to_ui(&snap, &mut ui);
+                ui.pending_perms
+                    .retain(|p| !(p.kind == "ci" && bridge.dismissed_ci_ids.contains(&p.id)));
             } else if let Some(pin) = &snap.pairing_pin {
                 ui.pairing_pin = pin.clone();
             }
@@ -2463,7 +3025,7 @@ fn sync_live_state_to_ui(
         BridgeBackend::InProcess { app_state, .. } => {
             if !ui.demo_running {
                 synced_live_perms = true;
-                sync_office_core_to_ui(app_state, &mut ui);
+                sync_office_core_to_ui(app_state, &bridge.dismissed_ci_ids, &mut ui);
             }
             sync_in_process_telemetry(app_state, &mut ui, refresh_sys);
             if refresh_sys {
@@ -3173,6 +3735,691 @@ fn process_ui_actions(
                 }
                 ui.push_toast("Permission", format!("{id} -> {decision}"));
             }
+            UiAction::SubmitAskAnswers { id, answers } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/perm",
+                            body: json!({
+                                "id": id,
+                                "choice": "answer",
+                                "answers": Value::Object(answers),
+                            }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.resolve_hold(&id, PermDecision::Answers(answers));
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+                ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.done.answer"));
+            }
+            UiAction::DecidePlan {
+                id,
+                approve,
+                feedback,
+            } => {
+                let choice = if approve { "approve" } else { "revise" };
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/perm",
+                            body: json!({
+                                "id": id,
+                                "choice": choice,
+                                "note": feedback,
+                            }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            let dec = if approve {
+                                PermDecision::Allow
+                            } else {
+                                PermDecision::Deny { reason: feedback }
+                            };
+                            office.resolve_hold(&id, dec);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+                let done_key = if approve {
+                    "perm.done.approve"
+                } else {
+                    "perm.done.revise"
+                };
+                ui.push_toast(i18n.tr("station.approval"), i18n.tr(done_key));
+            }
+            UiAction::SkipHold(id) => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/perm",
+                            body: json!({ "id": id, "choice": "skip" }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.cancel_hold(&id);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
+                    }
+                }
+                ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.done.skip"));
+            }
+            UiAction::DecideDenied { id, retry } => {
+                let op = if retry { "retry" } else { "keep" };
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/denied",
+                            body: json!({ "id": id, "op": op }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            let dec = if retry {
+                                PermDecision::Retry
+                            } else {
+                                PermDecision::Keep
+                            };
+                            office.resolve_hold(&id, dec);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.deny.title"), i18n.tr("perm.unreachable"));
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+                let msg = if retry {
+                    i18n.tr("chat.deny.retried")
+                } else {
+                    i18n.tr("chat.deny.kept")
+                };
+                ui.push_toast(i18n.tr("chat.deny.title"), msg);
+            }
+            UiAction::LoopStop { session_id } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/loop",
+                            body: json!({ "stop": session_id }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.loops.stop(&session_id, now_ms());
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("chat.loop.stopping"));
+            }
+            UiAction::LoopHint { session_id, hint } => {
+                let clean = station_core::redact::redact(hint.trim());
+                if clean.is_empty() {
+                    continue;
+                }
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/loop",
+                            body: json!({ "sid": session_id, "hint": clean }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.loops.hint(&session_id, &clean);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("chat.loop.hintSent"));
+            }
+            UiAction::CiFix { id } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/ci",
+                            body: json!({ "id": id }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess {
+                        app_state,
+                        runtime_handle,
+                        ..
+                    } => {
+                        let ci_info = app_state.office.lock().ok().and_then(|office| {
+                            let ci = office
+                                .chat
+                                .by_id(&id)
+                                .filter(|m| m.kind == "ci")
+                                .and_then(|m| m.ci.clone())?;
+                            let wf = ci
+                                .get("wf")
+                                .and_then(Value::as_str)
+                                .unwrap_or("CI")
+                                .to_owned();
+                            let branch = ci
+                                .get("branch")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let url = ci
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let sid = ci
+                                .get("sid")
+                                .or_else(|| ci.get("sess"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let dir = ci
+                                .get("dir")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_owned();
+                            let busy = !sid.is_empty()
+                                && office.sessions.get(&sid).is_some_and(|s| s.status != "rest");
+                            Some((wf, branch, url, sid, dir, busy))
+                        });
+                        if let Some((wf, branch, url, sid, dir, busy)) = ci_info {
+                            let prompt = format!("Fix failing {wf} on branch {branch} ({url})");
+                            let ts = now_ms();
+                            if busy || runtime_handle.is_none() || dir.is_empty() {
+                                if let Ok(mut q) = app_state.steer_queue.lock() {
+                                    q.enqueue(
+                                        station_core::state::steer::QueuedSteer {
+                                            key: if sid.is_empty() { id.clone() } else { sid.clone() },
+                                            sid: (!sid.is_empty()).then_some(sid),
+                                            dir: (!dir.is_empty()).then_some(dir),
+                                            agent: "claude".to_owned(),
+                                            text: prompt,
+                                            name: wf,
+                                            at: ts,
+                                        },
+                                        ts,
+                                    );
+                                }
+                                if let Ok(mut office) = app_state.office.lock() {
+                                    office.chat.set_ci(&id, json!({ "fix": "note" }));
+                                    let _ = office.save_chat();
+                                }
+                            } else if let Some(rt) = runtime_handle {
+                                let tasks = app_state.tasks.clone();
+                                let req = station_core::state::tasks::TaskStartRequest {
+                                    dir,
+                                    text: prompt,
+                                    agent: "claude".to_owned(),
+                                    model: String::new(),
+                                    fork: false,
+                                };
+                                rt.spawn(async move {
+                                    let _ = station_core::state::tasks::start_and_spawn(
+                                        tasks, req, ts, None,
+                                    );
+                                });
+                                if let Ok(mut office) = app_state.office.lock() {
+                                    office.chat.set_ci(&id, json!({ "fix": "sent" }));
+                                    let _ = office.save_chat();
+                                }
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.ci.title"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                ui.push_toast(i18n.tr("chat.ci.title"), i18n.tr("chat.ci.sent"));
+            }
+            UiAction::CiDismiss { id } => {
+                bridge.dismissed_ci_ids.insert(id.clone());
+                if let BridgeBackend::InProcess { app_state, .. } = &bridge.backend
+                    && let Ok(mut office) = app_state.office.lock()
+                {
+                    office.chat.set_ci(&id, json!({ "state": "over" }));
+                    let _ = office.save_chat();
+                }
+            }
+            UiAction::FetchSessionLog(session_id) => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::FetchLog { session_id });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    let (tp, feed_fallback) = {
+                        let office = app_state.office.lock().unwrap_or_else(|e| e.into_inner());
+                        let tp = office
+                            .sessions
+                            .get(&session_id)
+                            .and_then(|s| s.transcript_path.clone());
+                        let fb: Vec<SessionLogItem> = office
+                            .feed
+                            .iter()
+                            .filter(|f| f.sess == session_id)
+                            .map(|f| SessionLogItem {
+                                role: if f.kind == "prompt" { "user" } else { "tool" }.to_owned(),
+                                text: f.label.clone(),
+                                ts: format_hhmm_ms(f.ts),
+                                tool_type: Some(f.kind.clone()),
+                            })
+                            .collect();
+                        (tp, fb)
+                    };
+                    if let Some(path) = tp {
+                        let async_tx = bridge.async_tx.clone();
+                        let sid = session_id.clone();
+                        std::thread::spawn(move || {
+                            let hist =
+                                station_core::store::codex_history::read_codex_history(&path, 120);
+                            let items: Vec<SessionLogItem> = if hist.is_empty() {
+                                feed_fallback
+                            } else {
+                                hist.into_iter()
+                                    .map(|m| SessionLogItem {
+                                        role: m.role,
+                                        text: m.text,
+                                        ts: String::new(),
+                                        tool_type: None,
+                                    })
+                                    .collect()
+                            };
+                            let _ = async_tx.try_send(BridgeAsyncResult::SessionLog {
+                                session_id: sid,
+                                items,
+                            });
+                        });
+                    } else if !feed_fallback.is_empty() {
+                        ui.session_logs.insert(session_id, feed_fallback);
+                    }
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(
+                        i18n.tr("ui.sessionDrawer.chat"),
+                        i18n.tr("drawer.chatUnreadable"),
+                    );
+                }
+            },
+            UiAction::AddSessionPin { session_id, text } => match &bridge.backend {
+                BridgeBackend::AttachedHttp { action_tx, .. } => {
+                    let _ = action_tx.try_send(RemoteActionCmd {
+                        path: "/api/pins",
+                        body: json!({ "id": session_id, "op": "add", "text": text }),
+                        refresh: RefreshKind::Live,
+                        launch_toast_label: None,
+                    });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    if let Ok(mut office) = app_state.office.lock() {
+                        let _ = office.add_pin(&session_id, &text);
+                        ui.session_pins = office.pins.clone();
+                    }
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(i18n.tr("drawer.pins.tab"), i18n.tr("drawer.unreachable"));
+                }
+            },
+            UiAction::RemoveSessionPin { session_id, index } => match &bridge.backend {
+                BridgeBackend::AttachedHttp { action_tx, .. } => {
+                    let _ = action_tx.try_send(RemoteActionCmd {
+                        path: "/api/pins",
+                        body: json!({ "id": session_id, "op": "del", "pin": index }),
+                        refresh: RefreshKind::Live,
+                        launch_toast_label: None,
+                    });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    if let Ok(mut office) = app_state.office.lock() {
+                        let _ = office.remove_pin(&session_id, index);
+                        ui.session_pins = office.pins.clone();
+                    }
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(i18n.tr("drawer.pins.tab"), i18n.tr("drawer.unreachable"));
+                }
+            },
+            UiAction::FetchSessionUndo(session_id) => {
+                ui.session_undo = Some(SessionUndoView {
+                    session_id: session_id.clone(),
+                    loading: true,
+                    ..Default::default()
+                });
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchUndo { session_id });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(office) = app_state.office.lock() {
+                            let plan = office.undo.plan(&session_id);
+                            ui.session_undo = Some(undo_view_from_plan(&session_id, plan));
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.session_undo = Some(SessionUndoView {
+                            session_id,
+                            loading: false,
+                            error: Some(i18n.tr("drawer.unreachable")),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+            UiAction::ApplySessionUndo { session_id, files } => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::ApplyUndo { session_id, files });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    if let Ok(mut office) = app_state.office.lock() {
+                        let res =
+                            office
+                                .undo
+                                .apply_filtered(&session_id, now_ms(), Some(&files));
+                        ui.session_undo = Some(SessionUndoView {
+                            session_id,
+                            loading: false,
+                            done_files: res
+                                .done
+                                .into_iter()
+                                .map(|s| (s.file, s.action))
+                                .collect(),
+                            backup_dir: res.after,
+                            ..Default::default()
+                        });
+                    }
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(i18n.tr("drawer.undo.btn"), i18n.tr("drawer.unreachable"));
+                }
+            },
+            UiAction::TellClaudeUndo { session_id, files } => {
+                let joined = files.join(", ");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/undo",
+                            body: json!({ "id": session_id, "op": "tell", "files": joined }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let ts = now_ms();
+                        let note = format!("Heads up: reverted files from your last turn: {joined}");
+                        let (cwd, agent, name) = app_state
+                            .office
+                            .lock()
+                            .ok()
+                            .and_then(|o| {
+                                o.sessions
+                                    .get(&session_id)
+                                    .map(|s| (s.cwd.clone(), s.agent.clone(), s.name.clone()))
+                            })
+                            .unwrap_or_else(|| {
+                                (String::new(), "claude".to_owned(), session_id.clone())
+                            });
+                        if let Ok(mut q) = app_state.steer_queue.lock() {
+                            q.enqueue(
+                                station_core::state::steer::QueuedSteer {
+                                    key: session_id.clone(),
+                                    sid: Some(session_id),
+                                    dir: (!cwd.is_empty()).then_some(cwd),
+                                    agent,
+                                    text: note,
+                                    name,
+                                    at: ts,
+                                },
+                                ts,
+                            );
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("drawer.undo.btn"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                ui.push_toast(i18n.tr("drawer.undo.btn"), i18n.tr("drawer.undo.told"));
+            }
+            UiAction::RewritePrompt { text, lang } => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::RewritePrompt { text, lang });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    let rewriter = app_state.rewriter.clone();
+                    let work_dir = app_state.data_dir.join("rewrite");
+                    let async_tx = bridge.async_tx.clone();
+                    std::thread::spawn(move || {
+                        let res = station_core::store::rewrite::Rewriter::execute_blocking(
+                            rewriter,
+                            work_dir,
+                            text,
+                            lang,
+                            0,
+                            now_ms(),
+                        );
+                        let out = if res.ok {
+                            Ok(res.text.unwrap_or_default())
+                        } else {
+                            Err(res.code.unwrap_or("rewrite failed").to_owned())
+                        };
+                        let _ = async_tx.try_send(BridgeAsyncResult::RewriteResult(out));
+                    });
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.compose_rewriting = false;
+                    ui.push_toast(i18n.tr("chat.coach.label"), i18n.tr("drawer.unreachable"));
+                }
+            },
+            UiAction::SteerSession { session_id, text } => {
+                let clean: String = station_core::redact::redact(text.trim())
+                    .chars()
+                    .take(2000)
+                    .collect();
+                if clean.is_empty() {
+                    continue;
+                }
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/tasks/steer",
+                            body: json!({ "sid": session_id, "text": clean }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let ts = now_ms();
+                        let (cwd, agent, name) = app_state
+                            .office
+                            .lock()
+                            .ok()
+                            .and_then(|o| {
+                                o.sessions
+                                    .get(&session_id)
+                                    .map(|s| (s.cwd.clone(), s.agent.clone(), s.name.clone()))
+                            })
+                            .unwrap_or_else(|| {
+                                (String::new(), "claude".to_owned(), session_id.clone())
+                            });
+                        if let Ok(mut q) = app_state.steer_queue.lock() {
+                            q.enqueue(
+                                station_core::state::steer::QueuedSteer {
+                                    key: session_id.clone(),
+                                    sid: Some(session_id),
+                                    dir: (!cwd.is_empty()).then_some(cwd),
+                                    agent,
+                                    text: clean,
+                                    name: name.clone(),
+                                    at: ts,
+                                },
+                                ts,
+                            );
+                        }
+                        ui.push_toast(
+                            i18n.tr("chat.steer.btn"),
+                            i18n.tr_vars("chat.steer.sent", &[("name", &name)]),
+                        );
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.steer.btn"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Pop);
+                }
+            }
+            UiAction::StopSessionTask { session_id } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/tasks/stop",
+                            body: json!({ "id": session_id }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/loop",
+                            body: json!({ "stop": session_id }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut tasks) = app_state.tasks.lock() {
+                            let tid = tasks
+                                .of_sid(&session_id)
+                                .map(|r| r.id.clone())
+                                .unwrap_or_else(|| session_id.clone());
+                            tasks.stop(&tid);
+                        }
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.loops.stop(&session_id, now_ms());
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.loop.stop"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                ui.push_toast(i18n.tr("chat.loop.stop"), i18n.tr("chat.task.stopped"));
+            }
+            UiAction::OpenSessionWindow(session_id) => match &bridge.backend {
+                BridgeBackend::AttachedHttp { action_tx, .. } => {
+                    let _ = action_tx.try_send(RemoteActionCmd {
+                        path: "/api/open",
+                        body: json!({ "id": session_id }),
+                        refresh: RefreshKind::None,
+                        launch_toast_label: None,
+                    });
+                }
+                BridgeBackend::InProcess {
+                    app_state,
+                    harnesses,
+                    ..
+                } => {
+                    let (cwd, agent) = app_state
+                        .office
+                        .lock()
+                        .ok()
+                        .and_then(|o| {
+                            o.sessions
+                                .get(&session_id)
+                                .map(|s| (s.cwd.clone(), s.agent.clone()))
+                        })
+                        .or_else(|| {
+                            ui.sessions
+                                .iter()
+                                .find(|s| s.id == session_id)
+                                .map(|s| (s.dir.clone(), s.agent.clone()))
+                        })
+                        .unwrap_or_default();
+                    let toast_tx = bridge.toast_tx.clone();
+                    let svc = harnesses.clone();
+                    let title = i18n.tr("drawer.openWindowIde");
+                    std::thread::spawn(move || {
+                        let msg = if !cwd.is_empty() && std::path::Path::new(&cwd).exists() {
+                            match station_core::state::stranded::open_folder(std::path::Path::new(
+                                &cwd,
+                            )) {
+                                Ok(()) => cwd,
+                                Err(e) => e,
+                            }
+                        } else if !agent.is_empty() {
+                            match svc.open(&agent) {
+                                Ok(o) => launch_outcome_toast(&agent, &o).1,
+                                Err(e) => e.to_string(),
+                            }
+                        } else {
+                            "no folder".to_owned()
+                        };
+                        let _ = toast_tx.try_send((title, msg));
+                    });
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(i18n.tr("drawer.openWindowIde"), i18n.tr("drawer.unreachable"));
+                }
+            },
+            UiAction::SwitchAccount { session_id, target } => match &bridge.backend {
+                BridgeBackend::AttachedHttp { action_tx, .. } => {
+                    let _ = action_tx.try_send(RemoteActionCmd {
+                        path: "/api/accounts/use",
+                        body: json!({ "name": target, "id": session_id }),
+                        refresh: RefreshKind::All,
+                        launch_toast_label: None,
+                    });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    if let Ok(mut accts) = app_state.claude_accounts.lock() {
+                        let res = accts.mutate("use", &json!({ "name": target }));
+                        ui.accounts = parse_accounts_from_view(&accts.view());
+                        let ok = res.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                        let msg = if ok {
+                            i18n.tr_vars(
+                                "drawer.acct.moved",
+                                &[("to", if target.is_empty() { "Main" } else { &target })],
+                            )
+                        } else {
+                            i18n.tr("drawer.acct.failed")
+                        };
+                        ui.push_toast(i18n.tr("drawer.acct.label"), msg);
+                    }
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(i18n.tr("drawer.acct.label"), i18n.tr("drawer.unreachable"));
+                }
+            },
             UiAction::MinimizeToTray => {
                 let is_worker = tray_params.worker_mode.as_ref().is_some_and(|m| m.0);
                 bridge.notify_presence_unfocused();
@@ -3425,7 +4672,7 @@ fn process_ui_actions(
                     ui.feed.clear();
                     ui.selected_session = None;
                     if let BridgeBackend::InProcess { app_state, .. } = &bridge.backend {
-                        sync_office_core_to_ui(app_state, &mut ui);
+                        sync_office_core_to_ui(app_state, &bridge.dismissed_ci_ids, &mut ui);
                     } else if let BridgeBackend::AttachedHttp { snapshot, .. } = &bridge.backend {
                         let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         apply_remote_snapshot_to_ui(&snap, &mut ui);
@@ -4004,6 +5251,7 @@ mod tests {
                 tool: "Bash".to_owned(),
                 summary: "echo hi".to_owned(),
                 kind: "permission".to_owned(),
+                ..Default::default()
             }],
             ..RemoteSnapshot::default()
         };
@@ -4833,10 +6081,13 @@ mod tests {
             .unwrap();
         let (shutdown, _rx) = watch::channel(false);
         let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let (async_tx, async_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let (query_tx, _query_rx) = mpsc::channel(8);
         let bridge = LiveServerBridge {
             backend: BridgeBackend::AttachedHttp {
                 snapshot: Arc::new(Mutex::new(RemoteSnapshot::default())),
                 action_tx,
+                query_tx,
                 _shutdown: shutdown,
             },
             data_dir: PathBuf::from("data"),
@@ -4847,9 +6098,12 @@ mod tests {
             sys_refresh_due: true,
             banner_pushed: true,
             seen_perm_ids: HashSet::new(),
+            dismissed_ci_ids: HashSet::new(),
             last_window_focused: None,
             toast_tx,
             toast_rx,
+            async_tx,
+            async_rx,
         };
 
         let mut app = App::new();
@@ -5540,12 +6794,15 @@ mod tests {
 
         // 2. AttachedHttp mode: busy session -> POST /api/tasks/steer; resting session -> POST /api/tasks.
         let (action_tx, mut action_rx) = mpsc::channel::<RemoteActionCmd>(8);
+        let (query_tx, _query_rx) = mpsc::channel::<RemoteQueryCmd>(8);
         let (shutdown, _rx) = watch::channel(false);
         let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let (async_tx, async_rx) = mpsc::channel(TOAST_QUEUE_CAP);
         let attached_bridge = LiveServerBridge {
             backend: BridgeBackend::AttachedHttp {
                 snapshot: Arc::new(Mutex::new(RemoteSnapshot::default())),
                 action_tx,
+                query_tx,
                 _shutdown: shutdown,
             },
             data_dir: tmp.path().to_path_buf(),
@@ -5556,9 +6813,12 @@ mod tests {
             sys_refresh_due: true,
             banner_pushed: true,
             seen_perm_ids: HashSet::new(),
+            dismissed_ci_ids: HashSet::new(),
             last_window_focused: None,
             toast_tx,
             toast_rx,
+            async_tx,
+            async_rx,
         };
         let mut ui = UiState::new_live(
             station_3d::OfficeLayout::Pro,
@@ -6238,5 +7498,171 @@ mod tests {
             0,
             "PhotoBar must reappear after capture frame completes"
         );
+    }
+
+    #[test]
+    fn task5_approval_cards_and_session_drawer_actions_wire_end_to_end_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(i18n)
+            .insert_resource(UiState::default())
+            .add_event::<station_3d::WorkerSelected>()
+            .add_event::<station_3d::interact::PropActivated>()
+            .add_event::<AppExit>()
+            .add_plugins(LiveServerBridgePlugin {
+                data_dir: dir.path().to_path_buf(),
+                assets_dir: assets,
+                host: "127.0.0.1".to_owned(),
+                port: 0,
+                start_http: false,
+            });
+
+        let app_state = app
+            .world()
+            .resource::<LiveServerBridge>()
+            .in_process_state()
+            .expect("InProcess state");
+
+        // Register AskUserQuestion, ExitPlanMode, and Denied holds + a red CI card
+        let (tx_ask, mut rx_ask) = tokio::sync::oneshot::channel();
+        let (tx_plan, mut rx_plan) = tokio::sync::oneshot::channel();
+        let (tx_den, mut rx_den) = tokio::sync::oneshot::channel();
+        let ci_id = {
+            let mut office = app_state.office.lock().unwrap();
+            office.register_hold_with_input(
+                station_core::state::sessions::PendingPerm {
+                    id: "ask-1".to_owned(),
+                    sess: "s1".to_owned(),
+                    name: "claude".to_owned(),
+                    kind: "ask".to_owned(),
+                    tool_type: "ask".to_owned(),
+                    label: "Question".to_owned(),
+                    detail: "Which DB?".to_owned(),
+                    danger: None,
+                    created_at: now_ms(),
+                },
+                tx_ask,
+                Some(json!({ "questions": [{ "question": "Which DB?", "options": [{ "label": "SQLite" }] }] })),
+            );
+            office.register_hold_with_input(
+                station_core::state::sessions::PendingPerm {
+                    id: "plan-1".to_owned(),
+                    sess: "s1".to_owned(),
+                    name: "claude".to_owned(),
+                    kind: "plan".to_owned(),
+                    tool_type: "plan".to_owned(),
+                    label: "Plan".to_owned(),
+                    detail: "## Plan".to_owned(),
+                    danger: None,
+                    created_at: now_ms(),
+                },
+                tx_plan,
+                Some(json!({ "plan": "## Plan" })),
+            );
+            office.register_hold(
+                station_core::state::sessions::PendingPerm {
+                    id: "den-1".to_owned(),
+                    sess: "s1".to_owned(),
+                    name: "claude".to_owned(),
+                    kind: "denied".to_owned(),
+                    tool_type: "bash".to_owned(),
+                    label: "git push".to_owned(),
+                    detail: "git push".to_owned(),
+                    danger: None,
+                    created_at: now_ms(),
+                },
+                tx_den,
+            );
+            let card = office.chat.ci_card(
+                "s1",
+                "claude",
+                json!({ "state": "red", "wf": "Rust CI", "repo": "agents-station", "branch": "main", "sid": "s1" }),
+                now_ms(),
+            );
+            card.id
+        };
+
+        // Verify snapshot_json exposes tool_input for ask/plan holds
+        let snap = app_state.office.lock().unwrap().snapshot_json(true, "en");
+        let ask_wire = snap["perms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "ask-1")
+            .expect("ask-1 in snapshot");
+        assert!(ask_wire.get("tool_input").is_some());
+
+        // Emit all Task 5 UiActions
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            let mut ans = serde_json::Map::new();
+            ans.insert("Which DB?".to_owned(), Value::String("SQLite".to_owned()));
+            ui.push_action(UiAction::SubmitAskAnswers {
+                id: "ask-1".to_owned(),
+                answers: ans,
+            });
+            ui.push_action(UiAction::DecidePlan {
+                id: "plan-1".to_owned(),
+                approve: false,
+                feedback: "Add tests".to_owned(),
+            });
+            ui.push_action(UiAction::DecideDenied {
+                id: "den-1".to_owned(),
+                retry: true,
+            });
+            ui.push_action(UiAction::AddSessionPin {
+                session_id: "s1".to_owned(),
+                text: "Keep zero warnings".to_owned(),
+            });
+            ui.push_action(UiAction::SteerSession {
+                session_id: "s1".to_owned(),
+                text: "Also check clippy".to_owned(),
+            });
+            ui.push_action(UiAction::CiFix { id: ci_id.clone() });
+        }
+        app.update();
+
+        let ask_resp = rx_ask.try_recv().expect("ask hold resolved");
+        assert_eq!(
+            ask_resp["hookSpecificOutput"]["updatedInput"]["answers"]["Which DB?"],
+            "SQLite"
+        );
+        let plan_resp = rx_plan.try_recv().expect("plan hold resolved");
+        assert_eq!(plan_resp["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            plan_resp["hookSpecificOutput"]["permissionDecisionReason"],
+            "Add tests"
+        );
+        let den_resp = rx_den.try_recv().expect("denied hold resolved");
+        assert_eq!(den_resp["hookSpecificOutput"]["retry"], true);
+
+        {
+            let office = app_state.office.lock().unwrap();
+            assert_eq!(
+                office.pins.get("s1").map(|v| v.as_slice()),
+                Some(&["Keep zero warnings".to_owned()][..])
+            );
+            let ci_msg = office.chat.by_id(&ci_id).expect("ci card");
+            assert!(ci_msg.ci.as_ref().unwrap().get("fix").is_some());
+        }
+        assert!(
+            app_state.steer_queue.lock().unwrap().take("s1").is_some(),
+            "SteerSession must enqueue steer note"
+        );
+
+        // Remove pin
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::RemoveSessionPin {
+                session_id: "s1".to_owned(),
+                index: 0,
+            });
+        app.update();
+        assert!(!app_state.office.lock().unwrap().pins.contains_key("s1"));
     }
 }

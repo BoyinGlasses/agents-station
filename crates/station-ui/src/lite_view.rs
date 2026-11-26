@@ -971,6 +971,7 @@ mod tests {
             tool: "Bash".to_owned(),
             summary: "cargo test".to_owned(),
             kind: "permission".to_owned(),
+            ..Default::default()
         }];
 
         let grouped = group_sessions(&sessions, &perms, None, "");
@@ -1110,6 +1111,7 @@ mod tests {
             tool: "Bash".to_owned(),
             summary: "rm -rf tmp".to_owned(),
             kind: "permission".to_owned(),
+            ..Default::default()
         });
         let raw_n = egui::RawInput {
             events: vec![key_event(Key::N)],
@@ -1373,6 +1375,7 @@ mod tests {
             tool: "Bash".to_owned(),
             summary: "rm -rf tmp".to_owned(),
             kind: "permission".to_owned(),
+            ..Default::default()
         });
         let out2 = ctx.run(raw0, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
