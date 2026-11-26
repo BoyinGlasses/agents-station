@@ -5554,6 +5554,23 @@
     },
     "approval": "Approval needed",
     "streamerRedacted": "Hidden in streamer mode",
-    "planMonth": "30d: {usd}"
+    "planMonth": "30d: {usd}",
+    "burn30d": "30 days",
+    "privateWs": "Private WS: {mb} MB",
+    "addAppTitle": "Add custom desktop app",
+    "addAppDesc": "Register any desktop executable (.exe or .lnk) in the Apps dock:",
+    "addAppId": "App ID (slug)",
+    "addAppLabel": "Display name",
+    "addAppPath": "Executable or shortcut path",
+    "addAppSave": "Save app",
+    "addAppAdded": "Custom app added",
+    "customApps": "Custom apps",
+    "remove": "Remove",
+    "saveSeat": "Save current",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "emailLabel": "Email (optional)",
+    "accountsOpen": "Manage AI accounts",
+    "pinWeak": "PIN must be 6–10 digits and not sequential or repeated"
   }
 }

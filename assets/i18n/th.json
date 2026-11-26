@@ -5523,6 +5523,23 @@
     },
     "approval": "รอการอนุมัติ",
     "streamerRedacted": "ซ่อนในโหมดสตรีมเมอร์",
-    "planMonth": "30 วัน: {usd}"
+    "planMonth": "30 วัน: {usd}",
+    "burn30d": "30 วัน",
+    "privateWs": "หน่วยความจำโปรเซส: {mb} MB",
+    "addAppTitle": "เพิ่มแอปเดสก์ท็อป",
+    "addAppDesc": "ลงทะเบียนไฟล์เรียกใช้ (.exe หรือ .lnk) ในแถบแอป:",
+    "addAppId": "รหัสแอป (slug)",
+    "addAppLabel": "ชื่อที่แสดง",
+    "addAppPath": "เส้นทางไฟล์หรือทางลัด",
+    "addAppSave": "บันทึกแอป",
+    "addAppAdded": "เพิ่มแอปแล้ว",
+    "customApps": "แอปที่กำหนดเอง",
+    "remove": "ลบ",
+    "saveSeat": "บันทึกเซสชันนี้",
+    "moveUp": "เลื่อนขึ้น",
+    "moveDown": "เลื่อนลง",
+    "emailLabel": "อีเมล (ไม่บังคับ)",
+    "accountsOpen": "จัดการบัญชี AI",
+    "pinWeak": "PIN ต้องมี 6–10 หลัก และไม่ใช่เลขเรียงหรือเลขซ้ำ"
   }
 }

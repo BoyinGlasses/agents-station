@@ -5245,6 +5245,23 @@
     },
     "approval": "Cần bạn duyệt",
     "streamerRedacted": "Đã ẩn ở chế độ quay màn hình",
-    "planMonth": "30 ngày: {usd}"
+    "planMonth": "30 ngày: {usd}",
+    "burn30d": "30 ngày",
+    "privateWs": "RAM riêng tiến trình: {mb} MB",
+    "addAppTitle": "Thêm ứng dụng máy tính",
+    "addAppDesc": "Đăng ký tệp chạy (.exe hoặc .lnk) vào thanh Ứng dụng:",
+    "addAppId": "Mã ứng dụng (slug)",
+    "addAppLabel": "Tên hiển thị",
+    "addAppPath": "Đường dẫn tệp chạy / lối tắt",
+    "addAppSave": "Lưu ứng dụng",
+    "addAppAdded": "Đã thêm ứng dụng",
+    "customApps": "Ứng dụng tùy chỉnh",
+    "remove": "Xóa",
+    "saveSeat": "Lưu phiên này",
+    "moveUp": "Đẩy lên",
+    "moveDown": "Đẩy xuống",
+    "emailLabel": "Email (không bắt buộc)",
+    "accountsOpen": "Quản lý tài khoản AI",
+    "pinWeak": "Mã PIN phải gồm 6–10 chữ số, không liên tiếp hoặc trùng lặp"
   }
 }
