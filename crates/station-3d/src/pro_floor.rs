@@ -363,16 +363,16 @@ pub fn spawn_pro_floor(
     }
     spawn_box(commands, palette, metal.clone(), Vec3::new(-3.6, 2.17, 3.3), Vec3::new(0.09, 0.09, 1.36));
 
-    // Door plaques (`pro/floor.js:98-101`)
-    for (x, y, z, title) in [
-        (-3.88_f32, 1.62_f32, -2.96_f32, "DIRECTOR"),
-        (1.55, 1.62, -2.96, "MEETING ROOM"),
-        (4.66, 0.8, -2.912, "LIBRARY"),
+    // Door plaques (`pro/floor.js:98-101`; English subtitles are empty in Oracle `en/world.js:10-16`)
+    for (x, y, z, title, sub) in [
+        (-3.88_f32, 1.62_f32, -2.96_f32, "DIRECTOR", ""),
+        (1.55, 1.62, -2.96, "MEETING ROOM", ""),
+        (4.66, 0.8, -2.912, "LIBRARY", ""),
     ] {
         let pm = palette.textured_unlit(
             images,
             materials,
-            draw_room_plaque(title, None, "#1E232B", "#F3EFE8", "#A9B2C0", None, fonts),
+            draw_room_plaque(title, Some(sub), "#1E232B", "#F3EFE8", "#A9B2C0", None, fonts),
         );
         spawn_quad(commands, palette, pm, Vec3::new(x, y, z), Vec2::new(0.62, 0.2), Quat::IDENTITY);
     }
@@ -666,8 +666,8 @@ pub fn spawn_pro_floor(
         // Toilet bowl + tank
         spawn_cyl(commands, palette, tile_m.clone(), Vec3::new(-7.5, 0.2, zc), 0.3, 0.4);
         spawn_box(commands, palette, tile_m.clone(), Vec3::new(-7.78, 0.55, zc), Vec3::new(0.18, 0.34, 0.36));
-        // Pivoting door (vacant stalls sit slightly ajar inward like Oracle layout-pro.jpg) + green/red indicator
-        let ind_m = palette.emissive(materials, "#3DDC84", 0.9);
+        // Pivoting door (vacant stalls sit slightly ajar inward like Oracle layout-pro.jpg) + distinct indicator
+        let ind_m = palette.owned_emissive(materials, "#3DDC84", 0.9);
         let pivot = commands
             .spawn((
                 WorldEntity,

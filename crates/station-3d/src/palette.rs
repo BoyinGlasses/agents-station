@@ -199,6 +199,32 @@ impl WorldPalette {
         h
     }
 
+    /// Allocates a non-deduplicated emissive material tracked in `owned_materials` so dynamic
+    /// per-entity indicators (e.g. each restroom stall lock light) can mutate independently and
+    /// still purge cleanly on `unload_full_office_world`.
+    pub fn owned_emissive(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+        strength: f32,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        let lin = Color::srgb_u8(r, g, b).to_linear();
+        let h = assets.add(StandardMaterial {
+            base_color: Color::srgb_u8(r, g, b),
+            emissive: LinearRgba::new(
+                lin.red * strength,
+                lin.green * strength,
+                lin.blue * strength,
+                1.0,
+            ),
+            perceptual_roughness: 0.3,
+            ..default()
+        });
+        self.owned_materials.push(h.clone());
+        h
+    }
+
     /// Uploads a `station-canvas2d` RGBA8 surface directly to GPU with `RenderAssetUsages::RENDER_WORLD`,
     /// dropping the CPU buffer immediately after upload for minimum RAM usage.
     pub fn upload_surface(

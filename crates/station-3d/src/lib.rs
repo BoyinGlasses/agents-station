@@ -623,12 +623,22 @@ mod tests {
                 .count(),
             1
         );
+        let stall_mats: Vec<Handle<StandardMaterial>> = world
+            .query::<&pro_floor::RestroomStall>()
+            .iter(&world)
+            .map(|s| s.indicator_mat.clone())
+            .collect();
+        assert_eq!(stall_mats.len(), 2);
+        assert_ne!(
+            stall_mats[0], stall_mats[1],
+            "each RestroomStall must own a distinct indicator_mat so toggling one stall never mutates the other"
+        );
         assert_eq!(
             world
-                .query_filtered::<Entity, With<pro_floor::RestroomStall>>()
+                .query_filtered::<Entity, With<pro_floor::CoolerScreen>>()
                 .iter(&world)
                 .count(),
-            2
+            1
         );
         assert_eq!(
             world
@@ -753,5 +763,35 @@ mod tests {
                 .count(),
             4
         );
+
+        // Unload HQ and verify 0 leaked meshes/materials/images
+        let hq_ents: Vec<Entity> = world
+            .query_filtered::<Entity, With<WorldEntity>>()
+            .iter(&world)
+            .collect();
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = world.remove_resource::<WorldPalette>();
+                    let mut ba = world.remove_resource::<BackdropAssets>();
+                    let ibl = world.remove_resource::<OfficeIbl>();
+                    let mut cmds = world.commands();
+                    unload_full_office_world(
+                        &mut cmds,
+                        hq_ents,
+                        pal.as_mut(),
+                        ba.as_mut(),
+                        ibl.as_ref(),
+                        &mut meshes,
+                        &mut mats,
+                        &mut imgs,
+                    );
+                });
+            });
+        });
+        world.flush();
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
+        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 0);
     }
 }

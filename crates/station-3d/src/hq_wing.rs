@@ -152,19 +152,22 @@ pub fn spawn_hq_wing(
     tiles: &SharedSurfaceTiles,
     spec: &LayoutSpec,
 ) {
-    let len = WING_Z1 - WING_Z0;
-    let mid = (WING_Z0 + WING_Z1) * 0.5 + 0.15;
+    // Start exterior slab/wall/cap flush at z = 9.30 (Pro core ends at 9.30) to avoid coplanar z-fighting.
+    let ext_len = 16.85_f32;
+    let ext_mid = 17.725_f32;
+    let skirt_len = 17.15_f32;
+    let skirt_mid = 17.575_f32;
 
     let slab = palette.mat(materials, "#7A5A3E", 0.65, 0.0);
     let wall = palette.mat(materials, "#EEE8DE", 0.9, 0.0);
     let cap = palette.mat(materials, "#E2D9C8", 0.75, 0.0);
     let skirt = palette.mat(materials, "#6E5440", 0.65, 0.0);
 
-    let wing_slab = spawn_box(commands, palette, slab, Vec3::new(3.0, -0.25, mid), Vec3::new(22.6, 0.5, len));
+    let wing_slab = spawn_box(commands, palette, slab, Vec3::new(3.0, -0.25, ext_mid), Vec3::new(22.6, 0.5, ext_len));
     commands.entity(wing_slab).insert(HqWing);
-    spawn_box(commands, palette, wall, Vec3::new(-8.15, 2.1, mid), Vec3::new(0.3, 4.2, len));
-    spawn_box(commands, palette, cap, Vec3::new(-8.15, 4.25, mid), Vec3::new(0.42, 0.14, len));
-    spawn_box(commands, palette, skirt, Vec3::new(-7.97, 0.09, mid), Vec3::new(0.06, 0.18, len));
+    spawn_box(commands, palette, wall, Vec3::new(-8.15, 2.1, ext_mid), Vec3::new(0.3, 4.2, ext_len));
+    spawn_box(commands, palette, cap, Vec3::new(-8.15, 4.25, ext_mid), Vec3::new(0.42, 0.14, ext_len));
+    spawn_box(commands, palette, skirt, Vec3::new(-7.97, 0.09, skirt_mid), Vec3::new(0.06, 0.18, skirt_len));
 
     for z in [12.4_f32, 16.8, 20.6, 24.4] {
         spawn_wall_window(commands, palette, materials, tiles, -7.98, 2.1, z, 1.5, 1.5, FRAC_PI_2, 2);
@@ -177,16 +180,32 @@ pub fn spawn_hq_wing(
         spawn_floor_zone_tiled(commands, palette, materials, tiles.speckle.clone(), d.x0, d.x1, d.z0, d.z1, 0.003, 0.8, DEPT_CARPETS[i % 4], 0.88);
     }
 
-    // Wing pod top trim rails + end storage cabinets (`pro/floor.js:291-298` shared pods)
+    // Wing pod carpet pads (`pro/floor.js:43`), top trim rails, storage units + Snake plant & Books (`pro/floor.js:291-298`)
     let metal = palette.mat(materials, "#2B2F36", 0.35, 0.65);
     let stor_m = palette.mat(materials, "#E4DFD6", 0.6, 0.0);
     let stor_d = palette.mat(materials, "#D6D0C5", 0.6, 0.0);
     for &[cx, cz] in spec.pods.iter().skip(3) {
+        spawn_floor_zone_tiled(
+            commands,
+            palette,
+            materials,
+            tiles.server_grid.clone(),
+            cx - 2.0,
+            cx + 2.0,
+            cz - 1.75,
+            cz + 1.75,
+            0.006,
+            1.2,
+            "#9AA2AE",
+            0.86,
+        );
         spawn_box(commands, palette, metal.clone(), Vec3::new(cx, 1.205, cz), Vec3::new(3.08, 0.025, 0.06));
         spawn_box(commands, palette, stor_m.clone(), Vec3::new(cx + 1.72, 0.31, cz), Vec3::new(0.42, 0.62, 1.4));
         for dz in [-0.35_f32, 0.35] {
             spawn_box(commands, palette, stor_d.clone(), Vec3::new(cx + 1.94, 0.31, cz + dz), Vec3::new(0.02, 0.5, 0.6));
         }
+        spawn_typed_plant(commands, palette, materials, cx + 1.72, 0.62, cz + 0.32, 0.4, PlantKind::Snake);
+        spawn_trinket(commands, palette, materials, tiles, TrinketKind::Books, cx + 1.72, 0.62, cz - 0.3, 0.3);
     }
 
     // Partitions (`pro/wing.js:95-105`)
