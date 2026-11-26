@@ -11,6 +11,7 @@ pulldown-cmark.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 station-3d = { path = "../station-3d" }
+station-canvas2d = { path = "../station-canvas2d" }
 station-core = { path = "../station-core" }
 station-launcher = { path = "../station-launcher" }
 ttf-parser.workspace = true
