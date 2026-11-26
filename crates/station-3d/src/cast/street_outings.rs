@@ -8,15 +8,15 @@
 
 pub use crate::cast::OutingShopKind;
 use crate::cast::{
-    ActiveRoutine, CastClock, CastEvents, RoutineCoordinator, RoutineKind,
-    is_worker_recalled, is_worker_resting, sync_lazy_prop,
+    ActiveRoutine, CastClock, CastEvents, RoutineCoordinator, RoutineKind, is_worker_recalled,
+    is_worker_resting, return_arrive_anim, sync_home_lifecycle, sync_lazy_prop,
 };
 use crate::chibi::{ChibiWorker, WorkerAnim};
 use crate::chibi_meshes::ChibiMeshCache;
 use crate::chibi_props::{ActivePropEntity, PropKind};
 use crate::nav::NavGraph;
 use crate::palette::{WorldEntity, WorldPalette};
-use crate::people::{LiveSessionWorker, NavWalker, SubagentWorker};
+use crate::people::{LiveSessionWorker, NavWalker, SubagentWorker, WorkerLifecycle};
 use bevy::prelude::*;
 
 pub const NHAU_CHEERS_LINE: &str = "1, 2, 3 dô!";
@@ -41,6 +41,7 @@ pub struct StreetOutingsState {
     pub outing_active: bool,
     pub outing_shop: Option<OutingShopKind>,
     pub outings_completed: u32,
+    pub next_auto_outing_secs: f32,
     pub nhau_active: bool,
     pub nhau_day: Option<u32>,
     pub nhau_toasts: u32,
@@ -66,10 +67,25 @@ pub struct StreetOutingsState {
     pub evswap_completed: u32,
 }
 
+fn is_street_routine(kind: RoutineKind) -> bool {
+    matches!(
+        kind,
+        RoutineKind::Outings
+            | RoutineKind::Nhau
+            | RoutineKind::Payday
+            | RoutineKind::Photobooth
+            | RoutineKind::Pickleball
+            | RoutineKind::EvSwap
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn send_home(
     nav: &NavGraph,
+    live: &LiveSessionWorker,
     chibi: &ChibiWorker,
     walker: &mut NavWalker,
+    lifecycle: Option<Mut<'_, WorkerLifecycle>>,
     vis: &mut Visibility,
     routine: &mut ActiveRoutine,
     recalled: bool,
@@ -77,11 +93,8 @@ fn send_home(
     routine.returning = true;
     routine.desired_prop = None;
     *vis = Visibility::Visible;
-    let anim = if recalled {
-        WorkerAnim::Work
-    } else {
-        WorkerAnim::Sleep
-    };
+    let anim = return_arrive_anim(live, recalled);
+    sync_home_lifecycle(lifecycle, anim);
     walker.set_destination(
         nav,
         chibi.base_pos,
@@ -112,6 +125,7 @@ pub fn step_street_outings_system(
             &LiveSessionWorker,
             &mut ChibiWorker,
             &mut NavWalker,
+            Option<&mut WorkerLifecycle>,
             &mut Visibility,
             Option<&mut ActiveRoutine>,
             Option<&ActivePropEntity>,
@@ -151,6 +165,59 @@ pub fn step_street_outings_system(
         state.payday_trips_today = 0;
     }
 
+    // If the backdrop switched away from City, immediately abort all active street outings,
+    // restore visibility, stow props, despawn photobooth flash light, and walk participants home.
+    if !events.city_street_available {
+        let mut photo_returning = 0usize;
+        for (ent, live, chibi, mut walker, lifecycle, mut vis, routine_opt, active_prop) in
+            &mut workers_q
+        {
+            let Some(mut routine) = routine_opt else {
+                continue;
+            };
+            if !is_street_routine(routine.kind) {
+                continue;
+            }
+            if !routine.returning {
+                send_home(
+                    nav,
+                    live,
+                    &chibi,
+                    &mut walker,
+                    lifecycle,
+                    &mut vis,
+                    &mut routine,
+                    is_worker_recalled(live),
+                );
+            }
+            sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
+            if walker.is_walking() {
+                if routine.kind == RoutineKind::Photobooth {
+                    photo_returning += 1;
+                }
+            } else {
+                *vis = Visibility::Visible;
+                commands.entity(ent).remove::<ActiveRoutine>();
+            }
+        }
+        for (fe, _) in &flash_q {
+            commands.entity(fe).try_despawn();
+        }
+        state.photobooth_flash_intensity = 0.0;
+        state.photobooth_stage = if photo_returning > 0 {
+            PhotoboothStage::Returning
+        } else {
+            PhotoboothStage::Idle
+        };
+        state.outing_active = false;
+        state.outing_shop = None;
+        state.nhau_active = false;
+        state.payday_active = false;
+        state.pickle_active = false;
+        state.evswap_active = false;
+        return;
+    }
+
     // Decay photobooth flash intensity smoothly
     if state.photobooth_flash_intensity > 0.0 {
         state.photobooth_flash_intensity = (state.photobooth_flash_intensity - dt * 3.5).max(0.0);
@@ -163,30 +230,29 @@ pub fn step_street_outings_system(
     let mut nhau_done = false;
     let mut payday_active = false;
     let mut photo_total = 0usize;
+    let mut photo_returning = 0usize;
     let mut photo_arrived = 0usize;
     let mut pickle_total = 0usize;
     let mut pickle_playing = 0usize;
     let mut evswap_active = false;
 
-    for (ent, live, chibi, mut walker, mut vis, routine_opt, active_prop) in &mut workers_q {
+    for (ent, live, chibi, mut walker, lifecycle, mut vis, routine_opt, active_prop) in
+        &mut workers_q
+    {
         let Some(mut routine) = routine_opt else {
             continue;
         };
-        if !matches!(
-            routine.kind,
-            RoutineKind::Outings
-                | RoutineKind::Nhau
-                | RoutineKind::Payday
-                | RoutineKind::Photobooth
-                | RoutineKind::Pickleball
-                | RoutineKind::EvSwap
-        ) {
+        if !is_street_routine(routine.kind) {
             continue;
         }
 
         if routine.returning {
             sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
-            if !walker.is_walking() {
+            if walker.is_walking() {
+                if routine.kind == RoutineKind::Photobooth {
+                    photo_returning += 1;
+                }
+            } else {
                 *vis = Visibility::Visible;
                 commands.entity(ent).remove::<ActiveRoutine>();
             }
@@ -194,8 +260,21 @@ pub fn step_street_outings_system(
         }
 
         if is_worker_recalled(live) {
-            send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, true);
+            let was_photo = routine.kind == RoutineKind::Photobooth;
+            send_home(
+                nav,
+                live,
+                &chibi,
+                &mut walker,
+                lifecycle,
+                &mut vis,
+                &mut routine,
+                true,
+            );
             sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
+            if was_photo && walker.is_walking() {
+                photo_returning += 1;
+            }
             continue;
         }
 
@@ -214,7 +293,16 @@ pub fn step_street_outings_system(
                         routine.dwell_secs = 4.0;
                     } else {
                         state.outings_completed += 1;
-                        send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                        send_home(
+                            nav,
+                            live,
+                            &chibi,
+                            &mut walker,
+                            lifecycle,
+                            &mut vis,
+                            &mut routine,
+                            false,
+                        );
                     }
                 }
             }
@@ -241,7 +329,16 @@ pub fn step_street_outings_system(
                         routine.stage = 1;
                         routine.dwell_secs = 4.5;
                     } else {
-                        send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                        send_home(
+                            nav,
+                            live,
+                            &chibi,
+                            &mut walker,
+                            lifecycle,
+                            &mut vis,
+                            &mut routine,
+                            false,
+                        );
                     }
                 }
             }
@@ -264,7 +361,16 @@ pub fn step_street_outings_system(
                     } else if routine.stage == 1 {
                         pickle_playing += 1;
                         if routine.dwell_secs <= 0.0 {
-                            send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                            send_home(
+                                nav,
+                                live,
+                                &chibi,
+                                &mut walker,
+                                lifecycle,
+                                &mut vis,
+                                &mut routine,
+                                false,
+                            );
                         }
                     }
                 }
@@ -278,7 +384,16 @@ pub fn step_street_outings_system(
                         routine.dwell_secs = 4.0;
                     } else {
                         state.evswap_completed += 1;
-                        send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                        send_home(
+                            nav,
+                            live,
+                            &chibi,
+                            &mut walker,
+                            lifecycle,
+                            &mut vis,
+                            &mut routine,
+                            false,
+                        );
                     }
                 }
             }
@@ -313,12 +428,23 @@ pub fn step_street_outings_system(
             }
             state.nhau_grab_home_dispatched = true;
             state.nhau_active = false;
-            for (ent, _, chibi, mut walker, mut vis, routine_opt, active_prop) in &mut workers_q {
+            for (ent, live, chibi, mut walker, lifecycle, mut vis, routine_opt, active_prop) in
+                &mut workers_q
+            {
                 if let Some(mut r) = routine_opt
                     && r.kind == RoutineKind::Nhau
                     && !r.returning
                 {
-                    send_home(nav, &chibi, &mut walker, &mut vis, &mut r, false);
+                    send_home(
+                        nav,
+                        live,
+                        &chibi,
+                        &mut walker,
+                        lifecycle,
+                        &mut vis,
+                        &mut r,
+                        false,
+                    );
                     sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
                 }
             }
@@ -336,14 +462,17 @@ pub fn step_street_outings_system(
         }
     }
 
-    // Advance Korean Photobooth 4-frame flash countdown
+    // Advance Korean Photobooth 4-frame flash countdown (keep `Returning` alive while walking back)
     let mut finish_photobooth = false;
     if photo_total == 0 {
-        if state.photobooth_stage != PhotoboothStage::Idle {
-            state.photobooth_stage = PhotoboothStage::Idle;
-        }
         for (fe, _) in &flash_q {
             commands.entity(fe).try_despawn();
+        }
+        state.photobooth_flash_intensity = 0.0;
+        if photo_returning > 0 {
+            state.photobooth_stage = PhotoboothStage::Returning;
+        } else if state.photobooth_stage != PhotoboothStage::Idle {
+            state.photobooth_stage = PhotoboothStage::Idle;
         }
     } else {
         match state.photobooth_stage {
@@ -372,7 +501,8 @@ pub fn step_street_outings_system(
                 if state.photobooth_frame_timer >= 1.1 {
                     state.photobooth_frame_timer = 0.0;
                     state.photobooth_frame = state.photobooth_frame.saturating_add(1);
-                    state.photobooth_flashes_fired = state.photobooth_flashes_fired.saturating_add(1);
+                    state.photobooth_flashes_fired =
+                        state.photobooth_flashes_fired.saturating_add(1);
                     state.photobooth_flash_intensity = 1.0;
                     if state.photobooth_flashes_fired >= 4 {
                         state.photobooth_stage = PhotoboothStage::Printed;
@@ -396,12 +526,24 @@ pub fn step_street_outings_system(
         for (fe, _) in &flash_q {
             commands.entity(fe).try_despawn();
         }
-        for (ent, _, chibi, mut walker, mut vis, routine_opt, active_prop) in &mut workers_q {
+        state.photobooth_flash_intensity = 0.0;
+        for (ent, live, chibi, mut walker, lifecycle, mut vis, routine_opt, active_prop) in
+            &mut workers_q
+        {
             if let Some(mut r) = routine_opt
                 && r.kind == RoutineKind::Photobooth
                 && !r.returning
             {
-                send_home(nav, &chibi, &mut walker, &mut vis, &mut r, false);
+                send_home(
+                    nav,
+                    live,
+                    &chibi,
+                    &mut walker,
+                    lifecycle,
+                    &mut vis,
+                    &mut r,
+                    false,
+                );
                 sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
             }
         }
@@ -414,14 +556,10 @@ pub fn step_street_outings_system(
     state.payday_active = payday_active;
     state.evswap_active = evswap_active;
 
-    if !events.city_street_available {
-        return;
-    }
-
     // Pass 2: Collect free resting workers into a fixed stack buffer (zero heap allocations).
     let mut free_buf: [Option<(Entity, Vec3, f32, bool)>; 16] = [None; 16];
     let mut free_len = 0usize;
-    for (ent, live, chibi, walker, _, routine_opt, _) in &workers_q {
+    for (ent, live, chibi, walker, _, _, routine_opt, _) in &workers_q {
         if free_len >= free_buf.len() {
             break;
         }
@@ -461,7 +599,7 @@ pub fn step_street_outings_system(
                 if !coord.claim(ent) {
                     continue;
                 }
-                if let Ok((_, _, chibi, mut walker, _, _, _)) = workers_q.get_mut(ent) {
+                if let Ok((_, _, chibi, mut walker, _, _, _, _)) = workers_q.get_mut(ent) {
                     walker.set_destination(
                         nav,
                         chibi.base_pos,
@@ -509,7 +647,7 @@ pub fn step_street_outings_system(
             } else {
                 PropKind::Phone
             };
-            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(
                     nav,
                     chibi.base_pos,
@@ -551,7 +689,8 @@ pub fn step_street_outings_system(
         if let Some((ent, home_pos, home_yaw, home_sit)) = free_buf[next_free] {
             next_free += 1;
             if coord.claim(ent) {
-                if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+                if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent)
+                {
                     walker.set_destination(
                         nav,
                         chibi.base_pos,
@@ -584,25 +723,35 @@ pub fn step_street_outings_system(
         }
     }
 
-    // 4. Convenience-store snack run (`outings.js`: GS25 / Circle K / Mixue / etc.)
-    let auto_shop = if events.force_outing.is_some() {
-        events.force_outing.take()
-    } else if events.ambient_temp_c >= 32.0 && (750..1050).contains(&m) {
-        Some(OutingShopKind::Mixue)
-    } else if m >= 1320 || m < 120 {
-        Some(OutingShopKind::CircleK)
+    // 4. Convenience-store snack run (`outings.js`: consume `force_outing` ONLY on dispatch; cooldown auto runs)
+    let shop_candidate = if let Some(shop) = events.force_outing {
+        Some((shop, true))
+    } else if clock.sim_secs >= state.next_auto_outing_secs {
+        if events.ambient_temp_c >= 32.0 && (750..1050).contains(&m) {
+            Some((OutingShopKind::Mixue, false))
+        } else if m >= 1320 || m < 120 {
+            Some((OutingShopKind::CircleK, false))
+        } else {
+            None
+        }
     } else {
         None
     };
     if !state.outing_active
-        && let Some(shop) = auto_shop
+        && let Some((shop, is_forced)) = shop_candidate
         && free_len.saturating_sub(next_free) >= 1
     {
         if let Some((ent, home_pos, home_yaw, home_sit)) = free_buf[next_free] {
             next_free += 1;
             if coord.claim(ent) {
+                if is_forced {
+                    events.force_outing = None;
+                } else {
+                    state.next_auto_outing_secs = clock.sim_secs + 360.0;
+                }
                 let prop = shop.prop_kind();
-                if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+                if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent)
+                {
                     walker.set_destination(
                         nav,
                         chibi.base_pos,
@@ -646,7 +795,8 @@ pub fn step_street_outings_system(
         if let Some((ent, home_pos, home_yaw, home_sit)) = free_buf[next_free] {
             next_free += 1;
             if coord.claim(ent) {
-                if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+                if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent)
+                {
                     walker.set_destination(
                         nav,
                         chibi.base_pos,
@@ -703,7 +853,7 @@ pub fn step_street_outings_system(
             if !coord.claim(ent) {
                 continue;
             }
-            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(
                     nav,
                     chibi.base_pos,
@@ -864,6 +1014,92 @@ mod tests {
         assert!(
             st.photobooth_strips_printed >= 1,
             "Korean photobooth must print a release strip after 4 frames"
+        );
+    }
+
+    #[test]
+    fn photobooth_recall_mid_shooting_restores_visibility_and_despawns_flash_light() {
+        let mut world = build_pro_world(2);
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                begin_cast_tick_system,
+                step_street_outings_system,
+                step_nav_walkers_system,
+            )
+                .chain(),
+        );
+
+        world.resource_mut::<CastClock>().minutes = 14 * 60;
+        world.resource_mut::<CastEvents>().release_tag = Some("v3.0.0".to_owned());
+
+        // Advance until Shooting stage is active and workers are Hidden inside the street booth
+        let mut reached_shooting = false;
+        for _ in 0..160 {
+            tick(&mut world, &mut sched, 1, 100);
+            if world.resource::<StreetOutingsState>().photobooth_stage == PhotoboothStage::Shooting
+            {
+                tick(&mut world, &mut sched, 1, 100);
+                reached_shooting = true;
+                break;
+            }
+        }
+        assert!(reached_shooting, "Photobooth must reach Shooting stage");
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<PhotoboothFlashLight>>()
+                .iter(&world)
+                .count(),
+            1,
+            "PhotoboothFlashLight must exist during Shooting"
+        );
+        assert!(
+            world
+                .query_filtered::<&Visibility, With<LiveSessionWorker>>()
+                .iter(&world)
+                .all(|v| *v == Visibility::Hidden),
+            "Photobooth participants should be hidden while shooting downstairs"
+        );
+
+        // Recall both workers back to work ("wait" status) mid-Shooting!
+        for mut live in world.query::<&mut LiveSessionWorker>().iter_mut(&mut world) {
+            live.status = "wait".to_owned();
+        }
+        tick(&mut world, &mut sched, 1, 100);
+
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<PhotoboothFlashLight>>()
+                .iter(&world)
+                .count(),
+            0,
+            "Recalling Photobooth workers mid-Shooting must despawn PhotoboothFlashLight"
+        );
+        assert!(
+            world
+                .query_filtered::<&Visibility, With<LiveSessionWorker>>()
+                .iter(&world)
+                .all(|v| *v == Visibility::Visible),
+            "Recalled Photobooth workers must immediately restore Visibility::Visible"
+        );
+        assert_eq!(
+            world.resource::<StreetOutingsState>().photobooth_stage,
+            PhotoboothStage::Returning,
+            "Photobooth stage must stay Returning while recalled workers walk back"
+        );
+
+        // Finish return walk -> stage transitions cleanly to Idle and workers enter Wait anim
+        tick(&mut world, &mut sched, 160, 100);
+        assert_eq!(
+            world.resource::<StreetOutingsState>().photobooth_stage,
+            PhotoboothStage::Idle
+        );
+        assert!(
+            world
+                .query_filtered::<&ChibiWorker, With<LiveSessionWorker>>()
+                .iter(&world)
+                .all(|c| c.anim == WorkerAnim::Wait),
+            "Recalled worker with status='wait' must arrive in WorkerAnim::Wait"
         );
     }
 
