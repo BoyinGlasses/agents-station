@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-ab_glyph.workspace = true
 anyhow.workspace = true
+cosmic-text.workspace = true
 image.workspace = true
 qrcode.workspace = true
 resvg.workspace = true
