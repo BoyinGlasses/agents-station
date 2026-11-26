@@ -123,6 +123,7 @@ fn register_office_runtime(
                 furniture::animate_furniture_system,
                 props::animate_props_system.before(lights::LightingSyncSet),
                 props_detail::cat::animate_cat_system,
+                props_detail::leisure::animate_leisure_system,
                 props_detail::microwave::animate_microwaves_system,
                 props_detail::shredder_cups::animate_shredder_bins_and_cups_system,
                 people::animate_chibis_system,

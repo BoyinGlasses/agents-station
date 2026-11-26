@@ -352,6 +352,66 @@ impl WorldPalette {
         mat
     }
 
+    /// Uploads a `MAIN_WORLD | RENDER_WORLD` nearest-neighbor pixel-art texture tracked in
+    /// `owned_images` / `owned_materials` so systems can mutate `Image.data` in-place via
+    /// `copy_from_slice` with zero allocations per frame and zero leaks on unload.
+    pub fn dynamic_pixel_screen(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        width: u32,
+        height: u32,
+        initial_rgba: &[u8],
+    ) -> (Handle<Image>, Handle<StandardMaterial>) {
+        let mut img = Image::new(
+            Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            initial_rgba.to_vec(),
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::ClampToEdge,
+            address_mode_v: ImageAddressMode::ClampToEdge,
+            mag_filter: ImageFilterMode::Nearest,
+            min_filter: ImageFilterMode::Nearest,
+            mipmap_filter: ImageFilterMode::Nearest,
+            ..default()
+        });
+        let tex = images.add(img);
+        self.owned_images.push(tex.clone());
+        let mat = materials.add(StandardMaterial {
+            base_color_texture: Some(tex.clone()),
+            unlit: true,
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        (tex, mat)
+    }
+
+    /// Creates an unlit additive-blended textured material reusing an uploaded image handle,
+    /// tracked in `owned_materials` so `unload_full_office_world` leaves zero leaked assets.
+    pub fn textured_additive_unlit(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        tex: Handle<Image>,
+        tint: Color,
+    ) -> Handle<StandardMaterial> {
+        let mat = materials.add(StandardMaterial {
+            base_color: tint,
+            base_color_texture: Some(tex),
+            alpha_mode: AlphaMode::Add,
+            unlit: true,
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        mat
+    }
+
     /// Creates a double-sided PBR material reusing an uploaded texture handle tinted by `tint_hex`.
     pub fn tinted_textured_double_sided(
         &mut self,

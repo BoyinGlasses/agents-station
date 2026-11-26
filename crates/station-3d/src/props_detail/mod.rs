@@ -1,4 +1,5 @@
 pub mod cat;
+pub mod leisure;
 pub mod microwave;
 pub mod shredder_cups;
 

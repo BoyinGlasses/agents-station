@@ -2,19 +2,13 @@ use crate::interact::{InteractiveProp, PropActivated};
 use crate::layout::{DeskCoord, LayoutSpec};
 use crate::life::{OfficeLifeState, SeasonTheme};
 use crate::lights::LightingState;
-use crate::palette::{
-    WorldEntity, WorldPalette, spawn_box, spawn_box_rot, spawn_cyl, spawn_quad, spawn_sphere,
-};
+use crate::palette::{WorldEntity, WorldPalette, spawn_cyl};
 use crate::props_detail::PropsLiveTelemetry;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use station_canvas2d::FontEngine;
 use station_canvas2d::boards_and_social::{DutyBoardInput, DutyRowInput, draw_duty_board};
-use station_canvas2d::office_surfaces::{
-    TvStatsInput, draw_arcade_frame, draw_arcade_marquee, draw_dev_server_badge,
-    draw_game_tv_standby, draw_karaoke_band, draw_karaoke_qr_badge, draw_karaoke_screen,
-    draw_stats_tv,
-};
+use station_canvas2d::office_surfaces::draw_dev_server_badge;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 pub use crate::props_detail::cat::OfficeCat;
@@ -211,340 +205,13 @@ pub fn spawn_all_props(
     fonts: &mut FontEngine,
     spec: &LayoutSpec,
 ) {
-    let metal = palette.mat(materials, "#2B2F36", 0.35, 0.65);
-
-    // 1. Live stats TV (tv.js — upgraded in Task 6)
-    {
-        let [tx, ty, tz, try_] = spec.tv;
-        let rot = Quat::from_rotation_y(try_);
-        let fwd = rot * Vec3::Z;
-        let bezel = palette.mat(materials, "#15181E", 0.4, 0.15);
-        let tv_ent = spawn_box_rot(
-            commands,
-            palette,
-            bezel,
-            Vec3::new(tx, ty, tz),
-            Vec3::new(2.32, 1.34, 0.08),
-            rot,
-        );
-        commands
-            .entity(tv_ent)
-            .insert(InteractiveProp::new("tv", "server", "Live Machine Stats TV"));
-
-        let tv_surf = draw_stats_tv(
-            &TvStatsInput {
-                title: "AGENTS STATION · LIVE".into(),
-                clock_hhmm: "16:20".into(),
-                ram_pct: Some(38),
-                ram_critical: false,
-                cpu_pct: 14,
-                working: 4,
-                waiting: 1,
-                resting: 2,
-                today_summary: "72 prompts · 34 cmds".into(),
-                plan_pct: Some(52),
-                pulse_30m: [
-                    2, 3, 1, 4, 6, 5, 3, 2, 7, 8, 4, 3, 5, 6, 8, 9, 7, 5, 3, 4, 6, 7, 8, 5, 4, 3,
-                    6, 8, 7, 5,
-                ],
-            },
-            fonts,
-        );
-        let tv_mat = palette.textured_unlit(images, materials, tv_surf);
-        spawn_quad(
-            commands,
-            palette,
-            tv_mat,
-            Vec3::new(tx, ty, tz) + fwd * 0.048,
-            Vec2::new(2.18, 1.2),
-            rot,
-        );
-    }
-
-    // 2. Arcade cabinet + marquee + invaders screen (arcade.js — upgraded in Task 6)
-    {
-        let [ax, az] = spec.arc;
-        let cab_m = palette.mat(materials, "#4B2E83", 0.55, 0.05);
-        let trim_m = palette.emissive(materials, "#F72585", 1.2);
-        let deck_m = palette.mat(materials, "#2A1B4F", 0.5, 0.05);
-        let arc_ent = spawn_box(
-            commands,
-            palette,
-            cab_m,
-            Vec3::new(ax, 0.875, az),
-            Vec3::new(0.8, 1.75, 0.7),
-        );
-        commands
-            .entity(arc_ent)
-            .insert(InteractiveProp::new("arcade", "lounge", "Arcade Cabinet"));
-        for sx in [-0.405_f32, 0.405] {
-            spawn_box(
-                commands,
-                palette,
-                trim_m.clone(),
-                Vec3::new(ax + sx, 0.95, az),
-                Vec3::new(0.02, 1.5, 0.5),
-            );
-        }
-        spawn_box(
-            commands,
-            palette,
-            deck_m,
-            Vec3::new(ax, 0.98, az + 0.42),
-            Vec3::new(0.76, 0.1, 0.32),
-        );
-        let scr_mat = palette.textured_unlit(images, materials, draw_arcade_frame(1.8, false, fonts));
-        spawn_quad(
-            commands,
-            palette,
-            scr_mat,
-            Vec3::new(ax, 1.38, az + 0.36),
-            Vec2::new(0.58, 0.44),
-            Quat::from_rotation_x(-0.18),
-        );
-        let marq_mat = palette.textured_unlit(images, materials, draw_arcade_marquee(fonts));
-        spawn_quad(
-            commands,
-            palette,
-            marq_mat,
-            Vec3::new(ax, 1.66, az + 0.36),
-            Vec2::new(0.74, 0.19),
-            Quat::IDENTITY,
-        );
-    }
+    // 1-2, 4-6. Live WallTv, ArcadeCabinet, GameTv (+ ambilight), 16-ball BilliardsTable, furnished KaraokeBooth
+    crate::props_detail::leisure::spawn_leisure_props(
+        commands, palette, materials, images, fonts, spec,
+    );
 
     // 3. Detailed Aquarium: gravel bed, rocks, 9 swaying seaweeds, 7 tangent-facing fish with wagging tails, 10 bubbles (`aquarium.js`)
     spawn_aquarium(commands, palette, materials, spec);
-
-    // 4. Pro/HQ Lounge Game-TV + PS5 + controllers (game-tv.js — upgraded in Task 6)
-    if let Some([gx, gz]) = spec.game_tv {
-        let walnut = palette.mat(materials, "#6B4A33", 0.6, 0.0);
-        let oak = palette.mat(materials, "#B58A60", 0.55, 0.0);
-        let black = palette.mat(materials, "#16181C", 0.35, 0.2);
-        let white = palette.mat(materials, "#F4F5F7", 0.35, 0.0);
-        let blue_led = palette.emissive(materials, "#6AAEFF", 1.5);
-
-        let unit = spawn_box(
-            commands,
-            palette,
-            walnut,
-            Vec3::new(gx, 0.29, gz),
-            Vec3::new(1.8, 0.42, 0.42),
-        );
-        commands
-            .entity(unit)
-            .insert(InteractiveProp::new("game-tv", "lounge", "Lounge Console TV"));
-        spawn_box(
-            commands,
-            palette,
-            oak,
-            Vec3::new(gx, 0.515, gz),
-            Vec3::new(1.82, 0.03, 0.44),
-        );
-        spawn_box(
-            commands,
-            palette,
-            black.clone(),
-            Vec3::new(gx, 0.995, gz - 0.06),
-            Vec3::new(1.25, 0.72, 0.04),
-        );
-        let gtv_mat = palette.textured_unlit(images, materials, draw_game_tv_standby(fonts));
-        spawn_quad(
-            commands,
-            palette,
-            gtv_mat,
-            Vec3::new(gx, 0.995, gz - 0.035),
-            Vec2::new(1.22, 0.69),
-            Quat::IDENTITY,
-        );
-        spawn_box(
-            commands,
-            palette,
-            white.clone(),
-            Vec3::new(gx + 0.74, 0.73, gz - 0.04),
-            Vec3::new(0.14, 0.4, 0.26),
-        );
-        spawn_box(
-            commands,
-            palette,
-            blue_led,
-            Vec3::new(gx + 0.81, 0.73, gz + 0.08),
-            Vec3::new(0.015, 0.32, 0.015),
-        );
-        spawn_box(
-            commands,
-            palette,
-            white,
-            Vec3::new(gx - 0.57, 0.55, gz + 0.11),
-            Vec3::new(0.15, 0.03, 0.07),
-        );
-        spawn_box(
-            commands,
-            palette,
-            black,
-            Vec3::new(gx + 0.55, 0.55, gz + 0.15),
-            Vec3::new(0.15, 0.03, 0.07),
-        );
-    }
-
-    // 5. Pro/HQ Billiards table (billiards.js — upgraded in Task 6)
-    if let Some([bx, bz]) = spec.bil {
-        let wood = palette.mat(materials, "#5C3A24", 0.55, 0.0);
-        let felt = palette.mat(materials, "#1F6E43", 0.9, 0.0);
-        let tbl = spawn_box(
-            commands,
-            palette,
-            wood,
-            Vec3::new(bx, 0.78, bz),
-            Vec3::new(1.42, 0.16, 2.32),
-        );
-        commands
-            .entity(tbl)
-            .insert(InteractiveProp::new("billiards", "lounge", "Pool Table"));
-        spawn_box(
-            commands,
-            palette,
-            felt,
-            Vec3::new(bx, 0.87, bz),
-            Vec3::new(1.22, 0.03, 2.12),
-        );
-        for (ox, oz) in [
-            (-0.55_f32, -0.95_f32),
-            (0.55, -0.95),
-            (-0.55, 0.95),
-            (0.55, 0.95),
-        ] {
-            spawn_cyl(
-                commands,
-                palette,
-                metal.clone(),
-                Vec3::new(bx + ox, 0.38, bz + oz),
-                0.1,
-                0.76,
-            );
-        }
-        for (i, col) in ["#FFFFFF", "#E63946", "#FFD166", "#3F7CC4", "#222222"]
-            .iter()
-            .enumerate()
-        {
-            let bm = palette.mat(materials, col, 0.2, 0.0);
-            spawn_sphere(
-                commands,
-                palette,
-                bm,
-                Vec3::new(
-                    bx - 0.12 + (i % 3) as f32 * 0.1,
-                    0.91,
-                    bz - 0.25 + (i / 3) as f32 * 0.15,
-                ),
-                Vec3::splat(0.065),
-            );
-        }
-    }
-
-    // 6. Pro/HQ Karaoke booth (karaoke.js — upgraded in Task 6)
-    if let Some([kx, kz, kry]) = spec.ktv {
-        let rot = Quat::from_rotation_y(kry);
-        let at = |lx: f32, ly: f32, lz: f32| Vec3::new(kx, 0.0, kz) + rot * Vec3::new(lx, ly, lz);
-        let frame = palette.mat(materials, "#1D1F26", 0.35, 0.5);
-        let felt = palette.mat(materials, "#3B2A5C", 0.95, 0.0);
-        let glass = palette.glass(materials, "#D7E6F5", 0.16);
-        let led = palette.emissive(materials, "#FF4FB0", 1.8);
-
-        let ktv_ent = spawn_box_rot(
-            commands,
-            palette,
-            frame.clone(),
-            at(0.0, 2.24, 0.0),
-            Vec3::new(1.28, 0.08, 1.32),
-            rot,
-        );
-        commands
-            .entity(ktv_ent)
-            .insert(InteractiveProp::new("karaoke", "lounge", "Karaoke Booth"));
-        spawn_box_rot(
-            commands,
-            palette,
-            frame,
-            at(0.0, 0.04, 0.0),
-            Vec3::new(1.26, 0.08, 1.3),
-            rot,
-        );
-        spawn_box_rot(
-            commands,
-            palette,
-            felt.clone(),
-            at(0.0, 1.14, -0.59),
-            Vec3::new(1.14, 2.13, 0.05),
-            rot,
-        );
-        spawn_box_rot(
-            commands,
-            palette,
-            felt,
-            at(0.57, 1.14, 0.0),
-            Vec3::new(0.05, 2.13, 1.18),
-            rot,
-        );
-        spawn_box_rot(
-            commands,
-            palette,
-            glass,
-            at(-0.6, 1.17, 0.0),
-            Vec3::new(0.02, 1.5, 1.18),
-            rot,
-        );
-        spawn_box_rot(
-            commands,
-            palette,
-            led,
-            at(0.0, 2.2, 0.66),
-            Vec3::new(1.29, 0.025, 0.02),
-            rot,
-        );
-
-        let band_m = palette.textured_unlit(images, materials, draw_karaoke_band("KARAOKE", fonts));
-        spawn_quad(
-            commands,
-            palette,
-            band_m.clone(),
-            at(-0.64, 2.05, 0.0),
-            Vec2::new(1.14, 0.2),
-            rot * Quat::from_rotation_y(-FRAC_PI_2),
-        );
-        spawn_quad(
-            commands,
-            palette,
-            band_m,
-            at(0.0, 2.08, 0.64),
-            Vec2::new(1.1, 0.2),
-            rot,
-        );
-
-        let qr_m = palette.textured_unlit(images, materials, draw_karaoke_qr_badge(fonts));
-        spawn_quad(
-            commands,
-            palette,
-            qr_m,
-            at(-0.62, 0.62, 0.3),
-            Vec2::new(0.3, 0.15),
-            rot * Quat::from_rotation_y(-FRAC_PI_2),
-        );
-
-        let ktv_scr = palette.textured_unlit(
-            images,
-            materials,
-            draw_karaoke_screen("Agents Station KTV", "Lạc trôi giữa codebase Rust ♪", 0.55, fonts),
-        );
-        spawn_quad(
-            commands,
-            palette,
-            ktv_scr,
-            at(0.0, 1.42, -0.53),
-            Vec2::new(0.76, 0.43),
-            rot,
-        );
-    }
 
     // 7. Pro/HQ Pantry Duty Board (aluminum frame + markers + sink cups, `duty-board.js`)
     if spec.layout.is_pro() {
@@ -1520,7 +1187,7 @@ pub fn animate_props_system(
     mut lighting: Option<ResMut<LightingState>>,
     life: Option<Res<OfficeLifeState>>,
     telemetry: Option<Res<PropsLiveTelemetry>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut aq: AquariumAnimParams,
     mut dev: DevicePropsAnimParams,
 ) {
@@ -1579,9 +1246,11 @@ pub fn animate_props_system(
         if sl.applied_season != Some(season) {
             sl.applied_season = Some(season);
             let cols = season_bulb_colors(season);
-            for (k, mat_h) in sl.bulb_mats.iter().enumerate() {
-                if let Some(m) = materials.get_mut(mat_h) {
-                    m.emissive = cols[k];
+            if let Some(mats) = materials.as_deref_mut() {
+                for (k, mat_h) in sl.bulb_mats.iter().enumerate() {
+                    if let Some(m) = mats.get_mut(mat_h) {
+                        m.emissive = cols[k];
+                    }
                 }
             }
         }
@@ -1619,7 +1288,9 @@ pub fn animate_props_system(
         tank.feed_k += (target_k - tank.feed_k) * (dt * 1.6).min(1.0);
         feed_k = tank.feed_k;
 
-        if let Some(m) = materials.get_mut(&tank.light_mat) {
+        if let Some(mats) = materials.as_deref_mut()
+            && let Some(m) = mats.get_mut(&tank.light_mat)
+        {
             m.emissive = if is_night {
                 LinearRgba::new(1.4, 2.0, 2.4, 1.0)
             } else {
@@ -1675,7 +1346,9 @@ pub fn animate_props_system(
         if v.spin_left > 0.0 {
             v.spin_left = (v.spin_left - dt).max(0.0);
             tf.rotate_y(dt * 11.0);
-            if let Some(m) = materials.get_mut(&v.led_mat) {
+            if let Some(mats) = materials.as_deref_mut()
+                && let Some(m) = mats.get_mut(&v.led_mat)
+            {
                 let red = ((t * 10.0).floor() as i32) % 2 == 0;
                 m.emissive = if red {
                     LinearRgba::new(2.0, 0.35, 0.35, 1.0)
@@ -1707,7 +1380,9 @@ pub fn animate_props_system(
                 tf.rotation = Quat::from_rotation_y(next_yaw);
             }
         }
-        if let Some(m) = materials.get_mut(&v.led_mat) {
+        if let Some(mats) = materials.as_deref_mut()
+            && let Some(m) = mats.get_mut(&v.led_mat)
+        {
             let pulse = if (t * 2.0) % 2.0 < 1.6 {
                 if is_night { 2.2 } else { 1.1 }
             } else {
@@ -1750,7 +1425,9 @@ pub fn animate_props_system(
                     *vis = Visibility::Hidden;
                 }
             }
-            if let Some(m) = materials.get_mut(&prn.led_mat) {
+            if let Some(mats) = materials.as_deref_mut()
+                && let Some(m) = mats.get_mut(&prn.led_mat)
+            {
                 let blink = ((t * 8.0).floor() as i32) % 2 == 0;
                 m.emissive = if blink {
                     LinearRgba::new(0.24 * 1.8, 0.86 * 1.8, 0.52 * 1.8, 1.0)
@@ -1760,7 +1437,9 @@ pub fn animate_props_system(
             }
             if prn.timer > 2.9 {
                 prn.timer = -1.0;
-                if let Some(m) = materials.get_mut(&prn.led_mat) {
+                if let Some(mats) = materials.as_deref_mut()
+                    && let Some(m) = mats.get_mut(&prn.led_mat)
+                {
                     m.emissive = LinearRgba::new(0.24 * 1.5, 0.86 * 1.5, 0.52 * 1.5, 1.0);
                 }
             }
@@ -1820,7 +1499,9 @@ pub fn animate_props_system(
         if *vis == Visibility::Hidden {
             continue;
         }
-        if let Some(m) = materials.get_mut(&bx.led_mat) {
+        if let Some(mats) = materials.as_deref_mut()
+            && let Some(m) = mats.get_mut(&bx.led_mat)
+        {
             if bx.lost {
                 let on = (t * 3.0 + bx.phase).sin() > 0.0;
                 m.emissive = if on {
@@ -1859,6 +1540,11 @@ mod tests {
     use crate::props_detail::cat::{
         CatHeart, CatLeg, CatMode, CatTailSeg, OfficeCat as ArticulatedCat, animate_cat_system,
     };
+    use crate::props_detail::leisure::{
+        ArcadeCabinet, BilliardsBall, BilliardsPocket, BilliardsTable, GameTv, GameTvAmbilight,
+        KaraokeBench, KaraokeBooth, KaraokeDoorPivot, KaraokeLyricBar, KaraokeMic, KaraokeSpeaker,
+        WallTv, animate_leisure_system,
+    };
     use crate::props_detail::microwave::{
         ALL_LUNCHBOX_KINDS, MicrowaveDoorPivot, MicrowaveLunchbox, MicrowaveOven, MicrowavePlate,
         animate_microwaves_system,
@@ -1892,6 +1578,7 @@ mod tests {
                 (
                     animate_props_system.before(LightingSyncSet),
                     animate_cat_system,
+                    animate_leisure_system,
                     animate_microwaves_system,
                     animate_shredder_bins_and_cups_system,
                     sync_lighting_system.in_set(LightingSyncSet),
@@ -2389,5 +2076,229 @@ mod tests {
             all_lamps_restored,
             "resetting room_lights_off at night must restore RoomLamps"
         );
+    }
+
+    #[test]
+    fn leisure_billiards_karaoke_arcade_and_game_tv_ambilight_mutate_in_place_with_zero_leaks() {
+        let mut app = build_pro_test_app();
+        step_app(&mut app, 0.016);
+
+        // 1. BilliardsTable: 16 numbered balls (0..=15) + 6 pockets + break animation on click
+        assert_eq!(
+            app.world_mut()
+                .query::<&BilliardsTable>()
+                .iter(app.world())
+                .count(),
+            1,
+            "Pro must spawn 1 BilliardsTable"
+        );
+        let balls: Vec<(u8, Vec2)> = app
+            .world_mut()
+            .query::<&BilliardsBall>()
+            .iter(app.world())
+            .map(|b| (b.number, b.pos))
+            .collect();
+        assert_eq!(balls.len(), 16, "BilliardsTable must spawn 16 numbered balls");
+        for n in 0..=15u8 {
+            assert!(
+                balls.iter().any(|(num, _)| *num == n),
+                "BilliardsTable missing ball #{n}"
+            );
+        }
+        assert_eq!(
+            app.world_mut()
+                .query::<&BilliardsPocket>()
+                .iter(app.world())
+                .count(),
+            6,
+            "BilliardsTable must spawn 6 pockets"
+        );
+
+        // 2. KaraokeBooth: hinged door pivot + 2 mics + bench + 2 speakers + scrolling lyric bar
+        let ktv_door = app
+            .world_mut()
+            .query::<&KaraokeBooth>()
+            .single(app.world())
+            .expect("Pro must spawn 1 KaraokeBooth")
+            .door_pivot;
+        assert!(app.world().get::<KaraokeDoorPivot>(ktv_door).is_some());
+        assert_eq!(
+            app.world_mut()
+                .query::<&KaraokeMic>()
+                .iter(app.world())
+                .count(),
+            2,
+            "KaraokeBooth must spawn 2 handheld mics"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&KaraokeSpeaker>()
+                .iter(app.world())
+                .count(),
+            2,
+            "KaraokeBooth must spawn dual wall speakers"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&KaraokeBench>()
+                .iter(app.world())
+                .count(),
+            1,
+            "KaraokeBooth must spawn cushioned bench"
+        );
+        assert_eq!(
+            app.world_mut()
+                .query::<&KaraokeLyricBar>()
+                .iter(app.world())
+                .count(),
+            1,
+            "KaraokeBooth must spawn scrolling lyric bar"
+        );
+
+        // 3. WallTv + GameTv (256x144 live Image + dynamic ambilight PointLight) + live ArcadeCabinet
+        assert_eq!(
+            app.world_mut().query::<&WallTv>().iter(app.world()).count(),
+            1
+        );
+        let (tv_img_h, ambi_ent) = {
+            let gtv = app
+                .world_mut()
+                .query::<&GameTv>()
+                .single(app.world())
+                .expect("Pro must spawn 1 GameTv");
+            (gtv.screen_image.clone(), gtv.ambilight)
+        };
+        assert!(app.world().get::<GameTvAmbilight>(ambi_ent).is_some());
+        assert!(app.world().get::<PointLight>(ambi_ent).is_some());
+
+        let arc_img_h = app
+            .world_mut()
+            .query::<&ArcadeCabinet>()
+            .single(app.world())
+            .expect("Pro must spawn 1 ArcadeCabinet")
+            .screen_image
+            .clone();
+
+        let img_count_before = app.world().resource::<Assets<Image>>().len();
+        let tv_bytes_before = {
+            let img = app.world().resource::<Assets<Image>>().get(&tv_img_h).unwrap();
+            assert_eq!(img.texture_descriptor.size.width, 256);
+            assert_eq!(img.texture_descriptor.size.height, 144);
+            img.data.as_ref().unwrap().clone()
+        };
+        let arc_bytes_before = {
+            let img = app.world().resource::<Assets<Image>>().get(&arc_img_h).unwrap();
+            assert_eq!(img.texture_descriptor.size.width, 128);
+            assert_eq!(img.texture_descriptor.size.height, 96);
+            img.data.as_ref().unwrap().clone()
+        };
+        let ambi_color_0 = app.world().get::<PointLight>(ambi_ent).unwrap().color;
+
+        // Click game-tv (cycles game), arcade (insert coin), karaoke (toggle door), billiards (break)
+        app.world_mut().send_event(PropActivated {
+            id: "game-tv",
+            place: "lounge",
+            label: "Lounge Console TV",
+        });
+        app.world_mut().send_event(PropActivated {
+            id: "arcade",
+            place: "lounge",
+            label: "Arcade Cabinet",
+        });
+        app.world_mut().send_event(PropActivated {
+            id: "karaoke",
+            place: "lounge",
+            label: "Karaoke Booth",
+        });
+        app.world_mut().send_event(PropActivated {
+            id: "billiards",
+            place: "lounge",
+            label: "Pool Table",
+        });
+
+        let door_rot_before = app.world().get::<Transform>(ktv_door).unwrap().rotation;
+        for _ in 0..12 {
+            step_app(&mut app, 0.08);
+        }
+
+        // Zero Image handle allocations across animation ticks & clicks
+        assert_eq!(
+            app.world().resource::<Assets<Image>>().len(),
+            img_count_before,
+            "GameTv and ArcadeCabinet must mutate Images in-place without allocating new handles"
+        );
+        let tv_bytes_after = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&tv_img_h)
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap();
+        assert_ne!(
+            &tv_bytes_before, tv_bytes_after,
+            "GameTv 256x144 screen Image must mutate in-place across frames"
+        );
+        let arc_bytes_after = app
+            .world()
+            .resource::<Assets<Image>>()
+            .get(&arc_img_h)
+            .unwrap()
+            .data
+            .as_ref()
+            .unwrap();
+        assert_ne!(
+            &arc_bytes_before, arc_bytes_after,
+            "ArcadeCabinet 128x96 screen Image must mutate in-place across frames"
+        );
+        let ambi_color_1 = app.world().get::<PointLight>(ambi_ent).unwrap().color;
+        assert_ne!(
+            ambi_color_0, ambi_color_1,
+            "GameTvAmbilight PointLight color must sync to screen dominant_rgb"
+        );
+        let door_rot_after = app.world().get::<Transform>(ktv_door).unwrap().rotation;
+        assert_ne!(
+            door_rot_before, door_rot_after,
+            "KaraokeDoorPivot must swing open on click"
+        );
+        let balls_after: Vec<(u8, Vec2)> = app
+            .world_mut()
+            .query::<&BilliardsBall>()
+            .iter(app.world())
+            .map(|b| (b.number, b.pos))
+            .collect();
+        assert_ne!(balls, balls_after, "Billiards break click must move balls");
+
+        // Full unload must leave 0 leaked meshes, materials, and images
+        let world_ents: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<WorldEntity>>()
+            .iter(app.world())
+            .collect();
+        app.world_mut()
+            .resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                    world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                        let mut pal = world.remove_resource::<WorldPalette>();
+                        let mut ba = world.remove_resource::<BackdropAssets>();
+                        let ibl = world.remove_resource::<OfficeIbl>();
+                        let mut cmds = world.commands();
+                        unload_full_office_world(
+                            &mut cmds,
+                            world_ents,
+                            pal.as_mut(),
+                            ba.as_mut(),
+                            ibl.as_ref(),
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                        );
+                    });
+                });
+            });
+        app.world_mut().flush();
+        assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);
+        assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 0);
+        assert_eq!(app.world().resource::<Assets<Image>>().len(), 0);
     }
 }
