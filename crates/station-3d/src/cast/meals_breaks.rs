@@ -9,7 +9,7 @@
 
 use crate::cast::{
     ActiveRoutine, CastClock, CastEvents, RoutineCoordinator, RoutineKind, is_worker_recalled,
-    is_worker_resting, sync_lazy_prop,
+    is_worker_resting, return_arrive_anim, sync_home_lifecycle, sync_lazy_prop,
 };
 use crate::chibi::{ChibiWorker, WorkerAnim};
 use crate::chibi_meshes::ChibiMeshCache;
@@ -17,7 +17,7 @@ use crate::chibi_props::{ActivePropEntity, PropKind};
 use crate::interact::PropActivated;
 use crate::nav::{NavGraph, StationKind};
 use crate::palette::WorldPalette;
-use crate::people::{LiveSessionWorker, NavWalker, SubagentWorker};
+use crate::people::{LiveSessionWorker, NavWalker, SubagentWorker, WorkerLifecycle};
 use crate::props_detail::microwave::{MicrowaveOven, MicrowaveStage};
 use crate::props_detail::shredder_cups::PaperShredder;
 use bevy::prelude::*;
@@ -85,10 +85,13 @@ pub struct MealsBreaksState {
     pub gatherings_held: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_home(
     nav: &NavGraph,
+    live: &LiveSessionWorker,
     chibi: &ChibiWorker,
     walker: &mut NavWalker,
+    lifecycle: Option<Mut<'_, WorkerLifecycle>>,
     vis: &mut Visibility,
     routine: &mut ActiveRoutine,
     recalled: bool,
@@ -96,11 +99,8 @@ fn send_home(
     routine.returning = true;
     routine.desired_prop = None;
     *vis = Visibility::Visible;
-    let anim = if recalled {
-        WorkerAnim::Work
-    } else {
-        WorkerAnim::Sleep
-    };
+    let anim = return_arrive_anim(live, recalled);
+    sync_home_lifecycle(lifecycle, anim);
     walker.set_destination(
         nav,
         chibi.base_pos,
@@ -212,6 +212,7 @@ pub fn step_meals_breaks_system(
             &LiveSessionWorker,
             &mut ChibiWorker,
             &mut NavWalker,
+            Option<&mut WorkerLifecycle>,
             &mut Visibility,
             Option<&mut ActiveRoutine>,
             Option<&ActivePropEntity>,
@@ -271,10 +272,13 @@ pub fn step_meals_breaks_system(
     let mut teatime_active = 0usize;
     let mut gathering_active = 0usize;
     let mut duty_active = false;
-    let mut trigger_oven_slot: Option<usize> = None;
+    let mut start_oven = [false; 2];
+    let mut stop_oven = [false; 2];
     let mut trigger_shredder = false;
 
-    for (ent, live, chibi, mut walker, mut vis, routine_opt, active_prop) in &mut workers_q {
+    for (ent, live, chibi, mut walker, lifecycle, mut vis, routine_opt, active_prop) in
+        &mut workers_q
+    {
         let Some(mut routine) = routine_opt else {
             continue;
         };
@@ -302,7 +306,7 @@ pub fn step_meals_breaks_system(
 
         // Recall back to desk immediately if work arrives
         if is_worker_recalled(live) {
-            send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, true);
+            send_home(nav, live, &chibi, &mut walker, lifecycle, &mut vis, &mut routine, true);
             sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
             continue;
         }
@@ -315,9 +319,10 @@ pub fn step_meals_breaks_system(
         match routine.kind {
             RoutineKind::ComNha => {
                 comnha_active += 1;
+                let oven_idx = if pro { (routine.slot as usize) % 2 } else { 0 };
                 if !walker.is_walking() && routine.dwell_secs <= 0.0 {
                     if routine.stage == 0 {
-                        // Stage 0 -> 1: step up to microwave & start heating
+                        // Stage 0 -> 1: walk from queue to microwave oven
                         let (oven_pos, oven_face) = comnha_oven_spot(nav, routine.slot as usize);
                         walker.set_destination(
                             nav,
@@ -328,11 +333,16 @@ pub fn step_meals_breaks_system(
                             WorkerAnim::Wait,
                         );
                         routine.stage = 1;
+                        routine.dwell_secs = 0.0;
+                    } else if routine.stage == 1 {
+                        // Stage 1 -> 2: arrived at microwave -> start heating cycle
+                        start_oven[oven_idx] = true;
+                        routine.stage = 2;
                         routine.dwell_secs = 2.0;
                         routine.desired_prop = Some(PropKind::HomeBox);
-                        trigger_oven_slot = Some((routine.slot as usize) % 2);
-                    } else if routine.stage == 1 {
-                        // Stage 1 -> 2: take hot HomeBox / Noodle to dining seat to eat
+                    } else if routine.stage == 2 {
+                        // Stage 2 -> 3: heating done -> stop oven, pick up HomeBox/Noodle, walk to eat
+                        stop_oven[oven_idx] = true;
                         let eat_kind = if pro {
                             StationKind::Dining
                         } else {
@@ -352,13 +362,22 @@ pub fn step_meals_breaks_system(
                             true,
                             WorkerAnim::Rest,
                         );
-                        routine.stage = 2;
+                        routine.stage = 3;
                         routine.dwell_secs = 6.0;
                         routine.desired_prop = Some(food_prop);
                     } else {
                         // Done eating -> return to desk
                         state.comnha_served += 1;
-                        send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                        send_home(
+                            nav,
+                            live,
+                            &chibi,
+                            &mut walker,
+                            lifecycle,
+                            &mut vis,
+                            &mut routine,
+                            false,
+                        );
                     }
                 }
             }
@@ -372,7 +391,16 @@ pub fn step_meals_breaks_system(
                         routine.dwell_secs = 8.0;
                     } else {
                         // Paid "Cô ơi, tính tiền!" -> back up lift to desk
-                        send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                        send_home(
+                            nav,
+                            live,
+                            &chibi,
+                            &mut walker,
+                            lifecycle,
+                            &mut vis,
+                            &mut routine,
+                            false,
+                        );
                     }
                 }
             }
@@ -403,14 +431,32 @@ pub fn step_meals_breaks_system(
                         routine.desired_prop = Some(prop);
                     } else {
                         state.breaks_served += 1;
-                        send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                        send_home(
+                            nav,
+                            live,
+                            &chibi,
+                            &mut walker,
+                            lifecycle,
+                            &mut vis,
+                            &mut routine,
+                            false,
+                        );
                     }
                 }
             }
             RoutineKind::Teatime => {
                 teatime_active += 1;
                 if !walker.is_walking() && routine.dwell_secs <= 0.0 {
-                    send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                    send_home(
+                        nav,
+                        live,
+                        &chibi,
+                        &mut walker,
+                        lifecycle,
+                        &mut vis,
+                        &mut routine,
+                        false,
+                    );
                 }
             }
             RoutineKind::Duty => {
@@ -422,7 +468,16 @@ pub fn step_meals_breaks_system(
                         state.duty_cups_pile = 0;
                     }
                     state.duty_active_chore = None;
-                    send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                    send_home(
+                        nav,
+                        live,
+                        &chibi,
+                        &mut walker,
+                        lifecycle,
+                        &mut vis,
+                        &mut routine,
+                        false,
+                    );
                 }
             }
             RoutineKind::Errands => {
@@ -431,13 +486,31 @@ pub fn step_meals_breaks_system(
                         trigger_shredder = true;
                     }
                     state.errands_completed += 1;
-                    send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                    send_home(
+                        nav,
+                        live,
+                        &chibi,
+                        &mut walker,
+                        lifecycle,
+                        &mut vis,
+                        &mut routine,
+                        false,
+                    );
                 }
             }
             RoutineKind::Gatherings => {
                 gathering_active += 1;
                 if !walker.is_walking() && routine.dwell_secs <= 0.0 {
-                    send_home(nav, &chibi, &mut walker, &mut vis, &mut routine, false);
+                    send_home(
+                        nav,
+                        live,
+                        &chibi,
+                        &mut walker,
+                        lifecycle,
+                        &mut vis,
+                        &mut routine,
+                        false,
+                    );
                 }
             }
             _ => {}
@@ -454,13 +527,16 @@ pub fn step_meals_breaks_system(
         );
     }
 
-    if let Some(oven_idx) = trigger_oven_slot {
-        for mut oven in &mut ovens_q {
-            if oven.index == oven_idx {
+    for mut oven in &mut ovens_q {
+        if oven.index < 2 {
+            if start_oven[oven.index] {
                 oven.stage = MicrowaveStage::Run;
                 oven.time_left = 45.0;
                 oven.open_goal = 0.0;
-                break;
+            } else if stop_oven[oven.index] {
+                oven.stage = MicrowaveStage::Idle;
+                oven.time_left = 0.0;
+                oven.open_goal = 0.0;
             }
         }
     }
@@ -484,7 +560,7 @@ pub fn step_meals_breaks_system(
     // Pass 2: Collect free resting workers into a fixed stack buffer (zero heap allocations).
     let mut free_buf: [Option<(Entity, Vec3, f32, bool)>; 16] = [None; 16];
     let mut free_len = 0usize;
-    for (ent, live, chibi, walker, _, routine_opt, _) in &workers_q {
+    for (ent, live, chibi, walker, _, _, routine_opt, _) in &workers_q {
         if free_len >= free_buf.len() {
             break;
         }
@@ -524,8 +600,15 @@ pub fn step_meals_breaks_system(
                 continue;
             }
             let sp = nav.station_spot_for(StationKind::Meeting, slot);
-            if let Ok((_, _, chibi, mut walker, _, _, _)) = workers_q.get_mut(ent) {
-                walker.set_destination(nav, chibi.base_pos, sp.pos, sp.face, sp.sit, WorkerAnim::Wait);
+            if let Ok((_, _, chibi, mut walker, _, _, _, _)) = workers_q.get_mut(ent) {
+                walker.set_destination(
+                    nav,
+                    chibi.base_pos,
+                    sp.pos,
+                    sp.face,
+                    sp.sit,
+                    WorkerAnim::Wait,
+                );
                 commands.entity(ent).insert(ActiveRoutine::new(
                     RoutineKind::Gatherings,
                     slot as u8,
@@ -551,8 +634,7 @@ pub fn step_meals_breaks_system(
         state.comnha_day = Some(clock.day_index);
         let avail = free_len.saturating_sub(next_free);
         // Leave half of resting workers for street ComTrua if noon street lunch is also planned today
-        let comtrua_planned =
-            clock.is_workday && (clock.is_friday() || clock.day_index % 3 == 0);
+        let comtrua_planned = clock.is_workday && (clock.is_friday() || clock.day_index % 3 == 0);
         let count = if comtrua_planned && avail >= 2 {
             (avail / 2).min(3)
         } else {
@@ -573,7 +655,7 @@ pub fn step_meals_breaks_system(
                 let sp = nav.station_spot_for(StationKind::Coffee, slot);
                 (sp.pos, sp.face)
             };
-            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(
                     nav,
                     chibi.base_pos,
@@ -631,7 +713,7 @@ pub fn step_meals_breaks_system(
             if !coord.claim(ent) {
                 continue;
             }
-            if let Ok((_, _, chibi, mut walker, _, _, _)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _, _)) = workers_q.get_mut(ent) {
                 walker.set_destination(
                     nav,
                     chibi.base_pos,
@@ -683,7 +765,7 @@ pub fn step_meals_breaks_system(
             } else {
                 PropKind::Cup
             };
-            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(nav, chibi.base_pos, q_pos, q_face, false, WorkerAnim::Wait);
                 commands.entity(ent).insert(ActiveRoutine::new(
                     RoutineKind::Breaks,
@@ -731,7 +813,7 @@ pub fn step_meals_breaks_system(
                 continue;
             }
             let seat = nav.station_spot_for(seat_kind, slot);
-            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(
                     nav,
                     chibi.base_pos,
@@ -803,7 +885,8 @@ pub fn step_meals_breaks_system(
                 next_free += 1;
                 if coord.claim(ent) {
                     let (target, face, prop) = duty_chore_target(nav, chore);
-                    if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent)
+                    if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) =
+                        workers_q.get_mut(ent)
                     {
                         walker.set_destination(
                             nav,
@@ -838,18 +921,14 @@ pub fn step_meals_breaks_system(
         }
     }
 
-    // 7. Errands (printer, shredder, water cooler, thirsty plant)
+    // 7. Errands (only clear pending flag AFTER claiming a free worker!)
     let pending_errand = if events.printer_job {
-        events.printer_job = false;
         Some(ErrandKind::Printer)
     } else if events.shredder_job {
-        events.shredder_job = false;
         Some(ErrandKind::Shredder)
     } else if events.water_cooler_job {
-        events.water_cooler_job = false;
         Some(ErrandKind::WaterCooler)
     } else if events.plant_thirsty {
-        events.plant_thirsty = false;
         Some(ErrandKind::PlantWater)
     } else {
         None
@@ -860,8 +939,15 @@ pub fn step_meals_breaks_system(
     {
         if let Some((ent, home_pos, home_yaw, home_sit)) = free_buf[next_free] {
             if coord.claim(ent) {
+                match errand {
+                    ErrandKind::Printer => events.printer_job = false,
+                    ErrandKind::Shredder => events.shredder_job = false,
+                    ErrandKind::WaterCooler => events.water_cooler_job = false,
+                    ErrandKind::PlantWater => events.plant_thirsty = false,
+                }
                 let (target, face, prop) = errand_target(nav, errand);
-                if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
+                if let Ok((_, _, chibi, mut walker, _, _, _, active_prop)) = workers_q.get_mut(ent)
+                {
                     walker.set_destination(
                         nav,
                         chibi.base_pos,
