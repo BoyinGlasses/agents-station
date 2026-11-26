@@ -250,7 +250,7 @@ impl UiState {
             sound_on: true,
             auto_close_tray: true,
             gpu_pref: GpuPrefUi::Auto,
-            weather_city: "hcm".to_owned(),
+            weather_city: station_3d::life::weather_city_display("hcm").1,
             weather_temp_c: 31,
             weather_desc: String::new(),
             clock_label: "--:--".to_owned(),

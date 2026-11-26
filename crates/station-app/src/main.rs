@@ -239,9 +239,13 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             if let Some(s) = prefs.get("soundOn").and_then(|v| v.as_bool()) {
                 ui_state.sound_on = s;
             }
-            if let Some(c) = prefs.get("weatherCity").and_then(|v| v.as_str()) {
-                ui_state.weather_city = c.to_owned();
-            }
+            let (initial_city_code, initial_city_display) = station_3d::life::weather_city_display(
+                prefs
+                    .get("weatherCity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("hcm"),
+            );
+            ui_state.weather_city = initial_city_display;
             if let Ok(raw) = std::fs::read_to_string(data_dir.join("whiteboard.json"))
                 && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
                 && let Some(text) = val.get("text").and_then(|v| v.as_str())
@@ -249,7 +253,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 ui_state.whiteboard_text = text.to_owned();
             }
             let initial_sound = ui_state.sound_on;
-            let initial_city = ui_state.weather_city.clone();
+            let initial_city = initial_city_code;
             if is_lite_2d {
                 ui_state.view_mode = station_ui::ViewMode::Lite2D;
                 app.add_plugins(station_3d::OfficeWorldRuntimePlugin {

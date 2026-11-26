@@ -16,6 +16,25 @@ pub const VN_WEATHER_CITIES: [(&str, &str, f64, f64); 8] = [
     ("nt", "Nha Trang", 12.24, 109.19),
 ];
 
+/// Normalizes a weather city code or display name into `(canonical_code, display_name)`
+/// so startup prefs, `SetWeatherCity`, and Settings UI highlights stay 100% consistent.
+pub fn weather_city_display(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("hcmc") || trimmed.eq_ignore_ascii_case("saigon") {
+        return ("hcm".to_owned(), "TP. Hồ Chí Minh".to_owned());
+    }
+    if trimmed.eq_ignore_ascii_case("hanoi") {
+        return ("hn".to_owned(), "Hà Nội".to_owned());
+    }
+    for (code, name, _, _) in VN_WEATHER_CITIES {
+        if code.eq_ignore_ascii_case(trimmed) || name.eq_ignore_ascii_case(trimmed) {
+            return (code.to_owned(), name.to_owned());
+        }
+    }
+    let clean = if trimmed.is_empty() { "hcm" } else { trimmed };
+    (clean.to_ascii_lowercase(), clean.to_owned())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SeasonTheme {
     #[default]
@@ -207,5 +226,18 @@ mod tests {
         assert_eq!(life.rain_intensity, 1.0);
         assert!(life.storm);
         assert_eq!(life.weather_icon(), "⛈");
+
+        assert_eq!(
+            weather_city_display("hn"),
+            ("hn".to_owned(), "Hà Nội".to_owned())
+        );
+        assert_eq!(
+            weather_city_display("Hà Nội"),
+            ("hn".to_owned(), "Hà Nội".to_owned())
+        );
+        assert_eq!(
+            weather_city_display("HCMC"),
+            ("hcm".to_owned(), "TP. Hồ Chí Minh".to_owned())
+        );
     }
 }

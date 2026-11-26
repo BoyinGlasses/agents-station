@@ -342,6 +342,7 @@ fn draw_settings_drawer(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore
         });
         ui.horizontal(|ui| {
             ui.label("Weather:");
+            let active_code = station_3d::life::weather_city_display(&state.weather_city).0;
             for (code, lbl) in [
                 ("hcm", "HCM"),
                 ("hn", "HN"),
@@ -349,8 +350,7 @@ fn draw_settings_drawer(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore
                 ("dl", "DL"),
                 ("nt", "NT"),
             ] {
-                let active = state.weather_city.eq_ignore_ascii_case(code)
-                    || state.weather_city.eq_ignore_ascii_case(lbl);
+                let active = active_code.eq_ignore_ascii_case(code);
                 if ui.selectable_label(active, lbl).clicked() {
                     state.push_action(UiAction::SetWeatherCity(code.to_owned()));
                 }
