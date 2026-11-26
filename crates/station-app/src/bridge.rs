@@ -49,6 +49,7 @@ enum RefreshKind {
     None,
     Live,
     Harnesses,
+    Chat,
 }
 
 struct RemoteActionCmd {
@@ -776,6 +777,28 @@ async fn fetch_remote_harnesses(
     }
 }
 
+async fn fetch_remote_chat(
+    client: &reqwest::Client,
+    base_url: &str,
+    host_header: &str,
+    snap_lock: &Arc<Mutex<RemoteSnapshot>>,
+) {
+    if let Ok(resp) = client
+        .get(format!("{base_url}/api/chat"))
+        .header("host", host_header)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        && resp.status().is_success()
+        && let Ok(val) = resp.json::<Value>().await
+    {
+        let chat = parse_chat_from_json(&val);
+        let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        snap.chat = chat;
+        snap.has_chat = true;
+    }
+}
+
 async fn fetch_remote_telemetry(
     client: &reqwest::Client,
     base_url: &str,
@@ -913,6 +936,9 @@ fn spawn_attached_sse_client(
                                         RefreshKind::Harnesses => {
                                             fetch_remote_harnesses(&client_a, &base_a, &host_a, &snap_a).await;
                                         }
+                                        RefreshKind::Chat => {
+                                            fetch_remote_chat(&client_a, &base_a, &host_a, &snap_a).await;
+                                        }
                                         RefreshKind::None => {}
                                     }
                                 }
@@ -995,18 +1021,28 @@ fn spawn_attached_sse_client(
                                         if let Some(data) = line.strip_prefix("data:") {
                                             let trimmed = data.trim();
                                             if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-                                                if val.get("k").and_then(Value::as_str)
-                                                    == Some("snap")
-                                                {
-                                                    apply_snapshot_to_remote(&snap_lock, &val);
-                                                } else {
-                                                    fetch_remote_live(
-                                                        &client,
-                                                        &base_url,
-                                                        &host_header,
-                                                        &snap_lock,
-                                                    )
-                                                    .await;
+                                                match val.get("k").and_then(Value::as_str) {
+                                                    Some("snap") => {
+                                                        apply_snapshot_to_remote(&snap_lock, &val);
+                                                    }
+                                                    Some("chat") => {
+                                                        fetch_remote_chat(
+                                                            &client,
+                                                            &base_url,
+                                                            &host_header,
+                                                            &snap_lock,
+                                                        )
+                                                        .await;
+                                                    }
+                                                    _ => {
+                                                        fetch_remote_live(
+                                                            &client,
+                                                            &base_url,
+                                                            &host_header,
+                                                            &snap_lock,
+                                                        )
+                                                        .await;
+                                                    }
                                                 }
                                             }
                                         }
@@ -1039,7 +1075,7 @@ pub struct LiveServerBridge {
     port: u16,
     sync_timer: Timer,
     sys_sync_timer: Timer,
-    sys_synced_once: bool,
+    sys_refresh_due: bool,
     banner_pushed: bool,
     seen_perm_ids: HashSet<String>,
     last_window_focused: Option<bool>,
@@ -1079,7 +1115,7 @@ impl LiveServerBridge {
                 port,
                 sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                 sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                sys_synced_once: false,
+                sys_refresh_due: true,
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
                 last_window_focused: None,
@@ -1112,7 +1148,7 @@ impl LiveServerBridge {
                     port,
                     sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                     sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                    sys_synced_once: false,
+                    sys_refresh_due: true,
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
                     last_window_focused: None,
@@ -1137,7 +1173,7 @@ impl LiveServerBridge {
                 port,
                 sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                 sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                sys_synced_once: false,
+                sys_refresh_due: true,
                 banner_pushed: false,
                 seen_perm_ids: HashSet::new(),
                 last_window_focused: None,
@@ -1211,7 +1247,7 @@ impl LiveServerBridge {
                     port,
                     sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                     sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                    sys_synced_once: false,
+                    sys_refresh_due: true,
                     banner_pushed: false,
                     seen_perm_ids: HashSet::new(),
                     last_window_focused: None,
@@ -1242,7 +1278,7 @@ impl LiveServerBridge {
                         port,
                         sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
                         sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                        sys_synced_once: false,
+                        sys_refresh_due: true,
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
                         last_window_focused: None,
@@ -1265,7 +1301,7 @@ impl LiveServerBridge {
                         port,
                         sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
                         sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                        sys_synced_once: false,
+                        sys_refresh_due: true,
                         banner_pushed: false,
                         seen_perm_ids: HashSet::new(),
                         last_window_focused: None,
@@ -1645,12 +1681,15 @@ fn sync_live_state_to_ui(
     }
 
     bridge.sys_sync_timer.tick(time.delta());
+    if bridge.sys_sync_timer.just_finished() {
+        bridge.sys_refresh_due = true;
+    }
     bridge.sync_timer.tick(time.delta());
     if !bridge.sync_timer.just_finished() {
         return;
     }
 
-    let refresh_sys = !bridge.sys_synced_once || bridge.sys_sync_timer.just_finished();
+    let refresh_sys = bridge.sys_refresh_due;
     let mut synced_live_perms = false;
     match &bridge.backend {
         BridgeBackend::AttachedHttp { snapshot, .. } => {
@@ -1669,7 +1708,7 @@ fn sync_live_state_to_ui(
             }
             sync_in_process_telemetry(app_state, &mut ui, refresh_sys);
             if refresh_sys {
-                bridge.sys_synced_once = true;
+                bridge.sys_refresh_due = false;
             }
         }
         BridgeBackend::BindError { .. } => {}
@@ -2256,14 +2295,7 @@ fn process_ui_actions(
                 }
             }
             UiAction::SetWeatherCity(city) => {
-                let trimmed = city.trim();
-                let (code, display) = station_3d::life::VN_WEATHER_CITIES
-                    .iter()
-                    .find(|(c, name, _, _)| {
-                        c.eq_ignore_ascii_case(trimmed) || name.eq_ignore_ascii_case(trimmed)
-                    })
-                    .map(|(c, name, _, _)| ((*c).to_owned(), (*name).to_owned()))
-                    .unwrap_or_else(|| (trimmed.to_owned(), trimmed.to_owned()));
+                let (code, display) = station_3d::life::weather_city_display(&city);
                 ui.weather_city = display.clone();
                 if let Some(life) = aux.life.as_deref_mut() {
                     life.weather_city = code.clone();
@@ -2432,21 +2464,48 @@ fn process_ui_actions(
                 if clean.is_empty() {
                     continue;
                 }
-                let fallback_agent = ui
-                    .sessions
-                    .iter()
-                    .find(|s| s.id == session_id)
+                let ui_sess = ui.sessions.iter().find(|s| s.id == session_id);
+                let fallback_agent = ui_sess
                     .map(|s| s.agent.clone())
                     .unwrap_or_else(|| "claude".to_owned());
                 match &bridge.backend {
-                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                    BridgeBackend::AttachedHttp {
+                        snapshot,
+                        action_tx,
+                        ..
+                    } => {
+                        let is_busy = ui_sess
+                            .map(|s| s.status != "rest")
+                            .or_else(|| {
+                                snapshot.lock().ok().and_then(|snap| {
+                                    snap.sessions
+                                        .iter()
+                                        .find(|s| s.id == session_id)
+                                        .map(|s| s.status != "rest")
+                                })
+                            })
+                            .unwrap_or(false);
+                        let (path, body) = if is_busy {
+                            (
+                                "/api/tasks/steer",
+                                json!({
+                                    "sid": session_id,
+                                    "text": clean,
+                                }),
+                            )
+                        } else {
+                            (
+                                "/api/tasks",
+                                json!({
+                                    "sid": session_id,
+                                    "text": clean,
+                                    "agent": fallback_agent,
+                                }),
+                            )
+                        };
                         let _ = action_tx.try_send(RemoteActionCmd {
-                            path: "/api/tasks",
-                            body: json!({
-                                "sid": session_id,
-                                "text": clean,
-                                "agent": fallback_agent,
-                            }),
+                            path,
+                            body,
                             refresh: RefreshKind::Live,
                             launch_toast_label: None,
                         });
@@ -2479,24 +2538,12 @@ fn process_ui_actions(
                                     )
                                 })
                         };
-                        if let Ok(mut q) = app_state.steer_queue.lock() {
-                            q.enqueue(
-                                station_core::state::steer::QueuedSteer {
-                                    key: session_id.clone(),
-                                    sid: Some(session_id.clone()),
-                                    dir: (!cwd.is_empty()).then_some(cwd.clone()),
-                                    agent: agent.clone(),
-                                    text: clean.clone(),
-                                    name,
-                                    at: ts,
-                                },
-                                ts,
-                            );
-                        }
                         if !is_busy
                             && !cwd.is_empty()
                             && let Some(rt) = runtime_handle
                         {
+                            // Idle session with a live runtime: dispatch immediately via TaskManager
+                            // (never double-enqueue into steer_queue).
                             let tasks = app_state.tasks.clone();
                             let toast_tx = bridge.toast_tx.clone();
                             let req = station_core::state::tasks::TaskStartRequest {
@@ -2519,6 +2566,19 @@ fn process_ui_actions(
                                         .try_send(("Prompt".to_owned(), format!("{agent}: {code}")));
                                 }
                             });
+                        } else if let Ok(mut q) = app_state.steer_queue.lock() {
+                            q.enqueue(
+                                station_core::state::steer::QueuedSteer {
+                                    key: session_id.clone(),
+                                    sid: Some(session_id.clone()),
+                                    dir: (!cwd.is_empty()).then_some(cwd.clone()),
+                                    agent: agent.clone(),
+                                    text: clean.clone(),
+                                    name,
+                                    at: ts,
+                                },
+                                ts,
+                            );
                         }
                     }
                     BridgeBackend::BindError { .. } => {
@@ -2539,7 +2599,7 @@ fn process_ui_actions(
                         let _ = action_tx.try_send(RemoteActionCmd {
                             path: "/api/chat",
                             body: json!({ "op": "send", "text": clean }),
-                            refresh: RefreshKind::Live,
+                            refresh: RefreshKind::Chat,
                             launch_toast_label: None,
                         });
                     }
@@ -3647,7 +3707,7 @@ mod tests {
             port: 4310,
             sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
             sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-            sys_synced_once: false,
+            sys_refresh_due: true,
             banner_pushed: true,
             seen_perm_ids: HashSet::new(),
             last_window_focused: None,
@@ -4267,5 +4327,282 @@ mod tests {
             state.steer_queue.lock().unwrap().len() >= 1,
             "SendPrompt must route through steer_queue/TaskManager"
         );
+    }
+
+    #[test]
+    fn send_prompt_routes_busy_to_steer_and_idle_to_tasks_without_double_execution() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+
+        // 1. InProcess mode with live runtime: busy session -> steer_queue; idle session -> TaskManager ONLY (steer_queue stays 0).
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd_str = tmp.path().to_string_lossy().into_owned();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            true,
+            false,
+        );
+        let state = bridge.in_process_state().expect("expected InProcess bridge");
+        {
+            let mut office = state.office.lock().unwrap();
+            office.ingest_raw_event(json!({
+                "session_id": "s-idle",
+                "hook_event_name": "SessionStart",
+                "cwd": cwd_str,
+            }));
+            office.ingest_raw_event(json!({
+                "session_id": "s-busy",
+                "hook_event_name": "UserPromptSubmit",
+                "cwd": cwd_str,
+                "prompt": "working"
+            }));
+        }
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        // Idle session must NOT enqueue into steer_queue (avoids double execution on Stop).
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::SendPrompt {
+                session_id: "s-idle".to_owned(),
+                text: "run idle task".to_owned(),
+            });
+        app.update();
+        assert_eq!(
+            state.steer_queue.lock().unwrap().len(),
+            0,
+            "idle InProcess SendPrompt must dispatch via TaskManager without double-enqueuing into steer_queue"
+        );
+
+        // Busy session MUST enqueue into steer_queue.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::SendPrompt {
+                session_id: "s-busy".to_owned(),
+                text: "steer busy session".to_owned(),
+            });
+        app.update();
+        assert_eq!(
+            state.steer_queue.lock().unwrap().len(),
+            1,
+            "busy InProcess SendPrompt must enqueue into steer_queue"
+        );
+        drop(app);
+
+        // 2. AttachedHttp mode: busy session -> POST /api/tasks/steer; resting session -> POST /api/tasks.
+        let (action_tx, mut action_rx) = mpsc::channel::<RemoteActionCmd>(8);
+        let (shutdown, _rx) = watch::channel(false);
+        let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let attached_bridge = LiveServerBridge {
+            backend: BridgeBackend::AttachedHttp {
+                snapshot: Arc::new(Mutex::new(RemoteSnapshot::default())),
+                action_tx,
+                _shutdown: shutdown,
+            },
+            data_dir: tmp.path().to_path_buf(),
+            assets_dir: assets_dir.clone(),
+            port: 4310,
+            sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+            sys_refresh_due: true,
+            banner_pushed: true,
+            seen_perm_ids: HashSet::new(),
+            last_window_focused: None,
+            toast_tx,
+            toast_rx,
+        };
+        let mut ui = UiState::new_live(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        ui.sessions = vec![
+            SessionCard {
+                id: "att-busy".to_owned(),
+                agent: "claude".to_owned(),
+                project: "p".to_owned(),
+                status: "work".to_owned(),
+                model: "opus".to_owned(),
+                last_prompt: String::new(),
+                tool: None,
+                tool_kind: None,
+                desk: 0,
+                cost_usd: 0.0,
+                tokens: 0,
+                pinned: false,
+            },
+            SessionCard {
+                id: "att-rest".to_owned(),
+                agent: "codex".to_owned(),
+                project: "p".to_owned(),
+                status: "rest".to_owned(),
+                model: "gpt".to_owned(),
+                last_prompt: String::new(),
+                tool: None,
+                tool_kind: None,
+                desk: 1,
+                cost_usd: 0.0,
+                tokens: 0,
+                pinned: false,
+            },
+        ];
+        ui.push_action(UiAction::SendPrompt {
+            session_id: "att-busy".to_owned(),
+            text: "pivot now".to_owned(),
+        });
+        ui.push_action(UiAction::SendPrompt {
+            session_id: "att-rest".to_owned(),
+            text: "start next".to_owned(),
+        });
+
+        let mut app2 = App::new();
+        app2.insert_resource(ClearColor::default())
+            .insert_resource(ui)
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(attached_bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+        app2.update();
+
+        let cmd1 = action_rx.try_recv().expect("busy SendPrompt must enqueue remote cmd");
+        assert_eq!(cmd1.path, "/api/tasks/steer");
+        assert_eq!(cmd1.body["sid"], "att-busy");
+
+        let cmd2 = action_rx.try_recv().expect("rest SendPrompt must enqueue remote cmd");
+        assert_eq!(cmd2.path, "/api/tasks");
+        assert_eq!(cmd2.body["sid"], "att-rest");
+        assert_eq!(cmd2.body["agent"], "codex");
+    }
+
+    #[test]
+    fn sys_sync_timer_latches_due_flag_across_unaligned_frame_deltas() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir,
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        // Set sync_timer to 1.0s and sys_sync_timer to 0.4s so sys_sync_timer fires on a frame where sync_timer does NOT.
+        bridge.sync_timer = Timer::from_seconds(1.0, TimerMode::Repeating);
+        bridge.sys_sync_timer = Timer::from_seconds(0.4, TimerMode::Repeating);
+        bridge.sys_refresh_due = false;
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(bridge)
+            .add_systems(Update, sync_live_state_to_ui);
+
+        // Advance 450ms -> sys_sync_timer finishes while sync_timer is still at 450ms/1000ms.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(450));
+        app.update();
+        assert!(
+            app.world().resource::<LiveServerBridge>().sys_refresh_due,
+            "sys_refresh_due must latch true when sys_sync_timer fires off-cycle from sync_timer"
+        );
+
+        // Advance another 600ms -> sync_timer finishes, consumes sys_refresh_due, and resets it to false.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(600));
+        app.update();
+        assert!(
+            !app.world().resource::<LiveServerBridge>().sys_refresh_due,
+            "sys_refresh_due must reset to false after sync_in_process_telemetry runs"
+        );
+    }
+
+    #[test]
+    fn attached_http_post_group_chat_refreshes_chat_immediately_without_waiting_for_telemetry_poll() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tmp_srv = tempfile::tempdir().unwrap();
+        let srv_state = Arc::new(AppState::new(tmp_srv.path().to_path_buf(), None).unwrap());
+        let handle = rt
+            .block_on(start_http_server(srv_state, "127.0.0.1", 0))
+            .unwrap();
+        let port = handle.addr.port();
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp_client = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp_client.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            true,
+        );
+        assert_eq!(bridge.mode(), BridgeMode::AttachedHttp);
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, (process_ui_actions, sync_live_state_to_ui).chain());
+
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::PostGroupChat("Immediate attached chat!".to_owned()));
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut saw_chat = false;
+        while Instant::now() < deadline {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(600));
+            app.update();
+            if app
+                .world()
+                .resource::<UiState>()
+                .chat
+                .iter()
+                .any(|m| m.text.contains("Immediate attached chat!"))
+            {
+                saw_chat = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            saw_chat,
+            "AttachedHttp PostGroupChat must immediately refresh /api/chat into UiState.chat"
+        );
+
+        drop(app);
+        let _ = handle.shutdown.send(true);
+        drop(rt);
     }
 }
