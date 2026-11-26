@@ -301,6 +301,12 @@ mod tests {
             "ui.topBar.mac",
             "ui.cameraToolbar.home",
             "board.title",
+            "station.brand",
+            "station.apps",
+            "station.addApp",
+            "station.status.running",
+            "station.gpu",
+            "station.tray",
         ];
 
         for lang in ["en", "vi", "th"] {
