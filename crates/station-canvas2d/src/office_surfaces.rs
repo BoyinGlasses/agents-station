@@ -451,6 +451,572 @@ pub fn draw_microwave_timer(seconds: u32, fonts: &mut FontEngine) -> RgbaSurface
     c.into_surface()
 }
 
+/// Tileable 256×256 neutral-warm oak plank texture (256 KB VRAM).
+/// Designed to wrap seamlessly in U & V and accept PBR `StandardMaterial::base_color`
+/// tinting for Cozy warm oak, Pro dev pale oak, Library dark walnut, and Lounge wood.
+pub fn draw_plank_tile() -> RgbaSurface {
+    const W: u32 = 256;
+    const H: u32 = 256;
+    let mut c = Canvas2d::new(W, H);
+    let mut rng = SeedRng(104729);
+    let rows = 8u32;
+    let rh = (H / rows) as f32;
+
+    for r in 0..rows {
+        let y = r as f32 * rh;
+        let offset = ((r * 83 + 19) % W) as f32;
+        let p0 = offset;
+        let p1 = (offset + 128.0) % W as f32;
+        let shade_a = (232.0 + (rng.next_f32() - 0.5) * 18.0).clamp(212.0, 248.0) as u8;
+        let shade_b = (224.0 + (rng.next_f32() - 0.5) * 18.0).clamp(205.0, 244.0) as u8;
+        c.fill_rect(0.0, y, W as f32, rh, [shade_a, shade_a.saturating_sub(4), shade_a.saturating_sub(10), 255]);
+
+        // Second plank segment with seamless wrap across x = 256
+        let seg_w = 128.0_f32;
+        if p1 + seg_w <= W as f32 {
+            c.fill_rect(p1, y, seg_w, rh, [shade_b, shade_b.saturating_sub(5), shade_b.saturating_sub(11), 255]);
+        } else {
+            let tail = W as f32 - p1;
+            c.fill_rect(p1, y, tail, rh, [shade_b, shade_b.saturating_sub(5), shade_b.saturating_sub(11), 255]);
+            c.fill_rect(0.0, y, seg_w - tail, rh, [shade_b, shade_b.saturating_sub(5), shade_b.saturating_sub(11), 255]);
+        }
+
+        // Subtle longitudinal wood grain lines
+        for _ in 0..22 {
+            let gx = rng.next_f32() * W as f32;
+            let gy = y + 2.0 + rng.next_f32() * (rh - 4.0);
+            let gw = 16.0 + rng.next_f32() * 54.0;
+            let alpha = (10.0 + rng.next_f32() * 18.0) as u8;
+            let col = [130, 102, 74, alpha];
+            if gx + gw <= W as f32 {
+                c.fill_rect(gx, gy, gw, 1.0, col);
+            } else {
+                let first = W as f32 - gx;
+                c.fill_rect(gx, gy, first, 1.0, col);
+                c.fill_rect(0.0, gy, gw - first, 1.0, col);
+            }
+        }
+
+        // Vertical plank end-seams and horizontal plank seam
+        let seam = [96, 72, 48, 88];
+        c.fill_rect(p0, y, 1.5, rh, seam);
+        c.fill_rect(p1, y, 1.5, rh, seam);
+        c.fill_rect(0.0, y, W as f32, 1.5, [92, 68, 44, 96]);
+    }
+    c.into_surface()
+}
+
+/// Tileable 128×128 pantry cream/warm-stone 4×4 checker tile (`pro/floor.js:37`, 64 KB VRAM).
+pub fn draw_checker_tile() -> RgbaSurface {
+    const S: u32 = 128;
+    let mut c = Canvas2d::new(S, S);
+    let mut rng = SeedRng(22307);
+    c.fill(hex("#EFE7D8"));
+    let cell = 32.0;
+    let alt = hex("#D8C3A3");
+    for i in 0..4 {
+        for j in 0..4 {
+            if (i + j) % 2 == 1 {
+                c.fill_rect(i as f32 * cell, j as f32 * cell, cell, cell, alt);
+            }
+        }
+    }
+    for _ in 0..420 {
+        let x = rng.next_f32() * S as f32;
+        let y = rng.next_f32() * S as f32;
+        let a = (4.0 + rng.next_f32() * 10.0) as u8;
+        c.fill_rect(x, y, 2.0, 2.0, [0, 0, 0, a]);
+    }
+    let grout = [150, 130, 100, 90];
+    for i in 0..4 {
+        let p = i as f32 * cell;
+        c.fill_rect(p, 0.0, 1.5, S as f32, grout);
+        c.fill_rect(0.0, p, S as f32, 1.5, grout);
+    }
+    c.into_surface()
+}
+
+/// Tileable 128×128 pantry subway backsplash tiles (`pro/floor.js:55-58`, 64 KB VRAM).
+pub fn draw_subway_tile() -> RgbaSurface {
+    const S: u32 = 128;
+    let mut c = Canvas2d::new(S, S);
+    c.fill(hex("#D9D4CA"));
+    let rows = 4usize;
+    let rh = 32.0;
+    let tw = 64.0;
+    for r in 0..rows {
+        let y = r as f32 * rh;
+        let off = if r % 2 == 1 { 32.0 } else { 0.0 };
+        let col = if r % 2 == 1 { hex("#FBFAF6") } else { hex("#F7F5F0") };
+        for k in -1..=2 {
+            let x = k as f32 * tw + off;
+            c.fill_rect(x + 2.0, y + 2.0, tw - 4.0, rh - 4.0, col);
+        }
+    }
+    c.into_surface()
+}
+
+/// Tileable 128×128 neutral technical tile grid (64 KB VRAM), tintable for server raised tiles,
+/// corridor stone, lobby stone, restroom mosaic, pod carpet tiles, and terrace stone.
+pub fn draw_server_grid_tile() -> RgbaSurface {
+    const S: u32 = 128;
+    let mut c = Canvas2d::new(S, S);
+    let mut rng = SeedRng(99173);
+    c.fill(hex("#F3F5F7"));
+    let cell = 64.0;
+    // Slight subtle checker value modulation for natural tile look
+    for i in 0..2 {
+        for j in 0..2 {
+            if (i + j) % 2 == 1 {
+                c.fill_rect(i as f32 * cell, j as f32 * cell, cell, cell, [235, 238, 242, 255]);
+            }
+        }
+    }
+    for _ in 0..480 {
+        let x = rng.next_f32() * S as f32;
+        let y = rng.next_f32() * S as f32;
+        let a = (5.0 + rng.next_f32() * 12.0) as u8;
+        c.fill_rect(x, y, 2.0, 2.0, [0, 0, 0, a]);
+    }
+    let seam = [90, 100, 115, 95];
+    for i in 0..2 {
+        let p = i as f32 * cell;
+        c.fill_rect(p, 0.0, 2.0, S as f32, seam);
+        c.fill_rect(0.0, p, S as f32, 2.0, seam);
+    }
+    c.into_surface()
+}
+
+/// Tileable 128×128 neutral speckled carpet/rug texture (`pro/pieces.js:36`, 64 KB VRAM),
+/// tintable to any room carpet or rug color via `StandardMaterial::base_color`.
+pub fn draw_speckle_rug_tile() -> RgbaSurface {
+    const S: u32 = 128;
+    let mut c = Canvas2d::new(S, S);
+    let mut rng = SeedRng(51827);
+    c.fill(hex("#F0F0F0"));
+    for _ in 0..1400 {
+        let x = rng.next_f32() * S as f32;
+        let y = rng.next_f32() * S as f32;
+        let col = if rng.next_f32() < 0.5 {
+            [0, 0, 0, 20]
+        } else {
+            [255, 255, 255, 22]
+        };
+        c.fill_rect(x, y, 2.0, 2.0, col);
+    }
+    c.into_surface()
+}
+
+/// Tileable 128×128 vertical wainscoting beadboard slats (64 KB VRAM).
+pub fn draw_wainscot_slats_tile() -> RgbaSurface {
+    const S: u32 = 128;
+    let mut c = Canvas2d::new(S, S);
+    c.fill(hex("#F4F6F1"));
+    let slats = 8usize;
+    let sw = S as f32 / slats as f32;
+    for i in 0..slats {
+        let x = i as f32 * sw;
+        c.fill_rect(x, 0.0, 2.0, S as f32, [140, 152, 128, 80]);
+        c.fill_rect(x + 2.0, 0.0, 1.5, S as f32, [255, 255, 255, 90]);
+    }
+    c.into_surface()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WindowViewKind {
+    City,
+    Country,
+    Beach,
+}
+
+/// Exact Oracle `src/office/world/windows.js` 1024×512 day/night window backdrop painting.
+pub fn draw_window_painting(kind: WindowViewKind, night: bool) -> RgbaSurface {
+    const W: u32 = 1024;
+    const H: u32 = 512;
+    let mut c = Canvas2d::new(W, H);
+    let mut rng = SeedRng(if night { 9012 } else { 4517 } + kind as u64 * 131);
+    let wf = W as f32;
+    let hf = H as f32;
+
+    // Sky gradient
+    let (top_col, bot_col) = match (kind, night) {
+        (_, true) => (hex("#0A1430"), hex("#2A3A66")),
+        (WindowViewKind::City, false) => (hex("#8EC8F2"), hex("#DCEFFB")),
+        (_, false) => (hex("#8EC8F2"), hex("#E4F2F8")),
+    };
+    c.linear_gradient_rect(0.0, 0.0, wf, hf, (0.0, 0.0), (0.0, hf), &[(0.0, top_col), (1.0, bot_col)]);
+
+    // Moon + stars at night, fluffy clouds by day
+    if night {
+        c.fill_circle(wf * 0.78, hf * 0.2, 26.0, hex("#FFF3C4"));
+        for _ in 0..85 {
+            let sx = rng.next_f32() * wf;
+            let sy = rng.next_f32() * hf * 0.48;
+            let a = ((0.3 + rng.next_f32() * 0.55) * 255.0) as u8;
+            c.fill_rect(sx, sy, 2.0, 2.0, [255, 255, 255, a]);
+        }
+    } else {
+        let cloud = [255, 255, 255, 230];
+        for (cx, cy, r) in [
+            (200.0_f32, 90.0_f32, 40.0_f32),
+            (250.0, 80.0, 50.0),
+            (300.0, 95.0, 36.0),
+            (700.0, 130.0, 34.0),
+            (745.0, 120.0, 44.0),
+            (790.0, 132.0, 30.0),
+        ] {
+            c.fill_circle(cx, cy, r, cloud);
+        }
+    }
+
+    let draw_hill = |c: &mut Canvas2d, base: f32, amp: f32, col: [u8; 4], seed: f32| {
+        let mut pts = Vec::with_capacity(132);
+        pts.push((0.0, hf));
+        let mut x = 0.0_f32;
+        while x <= wf {
+            let t = x / wf;
+            let y = base
+                - amp * (t * 9.0 + seed).sin().abs().powi(3)
+                - amp * 0.25 * (t * 23.0 + seed).sin();
+            pts.push((x, y));
+            x += 8.0;
+        }
+        pts.push((wf, hf));
+        c.fill_polygon(&pts, col);
+    };
+
+    match kind {
+        WindowViewKind::City => {
+            for layer in [0usize, 1] {
+                let mut x = -20.0_f32;
+                let bcol = match (night, layer) {
+                    (true, 0) => hex("#1A2340"),
+                    (true, _) => hex("#111827"),
+                    (false, 0) => hex("#B2C2D2"),
+                    (false, _) => hex("#8FA3B8"),
+                };
+                while x < wf {
+                    let bw = 50.0 + rng.next_f32() * 70.0;
+                    let (min_f, max_f) = if layer == 1 { (0.22, 0.52) } else { (0.42, 0.82) };
+                    let bh = hf * (min_f + rng.next_f32() * (max_f - min_f));
+                    c.fill_rect(x, hf - bh, bw, bh, bcol);
+                    let mut wy = hf - bh + 12.0;
+                    while wy < hf - 10.0 {
+                        let mut wx = x + 8.0;
+                        while wx < x + bw - 10.0 {
+                            let lit = rng.next_f32() < if night { 0.42 } else { 0.12 };
+                            let wcol = match (night, lit) {
+                                (true, true) => hex("#FFD27A"),
+                                (true, false) => [255, 255, 255, 14],
+                                (false, true) => [255, 255, 255, 192],
+                                (false, false) => [255, 255, 255, 52],
+                            };
+                            c.fill_rect(wx, wy, 7.0, 9.0, wcol);
+                            wx += 14.0;
+                        }
+                        wy += 18.0;
+                    }
+                    x += bw + 4.0 + rng.next_f32() * 14.0;
+                }
+            }
+        }
+        WindowViewKind::Country => {
+            draw_hill(
+                &mut c,
+                hf * 0.62,
+                hf * 0.32,
+                hex(if night { "#1E2C3C" } else { "#9DB6B0" }),
+                1.0,
+            );
+            draw_hill(
+                &mut c,
+                hf * 0.70,
+                hf * 0.22,
+                hex(if night { "#1A2633" } else { "#7E9E86" }),
+                4.0,
+            );
+            c.fill_rect(0.0, hf * 0.72, wf, hf * 0.28, hex(if night { "#1B2A22" } else { "#8DBA55" }));
+            let ridge = hex(if night { "#22352A" } else { "#C9B45A" });
+            for r in 0..4 {
+                c.fill_rect(0.0, hf * (0.76 + r as f32 * 0.06), wf, 3.0, ridge);
+            }
+            for _ in 0..6 {
+                let hx = 40.0 + rng.next_f32() * (wf - 80.0);
+                let roof = hex(if night { "#2A2420" } else { "#B5533C" });
+                c.fill_polygon(&[(hx - 26.0, hf * 0.73), (hx, hf * 0.68), (hx + 26.0, hf * 0.73)], roof);
+                let wall = if night {
+                    if rng.next_f32() < 0.7 { hex("#FFD27A") } else { hex("#1E1A16") }
+                } else {
+                    hex("#F1E3B5")
+                };
+                c.fill_rect(hx - 20.0, hf * 0.73, 40.0, 16.0, wall);
+            }
+        }
+        WindowViewKind::Beach => {
+            let sea = hex(if night { "#16284A" } else { "#3FA2C8" });
+            c.fill_rect(0.0, hf * 0.62, wf, hf * 0.38, sea);
+            draw_hill(
+                &mut c,
+                hf * 0.63,
+                hf * 0.22,
+                hex(if night { "#1B2638" } else { "#86A8A6" }),
+                2.0,
+            );
+            c.fill_rect(0.0, hf * 0.64, wf, hf * 0.36, sea);
+            let glint = if night { [255, 240, 200, 90] } else { [255, 255, 255, 128] };
+            for _ in 0..40 {
+                let gx = rng.next_f32() * wf;
+                let gy = hf * 0.66 + rng.next_f32() * hf * 0.24;
+                c.fill_rect(gx, gy, 10.0 + rng.next_f32() * 30.0, 2.0, glint);
+            }
+            c.fill_rect(0.0, hf * 0.90, wf, hf * 0.10, hex(if night { "#3A3426" } else { "#E8D3A2" }));
+        }
+    }
+
+    c.into_surface()
+}
+
+/// Exact Oracle `windows.js:86-90` 64×128 warm linen roller blind fabric.
+pub fn draw_blind_fabric() -> RgbaSurface {
+    let mut c = Canvas2d::new(64, 128);
+    c.fill(hex("#EDE3CC"));
+    for y in (0..128).step_by(8) {
+        c.fill_rect(0.0, y as f32, 64.0, 2.0, [120, 96, 60, 26]);
+    }
+    c.fill_rect(0.0, 122.0, 64.0, 6.0, hex("#B9A47E"));
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/pieces.js:96-103` & `pro/wing.js:23-35` 512×160 door / department plaque.
+pub fn draw_room_plaque(
+    title: &str,
+    sub: Option<&str>,
+    bg_hex: &str,
+    fg_hex: &str,
+    sub_hex: &str,
+    accent_hex: Option<&str>,
+    fonts: &mut FontEngine,
+) -> RgbaSurface {
+    let mut c = Canvas2d::new(512, 160);
+    c.fill(hex(bg_hex));
+    let cx = if let Some(acc) = accent_hex {
+        c.fill_rect(0.0, 0.0, 14.0, 160.0, hex(acc));
+        263.0
+    } else {
+        256.0
+    };
+    let title_y = if sub.is_some() { 34.0 } else { 52.0 };
+    fonts.draw_text(&mut c, title, cx, title_y, 50.0, hex(fg_hex), TextAlign::Center, Some(450.0), true, false);
+    if let Some(sub_txt) = sub.filter(|s| !s.is_empty()) {
+        fonts.draw_text(&mut c, sub_txt, cx, 108.0, 24.0, hex(sub_hex), TextAlign::Center, Some(450.0), false, false);
+    }
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/floor.js:277-285` 256×128 WC pictogram sign.
+pub fn draw_wc_sign() -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 128);
+    c.fill(hex("#1E232B"));
+    let fg = hex("#F3EFE8");
+    // Male silhouette (x = 70)
+    c.fill_circle(70.0, 30.0, 11.0, fg);
+    c.fill_rect(57.0, 46.0, 26.0, 46.0, fg);
+    c.fill_rect(60.0, 92.0, 7.0, 26.0, fg);
+    c.fill_rect(73.0, 92.0, 7.0, 26.0, fg);
+    // Center divider
+    c.fill_rect(126.0, 18.0, 4.0, 92.0, fg);
+    // Female silhouette (x = 186)
+    c.fill_circle(186.0, 30.0, 11.0, fg);
+    c.fill_polygon(&[(166.0, 92.0), (186.0, 46.0), (206.0, 92.0)], fg);
+    c.fill_rect(176.0, 92.0, 7.0, 26.0, fg);
+    c.fill_rect(189.0, 92.0, 7.0, 26.0, fg);
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/floor.js:199-203` 1024×220 glowing `"My Office"` reception/lobby sign.
+pub fn draw_my_office_logo(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(1024, 220);
+    let bg = hex("#1C2620");
+    let mark = hex("#E8865F");
+    c.fill(bg);
+
+    // OFFICE_MARK (24×24 coordinate space scaled 6.2× around (150, 110))
+    let ox = 150.0 - 12.0 * 6.2;
+    let oy = 110.0 - 12.0 * 6.2;
+    let sc = 6.2_f32;
+    c.round_rect(ox + 4.0 * sc, oy + 2.0 * sc, 16.0 * sc, 20.0 * sc, 3.0 * sc, mark);
+    // Four window cutouts + center doorway cutout
+    for (wx, wy) in [(7.5_f32, 6.0_f32), (13.5, 6.0), (7.5, 11.0), (13.5, 11.0)] {
+        c.fill_rect(ox + wx * sc, oy + wy * sc, 3.0 * sc, 3.0 * sc, bg);
+    }
+    c.fill_rect(ox + 10.2 * sc, oy + 17.0 * sc, 3.6 * sc, 5.0 * sc, bg);
+
+    fonts.draw_text(&mut c, "My Office", 260.0, 62.0, 92.0, hex("#F6EFE4"), TextAlign::Left, Some(720.0), true, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/floor.js:244` 256×64 reception desk sign.
+pub fn draw_reception_tag(label: &str, fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 64);
+    c.fill(hex("#1C2620"));
+    fonts.draw_text(&mut c, label, 128.0, 16.0, 28.0, hex("#F6EFE4"), TextAlign::Center, Some(236.0), true, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/floor.js:133-139` 640×360 meeting room Sprint Review slide.
+pub fn draw_sprint_review_slide(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(640, 360);
+    c.fill(hex("#F7F5F0"));
+    c.fill_rect(0.0, 0.0, 14.0, 360.0, hex("#D97757"));
+    fonts.draw_text(&mut c, "Sprint review", 44.0, 30.0, 40.0, hex("#1E232B"), TextAlign::Left, None, true, false);
+    fonts.draw_text(&mut c, "This week's progress", 44.0, 80.0, 22.0, hex("#7A8494"), TextAlign::Left, None, false, false);
+    for (i, &v) in [0.42_f32, 0.58, 0.51, 0.74, 0.66, 0.88].iter().enumerate() {
+        let bh = v * 180.0;
+        let col = if i == 5 { hex("#D97757") } else { hex("#3F7CC4") };
+        c.fill_rect(60.0 + i as f32 * 88.0, 320.0 - bh, 52.0, bh, col);
+    }
+    c.fill_rect(44.0, 322.0, 552.0, 3.0, hex("#C9CED6"));
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/wing.js:45-61` 512×320 HQ department 3-column Kanban sprint board.
+pub fn draw_sprint_board(accent_hex: &str, seed: u64, fonts: &mut FontEngine) -> RgbaSurface {
+    const W: u32 = 512;
+    const H: u32 = 320;
+    let mut c = Canvas2d::new(W, H);
+    let mut rng = SeedRng(73 + seed * 31);
+    c.fill(hex("#FBFBF8"));
+    fonts.draw_text(&mut c, "Sprint board", 18.0, 12.0, 28.0, hex("#1E232B"), TextAlign::Left, None, true, false);
+    c.fill_rect(18.0, 50.0, 120.0, 5.0, hex(accent_hex));
+
+    let cols = ["To do", "Doing", "Done"];
+    let counts = [4usize, 3, 3];
+    let stickies = [hex("#FFE27A"), hex("#FFB4A2"), hex("#A8E6CF"), hex("#BDE0FE")];
+    let col_w = (W as f32 - 36.0) / 3.0;
+    for (k, &col_name) in cols.iter().enumerate() {
+        let cx = 18.0 + k as f32 * col_w;
+        fonts.draw_text(&mut c, col_name, cx + 6.0, 68.0, 18.0, hex("#7A8494"), TextAlign::Left, None, true, false);
+        if k < 2 {
+            c.fill_rect(cx + col_w - 3.0, 68.0, 2.0, H as f32 - 84.0, [30, 35, 43, 30]);
+        }
+        for n in 0..counts[k] {
+            let px = cx + 8.0 + (n % 2) as f32 * (col_w * 0.5 - 4.0);
+            let py = 100.0 + (n / 2) as f32 * 64.0;
+            if py + 52.0 > H as f32 - 8.0 {
+                break;
+            }
+            let sw = col_w * 0.5 - 14.0;
+            c.fill_rect(px, py, sw, 52.0, stickies[(n + k + seed as usize) % stickies.len()]);
+            for line in 0..3 {
+                let lw = (sw - 12.0) * (0.5 + rng.next_f32() * 0.5);
+                c.fill_rect(px + 6.0, py + 10.0 + line as f32 * 12.0, lw, 4.0, [30, 35, 43, 90]);
+            }
+        }
+    }
+    c.into_surface()
+}
+
+/// Server room precision AC cooler live CPU / room temperature display (`pro/floor.js:192`).
+pub fn draw_cooler_screen(cpu_pct: u8, temp_c: f32, fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 150);
+    c.fill(hex("#0A111A"));
+    c.fill_rect(0.0, 0.0, 256.0, 26.0, hex("#132032"));
+    fonts.draw_text(&mut c, "PRECISION AC · RACK", 12.0, 5.0, 13.0, hex("#6AAEFF"), TextAlign::Left, None, true, true);
+    let temp_str = format!("{temp_c:.1}°C");
+    fonts.draw_text(&mut c, &temp_str, 14.0, 36.0, 44.0, hex("#3DDC84"), TextAlign::Left, None, true, true);
+    let cpu = cpu_pct.min(100);
+    fonts.draw_text(&mut c, &format!("HOST CPU {cpu}%"), 14.0, 96.0, 15.0, hex("#B8C5D6"), TextAlign::Left, None, true, true);
+    c.fill_rect(14.0, 122.0, 228.0, 12.0, hex("#1F2B3D"));
+    let bar_col = if cpu > 80 { hex("#FF6B4A") } else { hex("#3DDC84") };
+    c.fill_rect(14.0, 122.0, 2.28 * cpu as f32, 12.0, bar_col);
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/floor.js:326-331` lobby `"SHIP SMALL, SHIP OFTEN"` framed poster.
+pub fn draw_poster_ship_often(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 349);
+    c.fill(hex("#F6EFE4"));
+    c.fill_rect(0.0, 0.0, 256.0, 10.0, hex("#D97757"));
+    for (i, line) in ["SHIP", "SMALL,", "SHIP", "OFTEN"].iter().enumerate() {
+        fonts.draw_text(&mut c, line, 128.0, 64.0 + i as f32 * 52.0, 32.0, hex("#1E232B"), TextAlign::Center, None, true, false);
+    }
+    fonts.draw_text(&mut c, "My Office", 128.0, 314.0, 16.0, hex("#7A8494"), TextAlign::Center, None, false, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `pro/floor.js:332-337` pantry `"Team outing 2026"` framed poster.
+pub fn draw_poster_team_outing(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 186);
+    c.linear_gradient_rect(0.0, 0.0, 256.0, 186.0, (0.0, 0.0), (0.0, 186.0), &[(0.0, hex("#9CC9E8")), (1.0, hex("#F3E3C2"))]);
+    c.fill_rect(0.0, 130.0, 256.0, 56.0, hex("#6A8042"));
+    let shirts = ["#6A8042", "#E8742A", "#3F7CC4", "#8C4FA8", "#D64550", "#2A9D8F", "#C9A227"];
+    for (i, &col) in shirts.iter().enumerate() {
+        let x = 22.0 + i as f32 * 34.0;
+        c.fill_rect(x - 9.0, 96.0, 18.0, 30.0, hex(col));
+        c.fill_circle(x, 86.0, 10.0, hex("#F2D3B3"));
+    }
+    fonts.draw_text(&mut c, "Team outing 2026", 12.0, 8.0, 14.0, hex("#FFFFFF"), TextAlign::Left, None, true, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `entrance.js:168-174` 192×72 elevator LED floor indicator (`"▼ 12"`).
+pub fn draw_lift_display(text: &str, fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(192, 72);
+    c.fill(hex("#0B0D10"));
+    fonts.draw_text(&mut c, text, 96.0, 14.0, 42.0, hex("#FFB23F"), TextAlign::Center, Some(180.0), true, true);
+    c.into_surface()
+}
+
+/// Exact Oracle `entrance.js:135-141` 512×96 lit green stairwell `EMERGENCY EXIT / STAIRS` sign.
+pub fn draw_exit_sign(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(512, 96);
+    let green = hex("#0E8A4A");
+    let white = hex("#FFFFFF");
+    c.fill(green);
+    c.fill_rect(10.0, 10.0, 76.0, 76.0, white);
+    c.fill_circle(54.0, 24.0, 8.0, green);
+    for ((x0, y0), (x1, y1)) in [
+        ((50.0_f32, 34.0_f32), (42.0_f32, 56.0_f32)),
+        ((42.0, 56.0), (56.0, 70.0)),
+        ((56.0, 70.0), (52.0, 84.0)),
+        ((42.0, 56.0), (30.0, 66.0)),
+        ((48.0, 40.0), (62.0, 48.0)),
+        ((48.0, 40.0), (32.0, 44.0)),
+    ] {
+        c.stroke_line(x0, y0, x1, y1, 8.0, green);
+    }
+    fonts.draw_text(&mut c, "EMERGENCY EXIT", 294.0, 14.0, 32.0, white, TextAlign::Center, Some(390.0), true, false);
+    fonts.draw_text(&mut c, "STAIRS", 294.0, 56.0, 22.0, white, TextAlign::Center, Some(390.0), true, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `entrance.js:142-143` 256×160 stairwell landing floor number painted on back wall.
+pub fn draw_stair_floor_sign(floor: u8, fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 160);
+    c.fill(hex("#E6E3DA"));
+    fonts.draw_text(&mut c, &floor.to_string(), 128.0, 14.0, 88.0, hex("#2F5A3E"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "FLOOR", 128.0, 118.0, 26.0, hex("#2F5A3E"), TextAlign::Center, None, true, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `entrance.js:144-145` 256×160 stairwell fire-door plate (`"STAIRS / Floor 12"`).
+pub fn draw_stair_door_plate(floor: u8, fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 160);
+    c.fill(hex("#1F2328"));
+    fonts.draw_text(&mut c, "STAIRS", 128.0, 36.0, 34.0, hex("#F3EFE8"), TextAlign::Center, Some(236.0), true, false);
+    fonts.draw_text(&mut c, &format!("Floor {floor}"), 128.0, 94.0, 22.0, hex("#F3EFE8"), TextAlign::Center, Some(236.0), false, false);
+    c.into_surface()
+}
+
+/// Exact Oracle `trinkets.js:55` 64×48 desk/credenza mini framed landscape photo.
+pub fn draw_framed_photo() -> RgbaSurface {
+    let mut c = Canvas2d::new(64, 48);
+    c.linear_gradient_rect(0.0, 0.0, 64.0, 48.0, (0.0, 0.0), (0.0, 48.0), &[(0.0, hex("#8EC8F2")), (1.0, hex("#E4F2F8"))]);
+    c.fill_circle(48.0, 12.0, 6.0, hex("#FFD166"));
+    c.fill_polygon(&[(0.0, 48.0), (18.0, 24.0), (34.0, 40.0), (46.0, 28.0), (64.0, 48.0)], hex("#6A9A4C"));
+    c.into_surface()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,5 +1065,58 @@ mod tests {
         assert_eq!(draw_radial_glow().width, 128);
         assert_eq!(draw_dev_server_badge(Some(4310), &mut f).width, 96);
         assert_eq!(draw_microwave_timer(95, &mut f).width, 128);
+    }
+
+    #[test]
+    fn tileable_floor_wall_rug_surfaces_fit_under_1mb_and_signs_render_cleanly() {
+        let mut f = fonts();
+        let plank = draw_plank_tile();
+        let checker = draw_checker_tile();
+        let subway = draw_subway_tile();
+        let server = draw_server_grid_tile();
+        let rug = draw_speckle_rug_tile();
+        let wain = draw_wainscot_slats_tile();
+
+        assert_eq!((plank.width, plank.height), (256, 256));
+        assert_eq!((checker.width, checker.height), (128, 128));
+        assert_eq!((subway.width, subway.height), (128, 128));
+        assert_eq!((server.width, server.height), (128, 128));
+        assert_eq!((rug.width, rug.height), (128, 128));
+        assert_eq!((wain.width, wain.height), (128, 128));
+
+        let total_tile_bytes = plank.rgba.len()
+            + checker.rgba.len()
+            + subway.rgba.len()
+            + server.rgba.len()
+            + rug.rgba.len()
+            + wain.rgba.len();
+        assert!(
+            total_tile_bytes < 1_048_576,
+            "combined repeating floor/wall/rug tiles must stay < 1 MB, got {total_tile_bytes}"
+        );
+
+        for kind in [WindowViewKind::City, WindowViewKind::Country, WindowViewKind::Beach] {
+            let day = draw_window_painting(kind, false);
+            let night = draw_window_painting(kind, true);
+            assert_eq!((day.width, day.height), (1024, 512));
+            assert_eq!((night.width, night.height), (1024, 512));
+            assert_ne!(day.rgba, night.rgba);
+        }
+
+        assert_eq!((draw_blind_fabric().width, draw_blind_fabric().height), (64, 128));
+        assert_eq!(draw_room_plaque("DIRECTOR", None, "#1E232B", "#F3EFE8", "#A9B2C0", None, &mut f).width, 512);
+        assert_eq!(draw_wc_sign().width, 256);
+        assert_eq!(draw_my_office_logo(&mut f).width, 1024);
+        assert_eq!(draw_reception_tag("RECEPTION", &mut f).width, 256);
+        assert_eq!(draw_sprint_review_slide(&mut f).width, 640);
+        assert_eq!(draw_sprint_board("#3F7CC4", 1, &mut f).width, 512);
+        assert_eq!(draw_cooler_screen(24, 21.5, &mut f).width, 256);
+        assert_eq!(draw_poster_ship_often(&mut f).height, 349);
+        assert_eq!(draw_poster_team_outing(&mut f).height, 186);
+        assert_eq!(draw_lift_display("▼ 12", &mut f).width, 192);
+        assert_eq!(draw_exit_sign(&mut f).width, 512);
+        assert_eq!(draw_stair_floor_sign(12, &mut f).width, 256);
+        assert_eq!(draw_stair_door_plate(12, &mut f).width, 256);
+        assert_eq!(draw_framed_photo().width, 64);
     }
 }
