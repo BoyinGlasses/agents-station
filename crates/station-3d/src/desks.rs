@@ -1220,7 +1220,7 @@ pub fn animate_desks_system(
     time: Res<Time>,
     lighting: Option<Res<LightingState>>,
     screen_mats: Option<Res<ScreenMaterials>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     live_workers: Query<(&LiveSessionWorker, &ChibiWorker)>,
     preview_workers: Query<Entity, With<PreviewCastWorker>>,
     mut desks_q: Query<(&mut DeskKit, &mut DeskBedding, &mut DeskMess)>,
@@ -1234,7 +1234,7 @@ pub fn animate_desks_system(
     let t = time.elapsed_secs();
 
     // 1. Scroll 2×-height active desk screen UVs in-place (`screens.js:99`, zero allocations!)
-    if let Some(scr) = screen_mats {
+    if let (Some(scr), Some(mats)) = (screen_mats, materials.as_deref_mut()) {
         for &(kind, speed) in &[
             (ScreenKind::Code, 0.045_f32),
             (ScreenKind::Read, 0.032),
@@ -1243,7 +1243,7 @@ pub fn animate_desks_system(
             (ScreenKind::Chat, 0.038),
         ] {
             if let Some(handle) = scr.by_kind.get(&kind)
-                && let Some(mat) = materials.get_mut(handle)
+                && let Some(mat) = mats.get_mut(handle)
             {
                 let offset_y = (t * speed).fract();
                 mat.uv_transform = Affine2::from_scale_angle_translation(
@@ -1258,6 +1258,7 @@ pub fn animate_desks_system(
     // 2. Sync desk lamp bulb glow with day/night state
     if let Some(light) = lighting
         && light.is_changed()
+        && let Some(mats) = materials.as_deref_mut()
     {
         let night = light.is_night();
         let (col, strength) = if night {
@@ -1267,7 +1268,7 @@ pub fn animate_desks_system(
         };
         let lin = col.to_linear();
         for bulb in &lamp_bulbs_q {
-            if let Some(mat) = materials.get_mut(&bulb.material) {
+            if let Some(mat) = mats.get_mut(&bulb.material) {
                 mat.base_color = col;
                 mat.emissive = LinearRgba::new(lin.red * strength, lin.green * strength, lin.blue * strength, 1.0);
             }

@@ -690,7 +690,7 @@ pub fn spawn_microwaves(
 pub fn animate_microwaves_system(
     time: Res<Time>,
     mut prop_ev: EventReader<PropActivated>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut ovens: Query<&mut MicrowaveOven>,
     mut doors: Query<
         (&MicrowaveDoorPivot, &mut Transform),
@@ -754,7 +754,9 @@ pub fn animate_microwaves_system(
         }
 
         let lit = o.stage == MicrowaveStage::Run || o.open > 0.05;
-        if let Some(m) = materials.get_mut(&o.liner_mat) {
+        if let Some(mats) = materials.as_deref_mut()
+            && let Some(m) = mats.get_mut(&o.liner_mat)
+        {
             let strength = if lit { 1.4 } else { 0.0 };
             m.emissive = LinearRgba::new(1.0 * strength, 0.62 * strength, 0.19 * strength, 1.0);
         }

@@ -1035,7 +1035,7 @@ pub fn animate_furniture_system(
     telemetry: Option<Res<ServerRackTelemetry>>,
     mut rocket_queue: Option<ResMut<RocketLaunchQueue>>,
     mut palette: Option<ResMut<WorldPalette>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     clocks_q: Query<&WallClock>,
     mut led_banks_q: Query<&mut ServerLedBank>,
     neon_q: Query<&NeonSign>,
@@ -1083,7 +1083,9 @@ pub fn animate_furniture_system(
         let next_lit = pulse > -0.25;
         if next_lit != bank.lit {
             bank.lit = next_lit;
-            if let Some(mat) = materials.get_mut(&bank.material) {
+            if let Some(mats) = materials.as_deref_mut()
+                && let Some(mat) = mats.get_mut(&bank.material)
+            {
                 let lin = crate::palette::srgb_hex(bank.base_hex).to_linear();
                 let intensity = if next_lit { 1.6 } else { 0.14 };
                 mat.emissive = LinearRgba::new(lin.red * intensity, lin.green * intensity, lin.blue * intensity, 1.0);
@@ -1094,11 +1096,12 @@ pub fn animate_furniture_system(
     // 4. Night glow on SHIP IT NeonSign & FloorLampBulbs
     if let Some(light) = lighting
         && light.is_changed()
+        && let Some(mats) = materials.as_deref_mut()
     {
         let night = light.is_night();
         let neon_str = if night { 2.6 } else { 1.25 };
         for n in &neon_q {
-            if let Some(mat) = materials.get_mut(&n.material) {
+            if let Some(mat) = mats.get_mut(&n.material) {
                 mat.emissive = LinearRgba::new(neon_str, neon_str, neon_str, 1.0);
             }
         }
@@ -1109,7 +1112,7 @@ pub fn animate_furniture_system(
         };
         let blin = bulb_col.to_linear();
         for b in &lamp_bulbs_q {
-            if let Some(mat) = materials.get_mut(&b.material) {
+            if let Some(mat) = mats.get_mut(&b.material) {
                 mat.base_color = bulb_col;
                 mat.emissive = LinearRgba::new(blin.red * bulb_str, blin.green * bulb_str, blin.blue * bulb_str, 1.0);
             }
@@ -1180,9 +1183,9 @@ pub fn animate_furniture_system(
         }
     }
 
-    if let Some(ref mut pal) = palette {
+    if let (Some(pal), Some(mats)) = (palette.as_deref_mut(), materials.as_deref_mut()) {
         if !puff_origins.is_empty() {
-            let puff_m = pal.mat(&mut materials, "#F1F1F1", 0.95, 0.0);
+            let puff_m = pal.mat(mats, "#F1F1F1", 0.95, 0.0);
             let mut prng = FurnRng((((t * 1000.0) as u64).wrapping_add(19) % 2_147_483_646) + 1);
             for origin in puff_origins {
                 let jitter = Vec3::new(prng.range(-0.08, 0.08), 0.0, prng.range(-0.08, 0.08));
@@ -1205,7 +1208,7 @@ pub fn animate_furniture_system(
         if !confetti_origins.is_empty() {
             let conf_mats: Vec<Handle<StandardMaterial>> = CONFETTI_COLORS
                 .iter()
-                .map(|c| pal.matte(&mut materials, c))
+                .map(|c| pal.matte(mats, c))
                 .collect();
             let mut crng = FurnRng((((t * 1000.0) as u64).wrapping_add(97) % 2_147_483_646) + 1);
             for origin in confetti_origins {

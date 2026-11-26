@@ -573,7 +573,7 @@ pub fn animate_shredder_bins_and_cups_system(
     time: Res<Time>,
     mut telemetry: Option<ResMut<PropsLiveTelemetry>>,
     mut prop_ev: EventReader<PropActivated>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut shredders: Query<&mut PaperShredder>,
     mut strips: Query<
         (&ShredderStrip, &mut Transform, &mut Visibility),
@@ -626,7 +626,9 @@ pub fn animate_shredder_bins_and_cups_system(
             if let Ok(mut fvis) = part_vis.get_mut(sh.feed_ent) {
                 *fvis = Visibility::Inherited;
             }
-            if let Some(m) = materials.get_mut(&sh.led_mat) {
+            if let Some(mats) = materials.as_deref_mut()
+                && let Some(m) = mats.get_mut(&sh.led_mat)
+            {
                 let on = (t * 18.0).sin() > 0.0;
                 m.emissive = if on {
                     LinearRgba::new(0.31 * 1.8, 0.64 * 1.8, 1.0 * 1.8, 1.0)
@@ -639,7 +641,9 @@ pub fn animate_shredder_bins_and_cups_system(
                 if let Ok(mut fvis) = part_vis.get_mut(sh.feed_ent) {
                     *fvis = Visibility::Hidden;
                 }
-                if let Some(m) = materials.get_mut(&sh.led_mat) {
+                if let Some(mats) = materials.as_deref_mut()
+                    && let Some(m) = mats.get_mut(&sh.led_mat)
+                {
                     m.emissive = LinearRgba::new(0.24 * 1.4, 0.86 * 1.4, 0.52 * 1.4, 1.0);
                 }
             }
