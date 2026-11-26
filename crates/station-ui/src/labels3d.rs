@@ -135,7 +135,17 @@ pub fn declutter_screen_labels(
         {
             continue;
         }
-        if !bounds.contains(cand.screen_pos) {
+        let in_bounds = if cand.priority == LabelPriority::Permission {
+            // Permission badges sit ~32px above a worker's head: keep urgent alerts when the
+            // worker is near the top/bottom edge of the stage, then clamp the badge inside `bounds`.
+            cand.screen_pos.x >= bounds.left()
+                && cand.screen_pos.x <= bounds.right()
+                && cand.screen_pos.y >= bounds.top() - 48.0
+                && cand.screen_pos.y <= bounds.bottom() + 48.0
+        } else {
+            bounds.contains(cand.screen_pos)
+        };
+        if !in_bounds {
             continue;
         }
 
@@ -438,28 +448,48 @@ fn paint_zone_chip(
     );
 
     let text_x = rect.left() + 26.0;
-    let title = label.text.to_uppercase();
-    let title_galley = ui.fonts(|f| {
-        f.layout_no_wrap(
-            title,
-            FontId::new(9.5, FontFamily::Name(crate::theme::FONT_BOLD.into())),
-            if hovered { Color32::WHITE } else { Color32::from_rgba_unmultiplied(0xEC, 0xF0, 0xF7, 224) },
+    let inner_right = (rect.right() - 8.0).max(text_x + 12.0);
+    let text_clip = rect.shrink2(vec2(5.0, 0.0));
+    let pill_painter = painter.with_clip_rect(text_clip);
+
+    let title_color = if hovered {
+        Color32::WHITE
+    } else {
+        Color32::from_rgba_unmultiplied(0xEC, 0xF0, 0xF7, 224)
+    };
+    let live_str = label.subtitle.as_deref().filter(|s| !s.is_empty());
+    let live_galley = live_str.map(|live| {
+        let rich = egui::RichText::new(format!("· {live}"))
+            .font(FontId::new(9.5, FontFamily::Proportional))
+            .color(GREEN);
+        egui::WidgetText::from(rich).into_galley(
+            ui,
+            Some(egui::TextWrapMode::Truncate),
+            ((inner_right - text_x) * 0.45).max(24.0),
+            egui::FontSelection::Default,
         )
     });
+    let live_reserve = live_galley
+        .as_ref()
+        .map(|g| g.size().x + 5.0)
+        .unwrap_or(0.0);
+    let title_max_w = (inner_right - text_x - live_reserve).max(16.0);
+    let title_rich = egui::RichText::new(label.text.to_uppercase())
+        .font(FontId::new(9.5, FontFamily::Name(crate::theme::FONT_BOLD.into())))
+        .color(title_color);
+    let title_galley = egui::WidgetText::from(title_rich).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        title_max_w,
+        egui::FontSelection::Default,
+    );
     let ty = rect.center().y - title_galley.size().y * 0.5;
     let title_w = title_galley.size().x;
-    painter.galley(pos2(text_x, ty), title_galley, Color32::WHITE);
+    pill_painter.galley(pos2(text_x, ty), title_galley, title_color);
 
-    if let Some(live) = label.subtitle.as_deref().filter(|s| !s.is_empty()) {
-        let sub_galley = ui.fonts(|f| {
-            f.layout_no_wrap(
-                format!("· {live}"),
-                FontId::new(9.5, FontFamily::Proportional),
-                GREEN,
-            )
-        });
+    if let Some(sub_galley) = live_galley {
         let sy = rect.center().y - sub_galley.size().y * 0.5;
-        painter.galley(pos2(text_x + title_w + 5.0, sy), sub_galley, GREEN);
+        pill_painter.galley(pos2(text_x + title_w + 5.0, sy), sub_galley, GREEN);
     }
 }
 
@@ -492,28 +522,46 @@ fn paint_worker_tag(
     painter.circle_filled(dot_center, dot_r, label.accent);
 
     let font_size = if is_sub { 10.5 } else { 11.5 };
-    let galley = ui.fonts(|f| {
-        f.layout_no_wrap(
-            label.text.clone(),
-            FontId::new(font_size, FontFamily::Name(crate::theme::FONT_BOLD.into())),
-            INK,
-        )
-    });
     let tx = rect.left() + 21.0;
-    let ty = rect.center().y - galley.size().y * 0.5;
-    let tw = galley.size().x;
-    painter.galley(pos2(tx, ty), galley, INK);
+    let inner_right = (rect.right() - 8.0).max(tx + 12.0);
+    let pill_painter = painter.with_clip_rect(rect.shrink2(vec2(5.0, 0.0)));
 
-    if let Some(sub) = label.subtitle.as_deref().filter(|s| !s.is_empty()) {
-        let sub_galley = ui.fonts(|f| {
-            f.layout_no_wrap(
-                sub.to_owned(),
-                FontId::new(9.5, FontFamily::Proportional),
-                MUTED,
+    let sub_galley = label
+        .subtitle
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|sub| {
+            let rich = egui::RichText::new(sub)
+                .font(FontId::new(9.5, FontFamily::Proportional))
+                .color(MUTED);
+            egui::WidgetText::from(rich).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Truncate),
+                ((inner_right - tx) * 0.42).max(20.0),
+                egui::FontSelection::Default,
             )
         });
-        let sy = rect.center().y - sub_galley.size().y * 0.5;
-        painter.galley(pos2(tx + tw + 6.0, sy), sub_galley, MUTED);
+    let sub_reserve = sub_galley
+        .as_ref()
+        .map(|g| g.size().x + 6.0)
+        .unwrap_or(0.0);
+    let name_max_w = (inner_right - tx - sub_reserve).max(16.0);
+    let name_rich = egui::RichText::new(&label.text)
+        .font(FontId::new(font_size, FontFamily::Name(crate::theme::FONT_BOLD.into())))
+        .color(INK);
+    let galley = egui::WidgetText::from(name_rich).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        name_max_w,
+        egui::FontSelection::Default,
+    );
+    let ty = rect.center().y - galley.size().y * 0.5;
+    let tw = galley.size().x;
+    pill_painter.galley(pos2(tx, ty), galley, INK);
+
+    if let Some(sub_g) = sub_galley {
+        let sy = rect.center().y - sub_g.size().y * 0.5;
+        pill_painter.galley(pos2(tx + tw + 6.0, sy), sub_g, MUTED);
     }
 }
 
@@ -542,17 +590,19 @@ fn paint_speech_bubble(
         border,
     );
 
-    let max_text_w = (rect.width() - 36.0).max(24.0);
-    let galley = ui.fonts(|f| {
-        f.layout(
-            label.text.clone(),
-            FontId::new(11.0, FontFamily::Proportional),
-            INK,
-            max_text_w,
-        )
-    });
+    let max_text_w = (rect.right() - ico_rect.right() - 12.0).max(20.0);
+    let rich = egui::RichText::new(&label.text)
+        .font(FontId::new(11.0, FontFamily::Proportional))
+        .color(INK);
+    let galley = egui::WidgetText::from(rich).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        max_text_w,
+        egui::FontSelection::Default,
+    );
     let ty = rect.center().y - galley.size().y * 0.5;
-    painter.galley(pos2(ico_rect.right() + 6.0, ty), galley, INK);
+    let pill_painter = painter.with_clip_rect(rect.shrink2(vec2(5.0, 2.0)));
+    pill_painter.galley(pos2(ico_rect.right() + 6.0, ty), galley, INK);
 }
 
 fn paint_permission_badge(
@@ -578,11 +628,12 @@ fn paint_permission_badge(
     let galley = egui::WidgetText::from(rich).into_galley(
         ui,
         Some(egui::TextWrapMode::Truncate),
-        (rect.width() - 32.0).max(24.0),
+        (rect.width() - 34.0).max(20.0),
         egui::FontSelection::Default,
     );
     let ty = rect.center().y - galley.size().y * 0.5;
-    painter.galley(pos2(rect.left() + 26.0, ty), galley, label.accent);
+    let pill_painter = painter.with_clip_rect(rect.shrink2(vec2(5.0, 0.0)));
+    pill_painter.galley(pos2(rect.left() + 26.0, ty), galley, label.accent);
 }
 
 #[cfg(test)]
@@ -838,5 +889,115 @@ mod tests {
             project_world_to_stage(Vec3::new(0.0, 2.0, 20.0), cam, cam_tf, stage_rect).is_none(),
             "behind-camera point must return None"
         );
+    }
+
+    #[test]
+    fn urgent_permission_badge_above_top_edge_worker_is_clamped_instead_of_dropped() {
+        let stage = Rect::from_min_size(pos2(300.0, 56.0), vec2(650.0, 664.0));
+        let usable = Rect::from_min_max(
+            pos2(stage.left(), stage.top() + 8.0),
+            pos2(stage.right(), stage.bottom() - 68.0),
+        );
+        // Worker is 10px from stage top (y=66), so its badge at y-32 lands at y=34 (< usable.top()=64).
+        let mut candidates = vec![
+            make_label(
+                "worker-top",
+                ProjectedLabelKind::WorkerTag,
+                LabelPriority::WorkingSession,
+                pos2(550.0, stage.top() + 10.0),
+                6.0,
+                false,
+            ),
+            make_label(
+                "perm-top",
+                ProjectedLabelKind::PermissionBadge,
+                LabelPriority::Permission,
+                pos2(550.0, stage.top() + 10.0 - 32.0),
+                5.9,
+                false,
+            ),
+        ];
+
+        let kept = declutter_screen_labels(&mut candidates, usable);
+        let perm = kept
+            .iter()
+            .find(|l| l.id == "perm-top")
+            .expect("urgent PermissionBadge above a top-edge worker must not be silently dropped");
+        let r = perm.estimated_rect();
+        assert!(
+            r.top() >= usable.top() && r.bottom() <= usable.bottom(),
+            "clamped PermissionBadge must stay inside usable stage bounds: {r:?} vs {usable:?}"
+        );
+    }
+
+    #[test]
+    fn clamped_pill_text_clips_strictly_inside_pill_rect_without_overflow() {
+        let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+        let stage = Rect::from_min_size(pos2(300.0, 56.0), vec2(180.0, 260.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw.clone(), |_| {});
+
+        let long_labels = vec![
+            ProjectedLabel {
+                id: "long-zone".to_owned(),
+                kind: ProjectedLabelKind::ZoneChip,
+                priority: LabelPriority::ZoneChip,
+                screen_pos: pos2(390.0, 120.0),
+                depth: 5.0,
+                behind_camera: false,
+                size: vec2(260.0, 25.0),
+                text: "VERY LONG VIETNAMESE ROOM NAME PHÒNG THƯ VIỆN TRA CỨU TÀI LIỆU KỸ THUẬT"
+                    .to_owned(),
+                subtitle: Some("12 đang đọc tài liệu".to_owned()),
+                accent: crate::theme::ACCENT,
+                status: None,
+                session_id: None,
+                place_id: Some("library".to_owned()),
+                icon: Some(IconKind::Book),
+            },
+            ProjectedLabel {
+                id: "long-worker".to_owned(),
+                kind: ProjectedLabelKind::WorkerTag,
+                priority: LabelPriority::WorkingSession,
+                screen_pos: pos2(390.0, 160.0),
+                depth: 4.0,
+                behind_camera: false,
+                size: vec2(240.0, 26.0),
+                text: "extremely-long-monorepo-workspace-project-name-that-must-truncate"
+                    .to_owned(),
+                subtitle: Some("antigravity".to_owned()),
+                accent: GREEN,
+                status: Some("work".to_owned()),
+                session_id: Some("s1".to_owned()),
+                place_id: None,
+                icon: None,
+            },
+        ];
+
+        let out = ctx.run(raw, |ctx| {
+            let _ = draw_projected_labels(ctx, stage, &long_labels, false, true, true);
+        });
+        assert!(!out.shapes.is_empty());
+        for clipped in &out.shapes {
+            if matches!(clipped.shape, egui::epaint::Shape::Text(_)) {
+                assert!(
+                    clipped.clip_rect.left() >= stage.left()
+                        && clipped.clip_rect.right() <= stage.right() - 4.0,
+                    "text clip_rect must stay strictly inside clamped pill bounds: {:?}",
+                    clipped.clip_rect
+                );
+                assert!(
+                    clipped.clip_rect.width() <= stage.width() - 10.0,
+                    "text clip_rect must be clipped to pill width, not full stage: {:?}",
+                    clipped.clip_rect
+                );
+            }
+        }
     }
 }
