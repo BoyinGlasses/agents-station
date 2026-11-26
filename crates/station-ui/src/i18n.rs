@@ -66,23 +66,56 @@ impl I18nStore {
         }
     }
 
-    fn substitute_device_tokens(&self, mut text: String) -> String {
-        if text.contains("{mac}") {
-            text = text.replace("{mac}", self.device_label("mac"));
+    fn fill_template(&self, template: &str, vars: &[(&str, &str)]) -> String {
+        if !template.contains('{') {
+            return template.to_owned();
         }
-        if text.contains("{Mac}") {
-            text = text.replace("{Mac}", self.device_label("Mac"));
+        let mut out = String::with_capacity(template.len());
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let after_open = &rest[open + 1..];
+            let Some(close) = after_open.find('}') else {
+                out.push_str(&rest[open..]);
+                return out;
+            };
+            let candidate = &after_open[..close];
+            // If another `{` appears before `}`, emit up to that inner `{` and rescan.
+            if let Some(inner_open) = candidate.find('{') {
+                out.push('{');
+                out.push_str(&candidate[..inner_open]);
+                rest = &after_open[inner_open..];
+                continue;
+            }
+            let is_word = !candidate.is_empty()
+                && candidate
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if is_word {
+                if let Some((_, val)) = vars.iter().find(|(k, _)| *k == candidate) {
+                    out.push_str(val);
+                } else if candidate == "mac" {
+                    out.push_str(self.device_label("mac"));
+                } else if candidate == "Mac" {
+                    out.push_str(self.device_label("Mac"));
+                } else {
+                    out.push_str(&rest[open..open + 1 + close + 1]);
+                }
+            } else {
+                out.push_str(&rest[open..open + 1 + close + 1]);
+            }
+            rest = &after_open[close + 1..];
         }
-        text
+        out.push_str(rest);
+        out
     }
 
     pub fn tr(&self, key: &str) -> String {
         let raw = self
             .lookup_value(key)
             .and_then(|v| resolve_template(v, None))
-            .unwrap_or(key)
-            .to_owned();
-        self.substitute_device_tokens(raw)
+            .unwrap_or(key);
+        self.fill_template(raw, &[])
     }
 
     pub fn tr_vars(&self, key: &str, vars: &[(&str, &str)]) -> String {
@@ -91,15 +124,11 @@ impl I18nStore {
             .find(|(k, _)| *k == "n")
             .or_else(|| vars.iter().find(|(k, _)| *k == "c" || *k == "h"))
             .and_then(|(_, v)| v.trim().parse::<usize>().ok());
-        let mut out = self
+        let raw = self
             .lookup_value(key)
             .and_then(|v| resolve_template(v, count))
-            .unwrap_or(key)
-            .to_owned();
-        for (k, v) in vars {
-            out = out.replace(&format!("{{{k}}}"), v);
-        }
-        self.substitute_device_tokens(out)
+            .unwrap_or(key);
+        self.fill_template(raw, vars)
     }
 
     pub fn tr_count(&self, key: &str, count: usize) -> String {
@@ -107,21 +136,19 @@ impl I18nStore {
         let raw = self
             .lookup_value(key)
             .and_then(|v| resolve_template(v, Some(count)))
-            .unwrap_or(key)
-            .replace("{n}", &n_str);
-        self.substitute_device_tokens(raw)
+            .unwrap_or(key);
+        self.fill_template(raw, &[("n", n_str.as_str())])
     }
 
     pub fn tr_pick(&self, key: &str, seed: usize) -> String {
         let raw = match self.lookup_value(key) {
-            Some(Value::Array(arr)) if !arr.is_empty() => arr[seed % arr.len()]
-                .as_str()
-                .unwrap_or(key)
-                .to_owned(),
-            Some(v) => resolve_template(v, None).unwrap_or(key).to_owned(),
-            None => key.to_owned(),
+            Some(Value::Array(arr)) if !arr.is_empty() => {
+                arr[seed % arr.len()].as_str().unwrap_or(key)
+            }
+            Some(v) => resolve_template(v, None).unwrap_or(key),
+            None => key,
         };
-        self.substitute_device_tokens(raw)
+        self.fill_template(raw, &[])
     }
 
     pub fn loaded_langs(&self) -> usize {
@@ -300,5 +327,29 @@ mod tests {
                 "lang={lang} bad tr_pick(events.bubble.testok) -> '{picked}'"
             );
         }
+    }
+
+    #[test]
+    fn tr_vars_uses_single_pass_without_double_substitution() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let store = I18nStore::load_from_assets(&assets, "en");
+
+        // Caller value containing {mac}/{Mac} must be preserved literally, not re-substituted.
+        let prompt = store.tr_vars("events.verb.prompt", &[("label", "echo {mac} {Mac}")]);
+        assert!(
+            prompt.contains("echo {mac} {Mac}"),
+            "expected literal {{mac}}/{{Mac}} in '{prompt}'"
+        );
+
+        // Caller value containing a later variable placeholder must not be re-expanded.
+        let tokens = store.tr_vars(
+            "drawer.tokens",
+            &[("used", "{max}"), ("max", "200k"), ("model", "opus")],
+        );
+        assert_eq!(tokens, "{max} / 200k tokens · opus");
+
+        // Unknown placeholders remain verbatim.
+        let partial = store.tr_vars("drawer.tokens", &[("used", "10k")]);
+        assert_eq!(partial, "10k / {max} tokens · {model}");
     }
 }
