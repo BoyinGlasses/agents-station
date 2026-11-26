@@ -1,3 +1,6 @@
+pub mod markdown;
+pub mod session;
+
 use crate::i18n::I18nStore;
 use crate::state::{ActiveDrawer, GpuPrefUi, UiAction, UiState};
 use crate::theme::{
@@ -13,9 +16,13 @@ pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nS
         return;
     }
 
+    if drawer == ActiveDrawer::Session {
+        session::draw_session_drawer(ctx, state, i18n);
+        return;
+    }
+
     let title = match drawer {
-        ActiveDrawer::None => return,
-        ActiveDrawer::Session => "Session Inspector",
+        ActiveDrawer::None | ActiveDrawer::Session => return,
         ActiveDrawer::System => "System & Ports Monitor",
         ActiveDrawer::Burn => "OTLP Burn & Tokens",
         ActiveDrawer::Vault => "Prompt Vault & Coach",
@@ -38,8 +45,7 @@ pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nS
         .resizable(false)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match drawer {
-                ActiveDrawer::None => {}
-                ActiveDrawer::Session => draw_session_drawer(ui, state),
+                ActiveDrawer::None | ActiveDrawer::Session => {}
                 ActiveDrawer::System => draw_system_drawer(ui, state),
                 ActiveDrawer::Burn => draw_burn_drawer(ui, state),
                 ActiveDrawer::Vault => draw_vault_drawer(ui, state),
@@ -56,76 +62,6 @@ pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nS
     if !open {
         state.active_drawer = ActiveDrawer::None;
     }
-}
-
-fn draw_session_drawer(ui: &mut egui::Ui, state: &mut UiState) {
-    let selected = state
-        .selected_session
-        .as_deref()
-        .and_then(|id| state.sessions.iter().find(|s| s.id == id))
-        .or_else(|| state.sessions.first())
-        .cloned();
-
-    let Some(sess) = selected else {
-        ui.label(RichText::new("No active sessions yet.").color(TEXT_MUTED));
-        return;
-    };
-
-    card_frame().show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(sess.agent.to_uppercase())
-                    .strong()
-                    .color(ACCENT_TERRACOTTA),
-            );
-            ui.label(RichText::new(&sess.project).strong().color(TEXT_PRIMARY));
-            let st_col = match sess.status.as_str() {
-                "work" | "working" => STATUS_WORK,
-                "wait" | "waiting" => STATUS_WAIT,
-                "error" | "denied" => STATUS_ERR,
-                _ => STATUS_INFO,
-            };
-            ui.label(RichText::new(format!("({})", sess.status)).color(st_col));
-        });
-        ui.label(RichText::new(format!("Model: {}", sess.model)).size(11.5).color(TEXT_MUTED));
-        ui.label(
-            RichText::new(format!(
-                "Spend: ${:.2} · Tokens: {}",
-                sess.cost_usd, sess.tokens
-            ))
-            .size(11.5)
-            .color(TEXT_MUTED),
-        );
-        ui.add_space(4.0);
-        ui.label(RichText::new(&sess.last_prompt).color(TEXT_PRIMARY));
-        if let Some(t) = &sess.tool {
-            ui.label(RichText::new(format!("Current tool: {t}")).size(11.0).color(STATUS_INFO));
-        }
-    });
-
-    ui.add_space(8.0);
-    ui.label(RichText::new("Send follow-up prompt").size(11.5).color(TEXT_MUTED));
-    ui.add(
-        egui::TextEdit::multiline(&mut state.compose_draft)
-            .desired_rows(3)
-            .desired_width(f32::INFINITY)
-            .hint_text("Type instruction for this agent..."),
-    );
-    ui.horizontal(|ui| {
-        if ui.button("Send Prompt").clicked() && !state.compose_draft.trim().is_empty() {
-            let text = std::mem::take(&mut state.compose_draft);
-            state.push_action(UiAction::SendPrompt {
-                session_id: sess.id.clone(),
-                text,
-            });
-            state.push_toast("Prompt queued", format!("Sent to {}", sess.agent));
-        }
-        if ui.button(if sess.pinned { "Unpin" } else { "Pin" }).clicked()
-            && let Some(s) = state.sessions.iter_mut().find(|x| x.id == sess.id)
-        {
-            s.pinned = !s.pinned;
-        }
-    });
 }
 
 fn draw_system_drawer(ui: &mut egui::Ui, state: &UiState) {
