@@ -6,6 +6,7 @@ pub mod demo;
 pub mod desks;
 pub mod entrance;
 pub mod furniture;
+pub mod hq_wing;
 pub mod ibl;
 pub mod interact;
 pub mod layout;
@@ -13,6 +14,7 @@ pub mod life;
 pub mod lights;
 pub mod palette;
 pub mod people;
+pub mod pro_floor;
 pub mod props;
 pub mod replay;
 pub mod rooms;
@@ -23,12 +25,18 @@ pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
 pub use desks::DeskScreen;
+pub use entrance::{ElevatorDoors, Stairwell};
+pub use hq_wing::{DeptSign, HqWing, SprintBoard};
 pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use lights::LightingSyncSet;
 pub use palette::{WorldEntity, WorldPalette};
 pub use people::{LiveSessionWorker, LiveWorkerSpec};
+pub use pro_floor::{
+    CoolerScreen, DiningTable, FoosballTable, PhoneBooth, ReceptionCounter, RestroomStall,
+};
+pub use rooms::WindowBlind;
 use station_canvas2d::{BrandRegistry, FontEngine};
 use std::path::{Path, PathBuf};
 
@@ -141,8 +149,17 @@ pub fn spawn_full_office_world(
     let ibl = ibl::OfficeIbl::generate(images);
     lights::spawn_office_lights(commands, &spec, night);
     camera::spawn_office_camera_with_ibl(commands, &spec, &ibl, night);
-    rooms::spawn_office_shell(commands, &mut pal, materials, images, fonts, &spec);
-    entrance::spawn_entrance(commands, &mut pal, materials, &spec);
+    rooms::spawn_office_shell(
+        commands,
+        &mut pal,
+        materials,
+        images,
+        fonts,
+        &spec,
+        backdrop,
+        night,
+    );
+    entrance::spawn_entrance(commands, &mut pal, materials, images, fonts, &spec);
     let scr_mats = desks::spawn_desks(commands, &mut pal, materials, images, fonts, &spec);
     furniture::spawn_furniture(commands, &mut pal, materials, images, fonts, &spec);
     props::spawn_all_props(commands, &mut pal, materials, images, fonts, &spec);
@@ -500,5 +517,241 @@ mod tests {
         assert_eq!(world.query_filtered::<Entity, With<Lite2dCamera>>().iter(&world).count(), 0);
         assert_eq!(desks::count_desks_in_world(&mut world), 44);
         assert_eq!(world.resource::<SharedFontEngine>().load_count(), 1);
+    }
+
+    #[test]
+    fn tiled_mat_uses_repeat_sampler_render_world_and_stays_under_1mb_vram() {
+        use bevy::asset::RenderAssetUsages;
+        use bevy::image::{ImageAddressMode, ImageSampler};
+        use station_canvas2d::office_surfaces::{
+            draw_checker_tile, draw_plank_tile, draw_server_grid_tile, draw_speckle_rug_tile,
+            draw_subway_tile, draw_wainscot_slats_tile,
+        };
+
+        let mut meshes = Assets::<Mesh>::default();
+        let mut mats = Assets::<StandardMaterial>::default();
+        let mut imgs = Assets::<Image>::default();
+        let mut pal = WorldPalette::new(&mut meshes);
+
+        let surfaces = [
+            draw_plank_tile(),
+            draw_checker_tile(),
+            draw_subway_tile(),
+            draw_server_grid_tile(),
+            draw_speckle_rug_tile(),
+            draw_wainscot_slats_tile(),
+        ];
+
+        let mut total_bytes = 0usize;
+        for surf in surfaces {
+            total_bytes += surf.rgba.len();
+            let mat_h = pal.tiled_mat(
+                &mut imgs,
+                &mut mats,
+                surf,
+                Vec2::new(6.0, 4.0),
+                "#FFFFFF",
+                0.65,
+            );
+            let mat = mats.get(&mat_h).expect("tiled material registered");
+            let tex_h = mat
+                .base_color_texture
+                .as_ref()
+                .expect("tiled material has texture");
+            let img = imgs.get(tex_h).expect("tiled image registered");
+            assert_eq!(
+                img.asset_usage,
+                RenderAssetUsages::RENDER_WORLD,
+                "tiled floor/wall textures must drop CPU buffers via RENDER_WORLD"
+            );
+            match &img.sampler {
+                ImageSampler::Descriptor(desc) => {
+                    assert!(matches!(desc.address_mode_u, ImageAddressMode::Repeat));
+                    assert!(matches!(desc.address_mode_v, ImageAddressMode::Repeat));
+                }
+                other => panic!("expected ImageSampler::Descriptor with Repeat, got {other:?}"),
+            }
+        }
+        assert!(
+            total_bytes < 1_048_576,
+            "all repeating room floor/wall/rug tiles combined must be < 1 MB VRAM, got {total_bytes} bytes"
+        );
+
+        pal.purge_all(&mut meshes, &mut mats, &mut imgs);
+        assert_eq!(imgs.len(), 0);
+        assert_eq!(mats.len(), 0);
+    }
+
+    #[test]
+    fn pro_and_hq_architecture_spawns_all_landmarks_and_unloads_cleanly() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+
+        // Spawn Pro layout
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Pro,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<pro_floor::ReceptionCounter>>()
+                .iter(&world)
+                .count(),
+            1
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<pro_floor::RestroomStall>>()
+                .iter(&world)
+                .count(),
+            2
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<pro_floor::DiningTable>>()
+                .iter(&world)
+                .count(),
+            4
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<pro_floor::PhoneBooth>>()
+                .iter(&world)
+                .count(),
+            2
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<pro_floor::FoosballTable>>()
+                .iter(&world)
+                .count(),
+            1
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<entrance::ElevatorDoors>>()
+                .iter(&world)
+                .count(),
+            1
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<entrance::Stairwell>>()
+                .iter(&world)
+                .count(),
+            1
+        );
+        assert!(
+            world
+                .query_filtered::<Entity, With<rooms::WindowBlind>>()
+                .iter(&world)
+                .count()
+                >= 5
+        );
+        assert!(
+            world.resource::<WorldPalette>().floor_tile_vram_bytes() < 1_048_576,
+            "Pro floor tile VRAM must stay < 1 MB"
+        );
+
+        // Unload Pro and verify 0 leaked assets
+        let world_ents: Vec<Entity> = world
+            .query_filtered::<Entity, With<WorldEntity>>()
+            .iter(&world)
+            .collect();
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = world.remove_resource::<WorldPalette>();
+                    let mut ba = world.remove_resource::<BackdropAssets>();
+                    let ibl = world.remove_resource::<OfficeIbl>();
+                    let mut cmds = world.commands();
+                    unload_full_office_world(
+                        &mut cmds,
+                        world_ents,
+                        pal.as_mut(),
+                        ba.as_mut(),
+                        ibl.as_ref(),
+                        &mut meshes,
+                        &mut mats,
+                        &mut imgs,
+                    );
+                });
+            });
+        });
+        world.flush();
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
+        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 0);
+
+        // Rebuild HQ and verify HQ wing landmarks + 4 dept signs + 4 sprint boards
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Hq,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<hq_wing::HqWing>>()
+                .iter(&world)
+                .count(),
+            1
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<hq_wing::DeptSign>>()
+                .iter(&world)
+                .count(),
+            4
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<hq_wing::SprintBoard>>()
+                .iter(&world)
+                .count(),
+            4
+        );
     }
 }
