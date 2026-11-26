@@ -5574,6 +5574,9 @@
     "pinWeak": "PIN must be 6–10 digits and not sequential or repeated",
     "kb": "{n} KB",
     "cpu": "CPU",
-    "loadEarlier": "Load {n} earlier messages"
+    "loadEarlier": "Load {n} earlier messages",
+    "demoOn": "Office demo cast activated",
+    "demoOff": "Returned to live session state",
+    "weatherSet": "City set to {city}"
   }
 }

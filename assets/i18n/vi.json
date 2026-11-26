@@ -5265,6 +5265,9 @@
     "pinWeak": "Mã PIN phải gồm 6–10 chữ số, không liên tiếp hoặc trùng lặp",
     "kb": "{n} KB",
     "cpu": "CPU",
-    "loadEarlier": "Tải thêm {n} tin nhắn cũ hơn"
+    "loadEarlier": "Tải thêm {n} tin nhắn cũ hơn",
+    "demoOn": "Đã bật chế độ demo văn phòng",
+    "demoOff": "Đã quay lại phiên làm việc thực",
+    "weatherSet": "Đã đổi thành phố sang {city}"
   }
 }
