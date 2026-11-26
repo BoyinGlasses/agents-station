@@ -451,6 +451,20 @@ pub fn draw_microwave_timer(seconds: u32, fonts: &mut FontEngine) -> RgbaSurface
     c.into_surface()
 }
 
+/// Exact Oracle `microwave.js:192-204` 256×180 A5 paper rule note taped to the microwave cabinet.
+pub fn draw_microwave_note(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 180);
+    c.fill(hex("#FBFAF4"));
+    // Two masking-tape strips along the top edge
+    c.fill_rect(18.0, 0.0, 48.0, 16.0, [240, 226, 160, 192]);
+    c.fill_rect(190.0, 0.0, 48.0, 16.0, [240, 226, 160, 192]);
+    let red = hex("#C62828");
+    fonts.draw_text(&mut c, "MỞ NẮP HỘP", 128.0, 32.0, 26.0, red, TextAlign::Center, Some(232.0), true, false);
+    fonts.draw_text(&mut c, "TRƯỚC KHI QUAY", 128.0, 82.0, 22.0, red, TextAlign::Center, Some(232.0), true, false);
+    fonts.draw_text(&mut c, "CẢM ƠN!", 128.0, 128.0, 22.0, red, TextAlign::Center, Some(232.0), true, false);
+    c.into_surface()
+}
+
 /// Tileable 256×256 neutral-warm oak plank texture (256 KB VRAM).
 /// Designed to wrap seamlessly in U & V and accept PBR `StandardMaterial::base_color`
 /// tinting for Cozy warm oak, Pro dev pale oak, Library dark walnut, and Lounge wood.
