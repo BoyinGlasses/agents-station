@@ -1018,6 +1018,127 @@ pub fn draw_framed_photo() -> RgbaSurface {
     c.into_surface()
 }
 
+/// Exact Oracle `neon.js:14` 512×128 glowing `"SHIP IT ✦"` neon wall sign.
+pub fn draw_neon_ship_it(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(512, 128);
+    c.fill(hex("#1C1F26"));
+    // Soft pink neon back-glow behind "SHIP IT"
+    for &(rx, ry, alpha) in &[(188.0, 46.0, 38u8), (156.0, 34.0, 56), (124.0, 24.0, 72)] {
+        c.fill_ellipse(222.0, 64.0, rx, ry, hex_rgba("#FF4FA3", alpha));
+    }
+    // Soft cyan back-glow behind 4-point star
+    for &(r, alpha) in &[(38.0, 44u8), (26.0, 74), (16.0, 105)] {
+        c.fill_circle(438.0, 64.0, r, hex_rgba("#4CC9F0", alpha));
+    }
+    // Outer pink stroke halo + crisp bright neon core text
+    for &(dx, dy) in &[(-2.5, 0.0), (2.5, 0.0), (0.0, -2.5), (0.0, 2.5)] {
+        fonts.draw_text(
+            &mut c,
+            "SHIP IT",
+            222.0 + dx,
+            24.0 + dy,
+            74.0,
+            hex_rgba("#FF7DBE", 210),
+            TextAlign::Center,
+            Some(360.0),
+            true,
+            false,
+        );
+    }
+    fonts.draw_text(
+        &mut c,
+        "SHIP IT",
+        222.0,
+        24.0,
+        74.0,
+        hex("#FFE3F1"),
+        TextAlign::Center,
+        Some(360.0),
+        true,
+        false,
+    );
+    // Crisp vector 4-point star `✦` at (438, 64)
+    let star = |cx: f32, cy: f32, r_out: f32, r_in: f32| {
+        [
+            (cx, cy - r_out),
+            (cx + r_in, cy - r_in),
+            (cx + r_out, cy),
+            (cx + r_in, cy + r_in),
+            (cx, cy + r_out),
+            (cx - r_in, cy + r_in),
+            (cx - r_out, cy),
+            (cx - r_in, cy - r_in),
+        ]
+    };
+    c.fill_polygon(&star(438.0, 64.0, 26.0, 8.0), hex_rgba("#4CC9F0", 180));
+    c.fill_polygon(&star(438.0, 64.0, 21.0, 6.0), hex("#BFF0FF"));
+    c.into_surface()
+}
+
+/// Exact Oracle `room-pieces.js:68-75` 256×320 Cozy wall sun poster (`BAND 8.0`).
+pub fn draw_cozy_sun_poster(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 320);
+    c.fill(hex("#FFF5DF"));
+    c.fill_circle(128.0, 135.0, 60.0, hex("#E8730E"));
+    for i in 0..12 {
+        let a = (i as f32 / 12.0) * std::f32::consts::TAU;
+        c.stroke_line(
+            128.0 + a.cos() * 80.0,
+            135.0 + a.sin() * 80.0,
+            128.0 + a.cos() * 102.0,
+            135.0 + a.sin() * 102.0,
+            10.0,
+            hex("#E8730E"),
+        );
+    }
+    c.fill_rect(0.0, 248.0, 256.0, 72.0, hex("#5F7A35"));
+    fonts.draw_text(
+        &mut c,
+        "BAND 8.0",
+        128.0,
+        266.0,
+        34.0,
+        hex("#FFFADD"),
+        TextAlign::Center,
+        Some(232.0),
+        true,
+        false,
+    );
+    c.into_surface()
+}
+
+/// Exact Oracle `room-pieces.js:100` 256×128 stylized earth globe map.
+pub fn draw_globe_map() -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 128);
+    c.fill(hex("#4C9BE0"));
+    let mut rng = SeedRng(42);
+    for i in 0..16 {
+        let col = if i % 4 != 0 { hex("#79BB57") } else { hex("#E5C783") };
+        let cx = rng.next_f32() * 256.0;
+        let cy = 20.0 + rng.next_f32() * 88.0;
+        let rx = 10.0 + rng.next_f32() * 22.0;
+        let ry = 6.0 + rng.next_f32() * 12.0;
+        c.fill_ellipse(cx, cy, rx, ry, col);
+    }
+    c.into_surface()
+}
+
+/// Exact Oracle `bedding.js:53-60` 128×128 knitted fleece plaid blanket texture (white base for tinting).
+pub fn draw_blanket_plaid() -> RgbaSurface {
+    let mut c = Canvas2d::new(128, 128);
+    c.fill(hex("#FFFFFF"));
+    for i in (0..128).step_by(22) {
+        let f = i as f32;
+        c.fill_rect(f + 5.0, 0.0, 8.0, 128.0, [0, 0, 0, 23]);
+        c.fill_rect(0.0, f + 5.0, 128.0, 8.0, [0, 0, 0, 23]);
+        c.fill_rect(f + 16.0, 0.0, 1.5, 128.0, [255, 255, 255, 140]);
+        c.fill_rect(0.0, f + 16.0, 128.0, 1.5, [255, 255, 255, 140]);
+    }
+    c.stroke_rect(3.0, 3.0, 122.0, 122.0, 6.0, [0, 0, 0, 50]);
+    c.stroke_rect(8.0, 8.0, 112.0, 112.0, 1.5, [255, 255, 255, 128]);
+    c.into_surface()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1119,5 +1240,9 @@ mod tests {
         assert_eq!(draw_stair_floor_sign(12, &mut f).width, 256);
         assert_eq!(draw_stair_door_plate(12, &mut f).width, 256);
         assert_eq!(draw_framed_photo().width, 64);
+        assert_eq!((draw_neon_ship_it(&mut f).width, draw_neon_ship_it(&mut f).height), (512, 128));
+        assert_eq!((draw_cozy_sun_poster(&mut f).width, draw_cozy_sun_poster(&mut f).height), (256, 320));
+        assert_eq!((draw_globe_map().width, draw_globe_map().height), (256, 128));
+        assert_eq!((draw_blanket_plaid().width, draw_blanket_plaid().height), (128, 128));
     }
 }
