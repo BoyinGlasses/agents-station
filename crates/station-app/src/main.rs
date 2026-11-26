@@ -131,9 +131,10 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         (
             bridge::sync_camera_viewport_to_stage
                 .after(bevy_egui::EguiPostUpdateSet::EndPass)
+                .before(bevy::render::camera::CameraUpdateSystem)
                 .run_if(resource_exists::<station_ui::StageViewportRect>),
             bridge::project_stage_labels_to_ui
-                .after(bridge::sync_camera_viewport_to_stage)
+                .after(bevy::render::camera::CameraUpdateSystem)
                 .after(bevy::transform::TransformSystem::TransformPropagate)
                 .run_if(
                     resource_exists::<station_ui::StageViewportRect>
