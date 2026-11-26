@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 410 verified `[x]` | 98 partial/stubbed `[~]` | 63 unported `[ ]` | 571 total
+Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -111,49 +111,49 @@ Status: 410 verified `[x]` | 98 partial/stubbed `[~]` | 63 unported `[ ]` | 571 
 - [ ] src/office/interact/rings.js -> `crates/station-3d/src/interact.rs::HoverRing`
 - [~] src/office/main.js -> `crates/station-app/src/main.rs` + `crates/station-3d/src/lib.rs`
 - [~] src/office/net/live.js -> `crates/station-core/src/http/sse.rs` + `crates/station-core/src/state/sessions.rs`
-- [~] src/office/scene/blocks.js -> `crates/station-3d/src/palette.rs` (shared unit primitives & material dedupe)
-- [~] src/office/scene/lights.js -> `crates/station-3d/src/lights.rs` (sun + room lamps + day/night)
-- [~] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` (bounded shadows, Msaa::Off, MemoryHints)
-- [~] src/office/scene/renderer.js -> `crates/station-3d/src/camera.rs` + `crates/station-app/src/main.rs`
-- [~] src/office/world/cozy-room.js -> `crates/station-3d/src/rooms.rs::spawn_office_shell` (verified `g3-cozy.png`)
-- [~] src/office/world/desks.js -> `crates/station-3d/src/desks.rs::spawn_desks` (9/12/44 desks verified)
-- [~] src/office/world/entrance.js -> `crates/station-3d/src/entrance.rs::spawn_entrance` (door/lift/stairs)
-- [~] src/office/world/furniture/board.js -> `crates/station-3d/src/furniture.rs` (whiteboard + stickies)
-- [~] src/office/world/furniture/coffee.js -> `crates/station-3d/src/furniture.rs` (coffee corner + donuts)
-- [~] src/office/world/furniture/meeting.js -> `crates/station-3d/src/furniture.rs` (round & glass-room meeting tables)
-- [~] src/office/world/furniture/plants-lamps.js -> `crates/station-3d/src/rooms.rs::spawn_pot_plant` + `desks.rs`
-- [~] src/office/world/furniture/rocket.js -> `crates/station-3d/src/furniture.rs` (rocket sculpture)
-- [~] src/office/world/furniture/room-pieces.js -> `crates/station-3d/src/furniture.rs` (sofa, bookshelf, globe)
-- [~] src/office/world/furniture/server-racks.js -> `crates/station-3d/src/furniture.rs` (3 racks, LEDs, spinning fans)
+- [x] src/office/scene/blocks.js -> `crates/station-3d/src/palette.rs` (unit primitives, material dedupe, `RENDER_WORLD` repeating tiles & dynamic pixel screens verified)
+- [x] src/office/scene/lights.js -> `crates/station-3d/src/lights.rs` + `crates/station-3d/src/ibl.rs` (4-cubemap procedural IBL, per-layout shadows, sun+bounce+room lamps, day/night verified)
+- [x] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` + `crates/station-3d/src/camera.rs` (`Msaa::Sample4` 3D / `Msaa::Off` Lite 2D, 2048px shadows, `MemoryHints`, 0-leak unload verified)
+- [x] src/office/scene/renderer.js -> `crates/station-3d/src/camera.rs` + `crates/station-app/src/main.rs` (AgX tonemapping, Bloom, MSAA4, IBL, 4 Gate V2 PNGs verified)
+- [x] src/office/world/cozy-room.js -> `crates/station-3d/src/rooms.rs::spawn_office_shell` (parquet floor, wainscot slats, posters, rugs verified `v2-gate-cozy.png`)
+- [x] src/office/world/desks.js -> `crates/station-3d/src/desks.rs::spawn_desks` (9/12/44 desks, tilted laptops, coats/backpacks, nap bedding, 4-stage git mess verified)
+- [x] src/office/world/entrance.js -> `crates/station-3d/src/entrance.rs::spawn_entrance` (Cozy door/mat/shelf + Pro/HQ elevator, stairwell, exit sign verified)
+- [x] src/office/world/furniture/board.js -> `crates/station-3d/src/furniture.rs` (whiteboard + stickies + live redraw verified)
+- [x] src/office/world/furniture/coffee.js -> `crates/station-3d/src/furniture.rs` (espresso machine, kettle, mug rack, donut box verified)
+- [x] src/office/world/furniture/meeting.js -> `crates/station-3d/src/furniture.rs` (Cozy round table + Pro/HQ glass meeting room & sprint review slide verified)
+- [x] src/office/world/furniture/plants-lamps.js -> `crates/station-3d/src/rooms.rs` + `crates/station-3d/src/furniture.rs` (potted plants, floor lamps & night bulbs verified)
+- [x] src/office/world/furniture/rocket.js -> `crates/station-3d/src/furniture.rs::DeployRocket` (launch ascent + smoke puffs + 70 gravity/spin confetti verified)
+- [x] src/office/world/furniture/room-pieces.js -> `crates/station-3d/src/furniture.rs` (sofa, bookcase, 3-hand WallClock, vertical-meridian spinning globe verified)
+- [x] src/office/world/furniture/server-racks.js -> `crates/station-3d/src/furniture.rs` (3 racks, live CPU-scaled fans & blinking LEDs verified)
 - [x] src/office/world/layout.js -> `crates/station-3d/src/layout.rs::LayoutSpec` (unit tested)
-- [~] src/office/world/pro/floor.js -> `crates/station-3d/src/rooms.rs` (verified `g3-pro.png`)
-- [~] src/office/world/pro/pieces.js -> `crates/station-3d/src/rooms.rs` (glass walls, low walls, floor zones)
-- [~] src/office/world/pro/wing.js -> `crates/station-3d/src/rooms.rs` (verified `g3-hq.png`, 44 desks)
-- [~] src/office/world/props/aquarium.js -> `crates/station-3d/src/props.rs` (animated fish)
-- [~] src/office/world/props/arcade.js -> `crates/station-3d/src/props.rs` (invaders + marquee)
-- [~] src/office/world/props/billiards.js -> `crates/station-3d/src/props.rs` (pool table + balls)
-- [~] src/office/world/props/bins.js -> `crates/station-3d/src/props.rs`
-- [~] src/office/world/props/cat.js -> `crates/station-3d/src/props.rs` (animated office tabby)
-- [~] src/office/world/props/cups.js -> `crates/station-3d/src/props.rs` (pantry sink cups)
-- [~] src/office/world/props/dev-servers.js -> `crates/station-3d/src/props.rs` (mini server + :4310 badge)
-- [~] src/office/world/props/duty-board.js -> `crates/station-3d/src/props.rs` (`TRỰC NHẬT` board)
-- [~] src/office/world/props/game-tv.js -> `crates/station-3d/src/props.rs` (55" TV + PS5 + controllers)
-- [~] src/office/world/props/karaoke.js -> `crates/station-3d/src/props.rs` (karaoke booth + neon band + QR)
-- [~] src/office/world/props/microwave.js -> `crates/station-3d/src/props.rs` (digital timer)
-- [~] src/office/world/props/neon.js -> `crates/station-3d/src/props.rs`
-- [~] src/office/world/props/printer.js -> `crates/station-3d/src/props.rs`
-- [~] src/office/world/props/shredder.js -> `crates/station-3d/src/props.rs`
-- [~] src/office/world/props/string-lights.js -> `crates/station-3d/src/props.rs`
-- [~] src/office/world/props/switches.js -> `crates/station-3d/src/props.rs`
-- [ ] src/office/world/props/trinkets.js -> `crates/station-3d/src/props.rs`
-- [~] src/office/world/props/tv-games.js -> `crates/station-3d/src/props.rs` + `station-canvas2d/src/office_surfaces.rs`
-- [~] src/office/world/props/tv.js -> `crates/station-3d/src/props.rs` (live stats wall TV)
-- [~] src/office/world/props/update.js -> `crates/station-3d/src/props.rs::animate_props_system`
-- [~] src/office/world/props/vacuum.js -> `crates/station-3d/src/props.rs` (patrolling robot vacuum)
-- [~] src/office/world/room-update.js -> `crates/station-3d/src/lights.rs`
-- [~] src/office/world/screens.js -> `crates/station-3d/src/desks.rs::ScreenMaterials`
-- [~] src/office/world/terrace.js -> `crates/station-3d/src/rooms.rs::spawn_terrace`
-- [~] src/office/world/windows.js -> `crates/station-3d/src/rooms.rs::spawn_wall_window`
+- [x] src/office/world/pro/floor.js -> `crates/station-3d/src/rooms.rs` + `crates/station-3d/src/pro_floor.rs` (verified `v2-gate-pro.png`)
+- [x] src/office/world/pro/pieces.js -> `crates/station-3d/src/pro_floor.rs` (reception, 2 restrooms, water cooler, 4 dining tables, 2 phone booths, foosball verified)
+- [x] src/office/world/pro/wing.js -> `crates/station-3d/src/hq_wing.rs` (4 dept rooms, 44 desks, dept signs & sprint boards verified `v2-gate-hq.png`)
+- [x] src/office/world/props/aquarium.js -> `crates/station-3d/src/props.rs` (gravel, rocks, 9 seaweeds, 7 tangent-facing fish, 10 bubbles, flake feed verified)
+- [x] src/office/world/props/arcade.js -> `crates/station-3d/src/props_detail/leisure.rs` + `station-canvas2d/src/tv_games.rs` (zero-alloc 128×96 live Space Invaders + coin insert + marquee verified)
+- [x] src/office/world/props/billiards.js -> `crates/station-3d/src/props_detail/leisure.rs` (16 numbered balls, 6 pockets, cue stand + 6 cues, chalk, break physics verified)
+- [x] src/office/world/props/bins.js -> `crates/station-3d/src/props_detail/shredder_cups.rs` (per-desk waste bins synced to context % verified)
+- [x] src/office/world/props/cat.js -> `crates/station-3d/src/props_detail/cat.rs` (20+ part articulated tabby, 4 legs, 6-joint tail, sofa hop, pet hearts verified)
+- [x] src/office/world/props/cups.js -> `crates/station-3d/src/props_detail/shredder_cups.rs` (per-desk terracotta prompt-cache cups + rising steam wisps verified)
+- [x] src/office/world/props/dev-servers.js -> `crates/station-3d/src/props.rs` (live per-owner & forgotten dev-server boxes verified)
+- [x] src/office/world/props/duty-board.js -> `crates/station-3d/src/props.rs` (`TRỰC NHẬT` aluminum frame + markers + sink cups verified)
+- [x] src/office/world/props/game-tv.js -> `crates/station-3d/src/props_detail/leisure.rs` (walnut unit, 55" live TV, PS5, 2 gamepads, dynamic ambilight `PointLight` verified)
+- [x] src/office/world/props/karaoke.js -> `crates/station-3d/src/props_detail/leisure.rs` (hinged glass door, bench, 2 speakers, 2 mics, headphones, scrolling lyric bar, QR verified)
+- [x] src/office/world/props/microwave.js -> `crates/station-3d/src/props_detail/microwave.rs` (dual hollow ovens, hinged doors, rotating plates, 5 lunchboxes, rule note, dish soap verified)
+- [x] src/office/world/props/neon.js -> `crates/station-3d/src/furniture.rs::NeonSign` (`SHIP IT` neon emissive verified day/night)
+- [x] src/office/world/props/printer.js -> `crates/station-3d/src/props.rs::OfficePrinter` (paper eject animation & blinking LED verified)
+- [x] src/office/world/props/shredder.js -> `crates/station-3d/src/props_detail/shredder_cups.rs` (transparent window, paper strips, >85% red flags verified)
+- [x] src/office/world/props/string-lights.js -> `crates/station-3d/src/props.rs::StringLightsRoot` (sagging catenary bulbs + seasonal palettes verified `v2-gate-pro-night.png`)
+- [x] src/office/world/props/switches.js -> `crates/station-3d/src/props.rs::WallSwitch` (working lever toggling room lamps + night reset sync verified)
+- [x] src/office/world/props/trinkets.js -> `crates/station-3d/src/desks.rs` + `crates/station-3d/src/props.rs` (per-desk trinkets, night hooks, deterministic RNG verified)
+- [x] src/office/world/props/tv-games.js -> `crates/station-canvas2d/src/tv_games.rs::TvGamesSim` (zero-alloc 256×144 `GOAL STARS`, `SAIGON RUSH`, `ROOFTOP FIGHT` + title attract verified)
+- [x] src/office/world/props/tv.js -> `crates/station-3d/src/props_detail/leisure.rs::WallTv` (live machine stats wall TV verified)
+- [x] src/office/world/props/update.js -> `crates/station-3d/src/props.rs` + `props_detail/{cat,leisure,microwave,shredder_cups}.rs` (all prop update systems verified)
+- [x] src/office/world/props/vacuum.js -> `crates/station-3d/src/props.rs::RobotVacuum` (patrolling walk graph + parented `VacuumLed` & spinning brushes verified)
+- [x] src/office/world/room-update.js -> `crates/station-3d/src/{lights,furniture,desks}.rs` (clock, globe, fans, screens, rocket, day/night sync verified)
+- [x] src/office/world/screens.js -> `crates/station-3d/src/desks.rs::ScreenMaterials` (8 deterministic 2×-height scrolling screens via zero-alloc UV transform verified)
+- [x] src/office/world/terrace.js -> `crates/station-3d/src/rooms.rs::spawn_terrace` (slate balcony, glass railing, bollards, trees, cafe set verified)
+- [x] src/office/world/windows.js -> `crates/station-3d/src/rooms.rs::spawn_wall_window` (recessed windows, blinds, day/night views verified)
 
 ## P4 — People, Backdrops, Life, Demo, Replay & Audio (88 files)
 
