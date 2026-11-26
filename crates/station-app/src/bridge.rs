@@ -22,11 +22,15 @@ use station_ui::labels3d::{
     project_world_to_stage,
 };
 use station_ui::state::{
-    AccountOption, BurnSnapshot, CacheWarmth, ChatImagePreview, ChatMessage, ChatPollOptUi,
-    ChatPollUi, ChatRemindUi, ChatReplyRefUi, ClipShape, FeedEntry, HarnessDockItem,
-    PendingPermCard, PhotoSize, PlaceCardAction, PlaceCardInfo, PlaceCardRow, ReplayRange,
-    SessionCard, SessionLogItem, SessionUndoView, SysSnapshot, TodoItem, UiAction, UndoFileEntry,
-    WrappedSummaryUi, normalize_feed_kind, normalize_status,
+    AccountOption, AiAccountEntry, AiProviderTab, BurnDayBucketUi, BurnDetailRow, BurnDrawerState,
+    BurnProjectRowUi, BurnRange, BurnRoleRowUi, BurnSessionRowUi, BurnSnapshot, CacheWarmth,
+    ChatImagePreview, ChatMessage, ChatPollOptUi, ChatPollUi, ChatRemindUi, ChatReplyRefUi,
+    CleanupRowUi, ClipShape, DevServerUi, FeedEntry, HarnessDockItem, MacDrawerState,
+    PendingPermCard, PhotoSize, PlaceCardAction, PlaceCardInfo, PlaceCardRow,
+    PromptReportExampleUi, PromptReportUi, ReplayRange, SessionCard, SessionLogItem,
+    SessionUndoView, StrandedItemUi, SysProcRow, SysSnapshot, TodoItem, UiAction, UndoFileEntry,
+    VaultListItem, VaultMsgUi, VaultTranscriptUi, WrappedSummaryUi, normalize_feed_kind,
+    normalize_status,
 };
 use station_ui::theme::{ACCENT, AMBER, BLUE, GREEN, RED};
 use station_ui::{ActiveDrawer, I18nStore, StageViewportRect, UiState, ViewMode};
@@ -80,6 +84,30 @@ enum RemoteQueryCmd {
     RewritePrompt { text: String, lang: String },
     FetchWrapped,
     FetchImage { id: String },
+    FetchBurn(BurnRange),
+    FetchVaultList { query: String, fresh: bool },
+    FetchVaultTranscript { sid: String },
+    FetchVaultReport,
+    FetchStranded { fresh: bool },
+    StrandedMutate { path: &'static str, id: String, toast_title: String, toast_ok: String, toast_err: String },
+    SysMutate { path: &'static str, body: Value, toast_title: String, toast_ok: String, toast_err: String },
+    FetchAiAccounts,
+    AiAccountMutate {
+        provider: AiProviderTab,
+        action: String,
+        body: Value,
+        toast_title: String,
+        toast_ok: String,
+        toast_err: String,
+    },
+    FetchPhoneStatus,
+    PhoneMutate {
+        path: &'static str,
+        body: Value,
+        toast_title: String,
+        toast_ok: String,
+        toast_err: String,
+    },
 }
 
 enum BridgeAsyncResult {
@@ -96,6 +124,44 @@ enum BridgeAsyncResult {
         toast_body: String,
     },
     ChatImage(Result<ChatImagePreview, String>),
+    BurnData(Result<BurnDrawerState, String>),
+    VaultList {
+        items: Vec<VaultListItem>,
+        total_count: usize,
+        total_bytes: u64,
+    },
+    VaultTranscript(Option<VaultTranscriptUi>),
+    VaultReport(Result<PromptReportUi, String>),
+    StrandedData {
+        items: Vec<StrandedItemUi>,
+        repos: usize,
+    },
+    AiAccountsData {
+        claude: Vec<AiAccountEntry>,
+        claude_auto: bool,
+        claude_move: bool,
+        claude_resume: bool,
+        codex: Vec<AiAccountEntry>,
+        codex_auto: bool,
+        codex_seat_note: String,
+        ag: Vec<AiAccountEntry>,
+        ag_auto: bool,
+        ag_away: bool,
+        ag_pending: Option<String>,
+        ag_note: String,
+    },
+    PhoneStatus {
+        lan_on: bool,
+        lan_ip: Option<String>,
+        tunnel_on: bool,
+        tunnel_state: String,
+        tunnel_url: Option<String>,
+        tunnel_domain: String,
+        tunnel_error: Option<String>,
+        phone_approve: bool,
+        push_count: usize,
+        pin: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -236,6 +302,7 @@ struct RemoteSnapshot {
     harnesses: Vec<HarnessDockItem>,
     pairing_pin: Option<String>,
     sys: Option<SysSnapshot>,
+    mac_drawer: Option<MacDrawerState>,
     burn: Option<BurnSnapshot>,
     has_chat: bool,
     chat: Vec<ChatMessage>,
@@ -1384,6 +1451,694 @@ fn parse_vault_from_json(val: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+fn parse_burn_detail_rows(arr: Option<&Vec<Value>>) -> Vec<BurnDetailRow> {
+    arr.map(|list| {
+        list.iter()
+            .filter_map(|v| {
+                Some(BurnDetailRow {
+                    name: v.get("name").and_then(Value::as_str)?.to_owned(),
+                    kind: v
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    usd: v.get("usd").and_then(Value::as_f64).unwrap_or(0.0),
+                    tokens: v.get("tokens").and_then(Value::as_f64).unwrap_or(0.0),
+                    share: v.get("share").and_then(Value::as_f64).unwrap_or(0.0),
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn parse_burn_drawer_from_json(range: BurnRange, val: &Value) -> BurnDrawerState {
+    let total = val.get("total");
+    let plain = val.get("plain");
+    let by = val.get("by");
+    let ranked = parse_burn_detail_rows(val.get("ranked").and_then(Value::as_array));
+    let by_model = parse_burn_detail_rows(
+        by.and_then(|b| b.get("model"))
+            .and_then(Value::as_array),
+    );
+    let by_source = parse_burn_detail_rows(
+        by.and_then(|b| b.get("source"))
+            .and_then(Value::as_array),
+    );
+    let roles = val
+        .get("roles")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(BurnRoleRowUi {
+                        role: v.get("role").and_then(Value::as_str)?.to_owned(),
+                        model: v.get("model").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        usd: v.get("usd").and_then(Value::as_f64).unwrap_or(0.0),
+                        tokens: v.get("tokens").and_then(Value::as_f64).unwrap_or(0.0),
+                        share: v.get("share").and_then(Value::as_f64).unwrap_or(0.0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let projects = val
+        .get("projects")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(BurnProjectRowUi {
+                        name: v.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        cwd: v.get("cwd").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        usd: v.get("usd").and_then(Value::as_f64).unwrap_or(0.0),
+                        share: v.get("share").and_then(Value::as_f64).unwrap_or(0.0),
+                        sessions: v.get("sessions").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let sessions = val
+        .get("sessions")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| {
+                    Some(BurnSessionRowUi {
+                        sid: v.get("sid").and_then(Value::as_str)?.to_owned(),
+                        name: v.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        project: v.get("project").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        cwd: v.get("cwd").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        usd: v.get("usd").and_then(Value::as_f64).unwrap_or(0.0),
+                        tokens: v.get("tokens").and_then(Value::as_f64).unwrap_or(0.0),
+                        req: v.get("req").and_then(Value::as_u64).unwrap_or(0),
+                        share: v.get("share").and_then(Value::as_f64).unwrap_or(0.0),
+                        models: v
+                            .get("models")
+                            .and_then(Value::as_array)
+                            .map(|m| m.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let per_day = val
+        .get("perDay")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| {
+                    let day = d.get("day").and_then(Value::as_str)?.to_owned();
+                    let usd = d.get("usd").and_then(Value::as_f64).unwrap_or(0.0);
+                    let mut models: Vec<(String, f64)> = d
+                        .get("models")
+                        .and_then(Value::as_object)
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| Some((k.clone(), v.as_f64()?)))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    models.sort_by(|a, b| a.0.cmp(&b.0));
+                    Some(BurnDayBucketUi { day, usd, models })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    BurnDrawerState {
+        range,
+        loading: false,
+        loaded_range: Some(range),
+        error: None,
+        setup: val
+            .get("setup")
+            .and_then(Value::as_str)
+            .unwrap_or("none")
+            .to_owned(),
+        money: val.get("money").and_then(Value::as_bool).unwrap_or(true),
+        total_usd: total.and_then(|t| t.get("usd")).and_then(Value::as_f64).unwrap_or(0.0),
+        total_tokens: total.and_then(|t| t.get("tokens")).and_then(Value::as_f64).unwrap_or(0.0),
+        req: total.and_then(|t| t.get("req")).and_then(Value::as_u64).unwrap_or(0),
+        err: total.and_then(|t| t.get("err")).and_then(Value::as_u64).unwrap_or(0),
+        prompts: total.and_then(|t| t.get("prompts")).and_then(Value::as_u64).unwrap_or(0),
+        plain_usd: plain.and_then(|p| p.get("usd")).and_then(Value::as_f64).unwrap_or(0.0),
+        plain_share: plain.and_then(|p| p.get("share")).and_then(Value::as_f64).unwrap_or(0.0),
+        ranked,
+        by_model,
+        by_source,
+        roles,
+        projects,
+        sessions,
+        per_day,
+    }
+}
+
+fn parse_vault_list_from_json(val: &Value) -> (Vec<VaultListItem>, usize, u64) {
+    let stats = val.get("stats");
+    let total_count = stats
+        .and_then(|s| s.get("n"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let total_bytes = stats
+        .and_then(|s| s.get("bytes"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let items = val
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let sid = e.get("sid").and_then(Value::as_str)?.to_owned();
+                    Some(VaultListItem {
+                        sid,
+                        title: e.get("title").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        cwd: e.get("cwd").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        first: e.get("first").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        end_ms: e.get("end").and_then(Value::as_u64).unwrap_or(0),
+                        msg_count: e.get("n").and_then(Value::as_u64).unwrap_or(0) as usize,
+                        gone_ms: e.get("gone").and_then(Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (items, total_count, total_bytes)
+}
+
+fn parse_vault_transcript_from_json(val: &Value) -> Option<VaultTranscriptUi> {
+    let rec = val.get("rec")?;
+    let sid = rec.get("sid").and_then(Value::as_str)?.to_owned();
+    let msgs = rec
+        .get("msgs")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    Some(VaultMsgUi {
+                        role: m.get("r").and_then(Value::as_str).unwrap_or("c").to_owned(),
+                        text: m.get("t").and_then(Value::as_str)?.to_owned(),
+                        at_ms: m.get("at").and_then(Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(VaultTranscriptUi {
+        sid,
+        title: rec.get("title").and_then(Value::as_str).unwrap_or("").to_owned(),
+        cwd: rec.get("cwd").and_then(Value::as_str).unwrap_or("").to_owned(),
+        start_ms: rec.get("start").and_then(Value::as_u64).unwrap_or(0),
+        end_ms: rec.get("end").and_then(Value::as_u64).unwrap_or(0),
+        gone_ms: rec.get("gone").and_then(Value::as_u64).unwrap_or(0),
+        msgs,
+    })
+}
+
+fn parse_vault_report_from_json(val: &Value) -> PromptReportUi {
+    let mut by: Vec<(String, usize)> = val
+        .get("by")
+        .and_then(Value::as_object)
+        .map(|m| {
+            m.iter()
+                .map(|(k, v)| (k.clone(), v.as_u64().unwrap_or(0) as usize))
+                .collect()
+        })
+        .unwrap_or_default();
+    by.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let examples = val
+        .get("examples")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    Some(PromptReportExampleUi {
+                        text: e.get("t").and_then(Value::as_str)?.to_owned(),
+                        ph: e.get("ph").and_then(Value::as_u64).unwrap_or(0) as usize,
+                        hint: e.get("hint").and_then(Value::as_str).unwrap_or("vague").to_owned(),
+                        phrase: e.get("phrase").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        n: e.get("n").and_then(Value::as_u64).unwrap_or(0) as usize,
+                        at_ms: e.get("at").and_then(Value::as_u64).unwrap_or(0),
+                        title: e.get("title").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    PromptReportUi {
+        loaded: true,
+        loading: false,
+        error: None,
+        n: val.get("n").and_then(Value::as_u64).unwrap_or(0) as usize,
+        clear: val.get("clear").and_then(Value::as_u64).unwrap_or(0) as usize,
+        pct: val.get("pct").and_then(Value::as_u64).map(|v| v as u32),
+        convs: val.get("convs").and_then(Value::as_u64).unwrap_or(0) as usize,
+        by,
+        examples,
+    }
+}
+
+fn parse_mac_drawer_from_json(val: &Value) -> MacDrawerState {
+    let gb = 1024.0 * 1024.0 * 1024.0;
+    let swap_used_gb = (val
+        .get("mem")
+        .and_then(|m| m.get("swapUsed").or_else(|| m.get("swap_used")))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as f64
+        / gb) as f32;
+    let swap_total_gb = (val
+        .get("mem")
+        .and_then(|m| m.get("swapTotal").or_else(|| m.get("swap_total")))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as f64
+        / gb) as f32;
+    let mem_pressure = val
+        .get("mem")
+        .and_then(|m| m.get("pressure"))
+        .and_then(Value::as_str)
+        .unwrap_or("normal")
+        .to_owned();
+    let disk_free_gb = (val
+        .get("disk")
+        .and_then(|d| d.get("free"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as f64
+        / gb) as f32;
+    let disk_total_gb = (val
+        .get("disk")
+        .and_then(|d| d.get("total"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as f64
+        / gb) as f32;
+    let cpu_cores = val
+        .get("cpu")
+        .and_then(|c| c.get("cores"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1) as usize;
+    let cpu_load = val
+        .get("cpu")
+        .and_then(|c| c.get("load"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0) as f32;
+    let auto_close_hours = val
+        .get("auto")
+        .and_then(|a| a.get("hours"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u8;
+    let claude_procs = val
+        .get("claude")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    Some(SysProcRow {
+                        name: p
+                            .get("title")
+                            .or_else(|| p.get("name"))
+                            .and_then(Value::as_str)?
+                            .to_owned(),
+                        pid: p.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        start: p.get("start").and_then(Value::as_u64).unwrap_or(0),
+                        count: 1,
+                        cpu: p.get("cpu").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                        mem_bytes: p.get("mem").and_then(Value::as_u64).unwrap_or(0),
+                        can_quit: true,
+                        busy: p.get("busy").and_then(Value::as_bool).unwrap_or(false),
+                        idle_sec: p.get("idle").and_then(Value::as_u64).unwrap_or(0),
+                        dir: p.get("dir").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let apps = val
+        .get("apps")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| {
+                    Some(SysProcRow {
+                        name: a.get("name").and_then(Value::as_str)?.to_owned(),
+                        pid: 0,
+                        start: 0,
+                        count: a.get("count").and_then(Value::as_u64).unwrap_or(1) as usize,
+                        cpu: a.get("cpu").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                        mem_bytes: a.get("mem").and_then(Value::as_u64).unwrap_or(0),
+                        can_quit: a.get("quit").and_then(Value::as_bool).unwrap_or(false),
+                        busy: false,
+                        idle_sec: 0,
+                        dir: String::new(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let dev_servers = val
+        .get("devServers")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| {
+                    Some(DevServerUi {
+                        pid: d.get("pid").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        start: d.get("start").and_then(Value::as_u64).unwrap_or(0),
+                        label: d.get("label").and_then(Value::as_str)?.to_owned(),
+                        ports: d
+                            .get("ports")
+                            .and_then(Value::as_array)
+                            .map(|ps| ps.iter().filter_map(Value::as_u64).map(|p| p as u16).collect())
+                            .unwrap_or_default(),
+                        dir: d.get("dir").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        up_sec: d.get("up").and_then(Value::as_u64).unwrap_or(0),
+                        cpu: d.get("cpu").and_then(Value::as_i64).unwrap_or(0),
+                        mem_bytes: d.get("mem").and_then(Value::as_u64).unwrap_or(0),
+                        conns: d.get("conns").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        idle_sec: d.get("idle").and_then(Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let cleanups = val
+        .get("cleanups")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    Some(CleanupRowUi {
+                        id: c.get("id").and_then(Value::as_str)?.to_owned(),
+                        title: c.get("title").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        note: c.get("note").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        size_bytes: c.get("size").and_then(Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    MacDrawerState {
+        loading: false,
+        swap_used_gb,
+        swap_total_gb,
+        mem_pressure,
+        disk_free_gb,
+        disk_total_gb,
+        cpu_cores,
+        cpu_load,
+        auto_close_hours,
+        claude_procs,
+        apps,
+        dev_servers,
+        cleanups,
+        ..Default::default()
+    }
+}
+
+fn parse_stranded_from_json(val: &Value) -> (Vec<StrandedItemUi>, usize) {
+    let repos = val.get("repos").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let items = val
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|it| {
+                    Some(StrandedItemUi {
+                        id: it.get("id").and_then(Value::as_str)?.to_owned(),
+                        path: it
+                            .get("path")
+                            .or_else(|| it.get("dir"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_owned(),
+                        repo: it.get("repo").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        branch: it.get("branch").and_then(Value::as_str).unwrap_or("").to_owned(),
+                        main: it.get("main").and_then(Value::as_bool).unwrap_or(false),
+                        locked: it.get("locked").and_then(Value::as_bool).unwrap_or(false),
+                        dirty: it.get("dirty").and_then(Value::as_u64).unwrap_or(0) as usize,
+                        ahead: it.get("ahead").and_then(Value::as_u64).unwrap_or(0) as u32,
+                        stashes: it.get("stashes").and_then(Value::as_u64).unwrap_or(0) as usize,
+                        ok: it.get("ok").and_then(Value::as_bool).unwrap_or(true),
+                        in_use: it.get("inUse").and_then(Value::as_bool).unwrap_or(false),
+                        removable: it.get("removable").and_then(Value::as_bool).unwrap_or(false),
+                        work: it.get("work").and_then(Value::as_bool).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (items, repos)
+}
+
+fn parse_ai_slots(arr: Option<&Vec<Value>>) -> Vec<AiAccountEntry> {
+    arr.map(|list| {
+        list.iter()
+            .filter_map(|a| {
+                let slug = a
+                    .get("slug")
+                    .or_else(|| a.get("name"))
+                    .and_then(Value::as_str)?
+                    .to_owned();
+                Some(AiAccountEntry {
+                    slug,
+                    label: a.get("label").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    email: a.get("email").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    plan: a.get("plan").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    active: a.get("active").and_then(Value::as_bool).unwrap_or(false),
+                    has_credentials: a
+                        .get("hasCredentials")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                    note: a.get("note").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    windows: Vec::new(),
+                })
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn parse_ai_accounts_from_json(val: &Value) -> BridgeAsyncResult {
+    let claude = parse_ai_slots(val.get("accounts").and_then(Value::as_array));
+    let claude_auto = val.get("auto").and_then(Value::as_bool).unwrap_or(false);
+    let claude_move = val.get("move").and_then(Value::as_bool).unwrap_or(false);
+    let claude_resume = val.get("resume").and_then(Value::as_bool).unwrap_or(false);
+
+    let codex_v = val.get("codex");
+    let codex = parse_ai_slots(codex_v.and_then(|c| c.get("accounts")).and_then(Value::as_array));
+    let codex_auto = codex_v.and_then(|c| c.get("auto")).and_then(Value::as_bool).unwrap_or(false);
+    let codex_seat_note = codex_v
+        .and_then(|c| c.get("seat"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+
+    let ag_v = val.get("ag");
+    let ag = parse_ai_slots(ag_v.and_then(|g| g.get("accounts")).and_then(Value::as_array));
+    let ag_auto = ag_v.and_then(|g| g.get("auto")).and_then(Value::as_bool).unwrap_or(false);
+    let ag_away = ag_v.and_then(|g| g.get("away")).and_then(Value::as_bool).unwrap_or(false);
+    let ag_pending = ag_v
+        .and_then(|g| g.get("pending"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let ag_note = ag_v
+        .and_then(|g| g.get("note"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+
+    BridgeAsyncResult::AiAccountsData {
+        claude,
+        claude_auto,
+        claude_move,
+        claude_resume,
+        codex,
+        codex_auto,
+        codex_seat_note,
+        ag,
+        ag_auto,
+        ag_away,
+        ag_pending,
+        ag_note,
+    }
+}
+
+fn parse_phone_status_from_json(tun: &Value, push: Option<&Value>) -> BridgeAsyncResult {
+    BridgeAsyncResult::PhoneStatus {
+        lan_on: tun.get("lanOn").and_then(Value::as_bool).unwrap_or(false),
+        lan_ip: tun
+            .get("lanIp")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        tunnel_on: tun.get("on").and_then(Value::as_bool).unwrap_or(false),
+        tunnel_state: tun
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("off")
+            .to_owned(),
+        tunnel_url: tun
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        tunnel_domain: tun
+            .get("domain")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned(),
+        tunnel_error: tun
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+        phone_approve: tun
+            .get("phoneApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        push_count: push
+            .and_then(|p| p.get("count"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize,
+        pin: tun
+            .get("pin")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+fn build_in_process_ai_accounts(app_state: &AppState) -> BridgeAsyncResult {
+    let mut view = app_state
+        .claude_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    let codex_view = app_state
+        .codex_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    let ag_view = app_state
+        .ag_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    if let Some(obj) = view.as_object_mut() {
+        obj.insert("codex".to_owned(), codex_view);
+        obj.insert("ag".to_owned(), ag_view);
+    }
+    parse_ai_accounts_from_json(&view)
+}
+
+fn build_in_process_phone_status(app_state: &AppState) -> BridgeAsyncResult {
+    let (lan_on, tunnel_on, tunnel_domain, phone_approve) = {
+        let prefs = app_state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            prefs.get("lan").and_then(Value::as_bool).unwrap_or(false),
+            prefs.get("tunnel").and_then(Value::as_bool).unwrap_or(false),
+            prefs
+                .get("tunnelDomain")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            prefs
+                .get("phoneApprove")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )
+    };
+    let snap = app_state.tunnel.snapshot();
+    let push_count = app_state
+        .push
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .count();
+    BridgeAsyncResult::PhoneStatus {
+        lan_on,
+        lan_ip: station_core::http::api::detect_private_lan_ipv4(),
+        tunnel_on,
+        tunnel_state: snap.state,
+        tunnel_url: snap.url,
+        tunnel_domain,
+        tunnel_error: snap.error,
+        phone_approve,
+        push_count,
+        pin: Some(app_state.auth.current_pin()),
+    }
+}
+
+fn merge_mac_drawer_telemetry(dst: &mut MacDrawerState, src: MacDrawerState) {
+    dst.loading = false;
+    dst.swap_used_gb = src.swap_used_gb;
+    dst.swap_total_gb = src.swap_total_gb;
+    dst.mem_pressure = src.mem_pressure;
+    dst.disk_free_gb = src.disk_free_gb;
+    dst.disk_total_gb = src.disk_total_gb;
+    dst.cpu_cores = src.cpu_cores;
+    dst.cpu_load = src.cpu_load;
+    dst.auto_close_hours = src.auto_close_hours;
+    dst.claude_procs = src.claude_procs;
+    dst.apps = src.apps;
+    dst.dev_servers = src.dev_servers;
+    dst.cleanups = src.cleanups;
+}
+
+fn collect_in_process_stranded_dirs(app_state: &AppState) -> (Vec<String>, Vec<String>) {
+    let mut dirs = Vec::new();
+    let mut in_use = Vec::new();
+    {
+        let office = app_state.office.lock().unwrap_or_else(|e| e.into_inner());
+        dirs.extend(office.known_dirs.iter().cloned());
+        for s in office.sessions.values() {
+            if !s.cwd.is_empty() {
+                dirs.push(s.cwd.clone());
+                in_use.push(s.cwd.clone());
+            }
+        }
+    }
+    {
+        let tasks = app_state.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        for t in tasks.list() {
+            if !t.dir.is_empty() {
+                dirs.push(t.dir.clone());
+                in_use.push(t.dir.clone());
+            }
+        }
+    }
+    (dirs, in_use)
+}
+
+fn redact_ai_mutate_body(mut body: Value) -> Value {
+    if let Some(obj) = body.as_object_mut() {
+        for key in ["label", "name"] {
+            if let Some(val) = obj.get_mut(key)
+                && let Some(s) = val.as_str()
+            {
+                *val = Value::String(station_core::redact::redact(s));
+            }
+        }
+    }
+    body
+}
+
+fn is_valid_tunnel_host_input(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 || !host.contains('.') {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
+}
+
 fn current_process_private_mb() -> f32 {
     0.0
 }
@@ -1422,6 +2177,9 @@ fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
     }
     if let Some(sys) = &snap.sys {
         ui.sys = sys.clone();
+    }
+    if let Some(mac) = &snap.mac_drawer {
+        merge_mac_drawer_telemetry(&mut ui.mac_drawer, mac.clone());
     }
     if let Some(burn) = &snap.burn {
         ui.burn = burn.clone();
@@ -1537,6 +2295,7 @@ async fn fetch_remote_telemetry(
     let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(v) = sys_v {
         snap.sys = Some(parse_sys_from_json(&v));
+        snap.mac_drawer = Some(parse_mac_drawer_from_json(&v));
     }
     if let Some(today) = burn_today {
         snap.burn = Some(parse_burn_from_json(&today, burn_30d.as_ref()));
@@ -1588,11 +2347,13 @@ fn spawn_attached_sse_client(
                 };
                 fetch_remote_harnesses(&client, &base_url, &host_header, &snap_lock).await;
 
-                // Dedicated async query worker for /api/log, /api/undo, /api/prompt/rewrite.
+                // Dedicated async query worker for /api/log, /api/undo, /api/prompt/rewrite, and Task 7 drawers.
                 let client_q = client.clone();
                 let base_q = base_url.clone();
                 let host_q = host_header.clone();
                 let async_q = async_tx.clone();
+                let toast_q = toast_tx.clone();
+                let snap_q = snap_lock.clone();
                 let mut rx_q = rx.clone();
                 tokio::spawn(async move {
                     loop {
@@ -1753,6 +2514,347 @@ fn spawn_attached_sse_client(
                                             Err(e) => Err(e.to_string()),
                                         };
                                         let _ = async_q.try_send(BridgeAsyncResult::ChatImage(res));
+                                    }
+                                    RemoteQueryCmd::FetchBurn(range) => {
+                                        let url = format!("{base_q}/api/burn");
+                                        let res = match client_q
+                                            .get(url)
+                                            .query(&[("range", range.api_str())])
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(6))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .map(|v| parse_burn_drawer_from_json(range, &v))
+                                                .map_err(|e| e.to_string()),
+                                            Ok(r) => Err(format!("HTTP {}", r.status().as_u16())),
+                                            Err(e) => Err(e.to_string()),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::BurnData(res));
+                                    }
+                                    RemoteQueryCmd::FetchVaultList { query, fresh } => {
+                                        let url = format!("{base_q}/api/vault");
+                                        let mut params: Vec<(&str, &str)> = vec![("limit", "60")];
+                                        if !query.is_empty() {
+                                            params.push(("q", query.as_str()));
+                                        }
+                                        if fresh {
+                                            params.push(("fresh", "1"));
+                                        }
+                                        let (items, total_count, total_bytes) = match client_q
+                                            .get(url)
+                                            .query(&params)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(10))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .map(|v| parse_vault_list_from_json(&v))
+                                                .unwrap_or_default(),
+                                            _ => (Vec::new(), 0, 0),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::VaultList {
+                                            items,
+                                            total_count,
+                                            total_bytes,
+                                        });
+                                    }
+                                    RemoteQueryCmd::FetchVaultTranscript { sid } => {
+                                        let url = format!("{base_q}/api/vault/transcript");
+                                        let rec = match client_q
+                                            .get(url)
+                                            .query(&[("sid", sid.as_str())])
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(8))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .and_then(|v| parse_vault_transcript_from_json(&v)),
+                                            _ => None,
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::VaultTranscript(rec));
+                                    }
+                                    RemoteQueryCmd::FetchVaultReport => {
+                                        let url = format!("{base_q}/api/vault/report");
+                                        let res = match client_q
+                                            .get(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(10))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .map(|v| parse_vault_report_from_json(&v))
+                                                .map_err(|e| e.to_string()),
+                                            Ok(r) => Err(format!("HTTP {}", r.status().as_u16())),
+                                            Err(e) => Err(e.to_string()),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::VaultReport(res));
+                                    }
+                                    RemoteQueryCmd::FetchStranded { fresh } => {
+                                        let url = format!("{base_q}/api/stranded");
+                                        let req = if fresh {
+                                            client_q.get(url).query(&[("fresh", "1")])
+                                        } else {
+                                            client_q.get(url)
+                                        };
+                                        let (items, repos) = match req
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(12))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .map(|v| parse_stranded_from_json(&v))
+                                                .unwrap_or_default(),
+                                            _ => (Vec::new(), 0),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::StrandedData { items, repos });
+                                    }
+                                    RemoteQueryCmd::StrandedMutate {
+                                        path,
+                                        id,
+                                        toast_title,
+                                        toast_ok,
+                                        toast_err,
+                                    } => {
+                                        let url = format!("{base_q}{path}");
+                                        let ok = match client_q
+                                            .post(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(12))
+                                            .json(&json!({ "id": id }))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .and_then(|v| v.get("ok").and_then(Value::as_bool))
+                                                .unwrap_or(false),
+                                            _ => false,
+                                        };
+                                        let _ = toast_q.try_send((
+                                            toast_title,
+                                            if ok { toast_ok } else { toast_err },
+                                        ));
+                                        if ok && path.ends_with("/remove") {
+                                            let scan_url = format!("{base_q}/api/stranded");
+                                            if let Ok(r) = client_q
+                                                .get(scan_url)
+                                                .query(&[("fresh", "1")])
+                                                .header("host", &host_q)
+                                                .timeout(Duration::from_secs(12))
+                                                .send()
+                                                .await
+                                                && r.status().is_success()
+                                                && let Ok(v) = r.json::<Value>().await
+                                            {
+                                                let (items, repos) = parse_stranded_from_json(&v);
+                                                let _ = async_q.try_send(BridgeAsyncResult::StrandedData { items, repos });
+                                            }
+                                        }
+                                    }
+                                    RemoteQueryCmd::SysMutate {
+                                        path,
+                                        body,
+                                        toast_title,
+                                        toast_ok,
+                                        toast_err,
+                                    } => {
+                                        let url = format!("{base_q}{path}");
+                                        let ok = match client_q
+                                            .post(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(10))
+                                            .json(&body)
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .and_then(|v| v.get("ok").and_then(Value::as_bool))
+                                                .unwrap_or(true),
+                                            _ => false,
+                                        };
+                                        let _ = toast_q.try_send((
+                                            toast_title,
+                                            if ok { toast_ok } else { toast_err },
+                                        ));
+                                        fetch_remote_telemetry(&client_q, &base_q, &host_q, &snap_q).await;
+                                    }
+                                    RemoteQueryCmd::FetchAiAccounts => {
+                                        let url = format!("{base_q}/api/accounts");
+                                        if let Ok(r) = client_q
+                                            .get(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(6))
+                                            .send()
+                                            .await
+                                            && r.status().is_success()
+                                            && let Ok(v) = r.json::<Value>().await
+                                        {
+                                            let _ = async_q.try_send(parse_ai_accounts_from_json(&v));
+                                        }
+                                    }
+                                    RemoteQueryCmd::AiAccountMutate {
+                                        provider,
+                                        action,
+                                        body,
+                                        toast_title,
+                                        toast_ok,
+                                        toast_err,
+                                    } => {
+                                        let valid_action = !action.is_empty()
+                                            && action
+                                                .bytes()
+                                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+                                        let url = if provider == AiProviderTab::Claude && action == "prepare" {
+                                            format!("{base_q}/api/accounts")
+                                        } else if valid_action {
+                                            format!("{base_q}{}/{action}", provider.api_prefix())
+                                        } else {
+                                            String::new()
+                                        };
+                                        let (ok, err_detail) = if url.is_empty() {
+                                            (false, None)
+                                        } else {
+                                            match client_q
+                                                .post(url)
+                                                .header("host", &host_q)
+                                                .timeout(Duration::from_secs(10))
+                                                .json(&body)
+                                                .send()
+                                                .await
+                                            {
+                                                Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+                                                    Ok(v) => {
+                                                        let ok = v.get("ok").and_then(Value::as_bool).unwrap_or(true);
+                                                        let msg = v
+                                                            .get("message")
+                                                            .or_else(|| v.get("code"))
+                                                            .and_then(Value::as_str)
+                                                            .map(str::to_owned);
+                                                        (ok, msg)
+                                                    }
+                                                    Err(_) => (true, None),
+                                                },
+                                                _ => (false, None),
+                                            }
+                                        };
+                                        let msg = if ok {
+                                            toast_ok
+                                        } else {
+                                            err_detail.unwrap_or(toast_err)
+                                        };
+                                        let _ = toast_q.try_send((toast_title, msg));
+                                        if let Ok(r) = client_q
+                                            .get(format!("{base_q}/api/accounts"))
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(6))
+                                            .send()
+                                            .await
+                                            && r.status().is_success()
+                                            && let Ok(v) = r.json::<Value>().await
+                                        {
+                                            let _ = async_q.try_send(parse_ai_accounts_from_json(&v));
+                                        }
+                                    }
+                                    RemoteQueryCmd::FetchPhoneStatus => {
+                                        let tun = match client_q
+                                            .get(format!("{base_q}/api/tunnel"))
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(5))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+                                            _ => None,
+                                        };
+                                        let push = match client_q
+                                            .get(format!("{base_q}/api/push"))
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(4))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+                                            _ => None,
+                                        };
+                                        if let Some(t) = tun {
+                                            let _ = async_q.try_send(parse_phone_status_from_json(&t, push.as_ref()));
+                                        }
+                                    }
+                                    RemoteQueryCmd::PhoneMutate {
+                                        path,
+                                        body,
+                                        toast_title,
+                                        toast_ok,
+                                        toast_err,
+                                    } => {
+                                        let url = format!("{base_q}{path}");
+                                        let ok = match client_q
+                                            .post(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(12))
+                                            .json(&body)
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .ok()
+                                                .and_then(|v| v.get("ok").and_then(Value::as_bool))
+                                                .unwrap_or(true),
+                                            _ => false,
+                                        };
+                                        let _ = toast_q.try_send((
+                                            toast_title,
+                                            if ok { toast_ok } else { toast_err },
+                                        ));
+                                        let tun = match client_q
+                                            .get(format!("{base_q}/api/tunnel"))
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(5))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+                                            _ => None,
+                                        };
+                                        let push = match client_q
+                                            .get(format!("{base_q}/api/push"))
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(4))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+                                            _ => None,
+                                        };
+                                        if let Some(t) = tun {
+                                            let _ = async_q.try_send(parse_phone_status_from_json(&t, push.as_ref()));
+                                        }
                                     }
                                 }
                             }
@@ -3374,6 +4476,16 @@ fn sync_in_process_telemetry(app_state: &AppState, ui: &mut UiState, refresh_sys
             ports,
             private_mb,
         };
+        let auto_hours = app_state
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .auto_close();
+        let mut sys_val = json!(snap);
+        if let Some(obj) = sys_val.as_object_mut() {
+            obj.insert("auto".to_owned(), json!({ "hours": auto_hours }));
+        }
+        merge_mac_drawer_telemetry(&mut ui.mac_drawer, parse_mac_drawer_from_json(&sys_val));
     }
 }
 
@@ -3466,6 +4578,113 @@ fn sync_live_state_to_ui(
                     ui.push_toast(title, err);
                 }
             },
+            BridgeAsyncResult::BurnData(res) => match res {
+                Ok(data) => {
+                    ui.burn_drawer = data;
+                }
+                Err(err) => {
+                    ui.burn_drawer.loading = false;
+                    ui.burn_drawer.loaded_range = Some(ui.burn_drawer.range);
+                    ui.burn_drawer.error = Some(err);
+                }
+            },
+            BridgeAsyncResult::VaultList {
+                items,
+                total_count,
+                total_bytes,
+            } => {
+                ui.vault_drawer.loading = false;
+                ui.vault_drawer.loaded = true;
+                ui.vault_drawer.items = items;
+                ui.vault_drawer.total_count = total_count;
+                ui.vault_drawer.total_bytes = total_bytes;
+            }
+            BridgeAsyncResult::VaultTranscript(rec) => {
+                ui.vault_drawer.transcript_loading = None;
+                ui.vault_drawer.open_transcript = rec;
+            }
+            BridgeAsyncResult::VaultReport(res) => match res {
+                Ok(report) => {
+                    ui.vault_drawer.report = report;
+                }
+                Err(err) => {
+                    ui.vault_drawer.report.loading = false;
+                    ui.vault_drawer.report.loaded = true;
+                    ui.vault_drawer.report.error = Some(err);
+                }
+            },
+            BridgeAsyncResult::StrandedData { items, repos } => {
+                ui.mac_drawer.stranded_loading = false;
+                ui.mac_drawer.stranded_loaded = true;
+                ui.mac_drawer.stranded = items;
+                ui.mac_drawer.stranded_repos = repos;
+            }
+            BridgeAsyncResult::AiAccountsData {
+                claude,
+                claude_auto,
+                claude_move,
+                claude_resume,
+                codex,
+                codex_auto,
+                codex_seat_note,
+                ag,
+                ag_auto,
+                ag_away,
+                ag_pending,
+                ag_note,
+            } => {
+                ui.ai_accounts.loaded = true;
+                ui.ai_accounts.claude_auto = claude_auto;
+                ui.ai_accounts.claude_move = claude_move;
+                ui.ai_accounts.claude_resume = claude_resume;
+                ui.ai_accounts.codex = codex;
+                ui.ai_accounts.codex_auto = codex_auto;
+                ui.ai_accounts.codex_seat_note = codex_seat_note;
+                ui.ai_accounts.ag = ag;
+                ui.ai_accounts.ag_auto = ag_auto;
+                ui.ai_accounts.ag_away = ag_away;
+                ui.ai_accounts.ag_pending = ag_pending;
+                ui.ai_accounts.ag_note = ag_note;
+                ui.accounts = claude
+                    .iter()
+                    .map(|a| AccountOption {
+                        slug: a.slug.clone(),
+                        label: a.label.clone(),
+                        active: a.active,
+                        pct: a.windows.first().map(|w| w.pct.round().clamp(0.0, 100.0) as u32),
+                    })
+                    .collect();
+                ui.ai_accounts.claude = claude;
+            }
+            BridgeAsyncResult::PhoneStatus {
+                lan_on,
+                lan_ip,
+                tunnel_on,
+                tunnel_state,
+                tunnel_url,
+                tunnel_domain,
+                tunnel_error,
+                phone_approve,
+                push_count,
+                pin,
+            } => {
+                ui.phone_modal.loaded = true;
+                ui.phone_modal.lan_on = lan_on;
+                ui.phone_modal.lan_ip = lan_ip;
+                ui.phone_modal.tunnel_on = tunnel_on;
+                ui.phone_modal.tunnel_state = tunnel_state;
+                ui.phone_modal.tunnel_url = tunnel_url;
+                ui.phone_modal.tunnel_domain = tunnel_domain.clone();
+                if ui.phone_modal.tunnel_domain_draft.is_empty() && !tunnel_domain.is_empty() {
+                    ui.phone_modal.tunnel_domain_draft = tunnel_domain;
+                }
+                ui.phone_modal.tunnel_error = tunnel_error;
+                ui.phone_modal.phone_approve = phone_approve;
+                ui.phone_modal.push_count = push_count;
+                if let Some(p) = pin {
+                    ui.pairing_pin = p;
+                }
+            }
         }
     }
 
@@ -6554,6 +7773,744 @@ fn process_ui_actions(
                     drop(surf);
                     let _ = async_tx.try_send(result);
                 });
+            }
+            UiAction::FetchBurn(range) => {
+                ui.burn_drawer.range = range;
+                ui.burn_drawer.loading = true;
+                ui.burn_drawer.error = None;
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchBurn(range));
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let (summary, info) = {
+                                let otel = state.otel.lock().unwrap_or_else(|e| e.into_inner());
+                                (otel.burn_summary(range.api_str(), now_ms()), otel.info())
+                            };
+                            let mut val = json!(summary);
+                            if let Some(obj) = val.as_object_mut() {
+                                obj.insert("ok".to_owned(), Value::Bool(true));
+                                obj.insert("range".to_owned(), Value::String(range.api_str().to_owned()));
+                                obj.insert("days".to_owned(), info.get("days").cloned().unwrap_or(json!(0)));
+                                let settings_path = state.claude_dir.join("settings.json");
+                                let setup = std::fs::read_to_string(&settings_path)
+                                    .ok()
+                                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                                    .and_then(|v| v.get("env").and_then(Value::as_object).cloned())
+                                    .map(|env| {
+                                        if !station_core::store::otel_setup::marked_keys(&env).is_empty() {
+                                            "ours"
+                                        } else if env.get("CLAUDE_CODE_ENABLE_TELEMETRY").and_then(Value::as_str) == Some("1") {
+                                            "other"
+                                        } else {
+                                            "none"
+                                        }
+                                    })
+                                    .unwrap_or("none");
+                                obj.insert("setup".to_owned(), Value::String(setup.to_owned()));
+                            }
+                            let _ = async_tx.try_send(BridgeAsyncResult::BurnData(Ok(
+                                parse_burn_drawer_from_json(range, &val),
+                            )));
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.burn_drawer.loading = false;
+                        ui.burn_drawer.loaded_range = Some(range);
+                        ui.burn_drawer.error = Some(i18n.tr("burn.err"));
+                        ui.push_toast(i18n.tr("burn.title"), i18n.tr("burn.err"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::FetchVaultList { query, fresh } => {
+                ui.vault_drawer.loading = true;
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchVaultList { query, fresh });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let mut vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                            if fresh || vault.scanned_at() == 0 {
+                                let _ = vault.scan_claude_projects(&state.claude_dir);
+                            }
+                            let stats = vault.stats();
+                            let items: Vec<Value> = vault
+                                .search(&query, 60)
+                                .into_iter()
+                                .map(|e| json!(e))
+                                .collect();
+                            let val = json!({ "stats": stats, "items": items });
+                            let (parsed_items, total_count, total_bytes) = parse_vault_list_from_json(&val);
+                            let _ = async_tx.try_send(BridgeAsyncResult::VaultList {
+                                items: parsed_items,
+                                total_count,
+                                total_bytes,
+                            });
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.vault_drawer.loading = false;
+                        ui.vault_drawer.loaded = true;
+                        ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.err"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::FetchVaultTranscript(sid) => {
+                if !station_core::store::vault::is_valid_sid(&sid) {
+                    ui.vault_drawer.transcript_loading = None;
+                    ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.err"));
+                    continue;
+                }
+                ui.vault_drawer.transcript_loading = Some(sid.clone());
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchVaultTranscript { sid });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let mut vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                            if vault.scanned_at() == 0 {
+                                let _ = vault.scan_claude_projects(&state.claude_dir);
+                            }
+                            let rec = vault
+                                .get_transcript(&sid)
+                                .and_then(|r| parse_vault_transcript_from_json(&json!({ "rec": r })));
+                            let _ = async_tx.try_send(BridgeAsyncResult::VaultTranscript(rec));
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.vault_drawer.transcript_loading = None;
+                        ui.push_toast(i18n.tr("vault.title"), i18n.tr("vault.err"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::FetchVaultReport => {
+                ui.vault_drawer.report.loading = true;
+                ui.vault_drawer.report.error = None;
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchVaultReport);
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let mut vault = state.vault.lock().unwrap_or_else(|e| e.into_inner());
+                            if vault.scanned_at() == 0 {
+                                let _ = vault.scan_claude_projects(&state.claude_dir);
+                            }
+                            let since = now_ms().saturating_sub(7 * 86_400_000);
+                            let prompts = vault.recent_prompts(since);
+                            drop(vault);
+                            let rep_val = json!(station_core::store::prompt_report::build_prompt_report(
+                                &prompts, 3
+                            ));
+                            let _ = async_tx.try_send(BridgeAsyncResult::VaultReport(Ok(
+                                parse_vault_report_from_json(&rep_val),
+                            )));
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.vault_drawer.report.loading = false;
+                        ui.vault_drawer.report.loaded = true;
+                        ui.vault_drawer.report.error = Some(i18n.tr("vault.rep.err"));
+                        ui.push_toast(i18n.tr("vault.tab.report"), i18n.tr("vault.rep.err"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::CopyToClipboard {
+                text,
+                toast_title,
+                toast_body,
+            } => {
+                let toast_tx = bridge.toast_tx.clone();
+                let fail_msg = i18n.tr("err.network");
+                std::thread::spawn(move || {
+                    let ok = arboard::Clipboard::new()
+                        .and_then(|mut cb| cb.set_text(text))
+                        .is_ok();
+                    let _ = toast_tx.try_send((toast_title, if ok { toast_body } else { fail_msg }));
+                });
+            }
+            UiAction::SysAction {
+                action,
+                target,
+                force,
+                start,
+            } => {
+                let title = i18n.tr("mac.title");
+                let ok_msg = i18n.tr("mac.closed");
+                let err_msg = i18n.tr("mac.err");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::SysMutate {
+                            path: "/api/sys/action",
+                            body: json!({
+                                "action": action,
+                                "target": target,
+                                "force": force,
+                                "start": start,
+                            }),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let toast_tx = bridge.toast_tx.clone();
+                        bridge.sys_refresh_due = true;
+                        std::thread::spawn(move || {
+                            let res = state.sys.action(&action, Some(&target), force, start);
+                            let ok = res.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                            let _ = toast_tx.try_send((title, if ok { ok_msg } else { err_msg }));
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::SetSysAutoClose(hours) => {
+                ui.mac_drawer.auto_close_hours = hours;
+                let title = i18n.tr("mac.auto");
+                let ok_msg = if hours == 0 {
+                    i18n.tr("mac.autoOff")
+                } else {
+                    format!("{hours}h")
+                };
+                let err_msg = i18n.tr("mac.err");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::SysMutate {
+                            path: "/api/sys/auto",
+                            body: json!({ "hours": hours }),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let ok = app_state
+                            .prefs
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .set_auto_close(hours)
+                            .unwrap_or(false);
+                        ui.push_toast(title, if ok { ok_msg } else { err_msg });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::FetchStranded { fresh } => {
+                ui.mac_drawer.stranded_loading = true;
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::FetchStranded { fresh });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let (dirs, in_use) = collect_in_process_stranded_dirs(&state);
+                            let snap = state
+                                .stranded
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .scan(&dirs, &in_use, now_ms(), fresh);
+                            let val = json!({ "repos": snap.repos, "items": snap.items });
+                            let (items, repos) = parse_stranded_from_json(&val);
+                            let _ = async_tx.try_send(BridgeAsyncResult::StrandedData { items, repos });
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.mac_drawer.stranded_loading = false;
+                        ui.mac_drawer.stranded_loaded = true;
+                        ui.push_toast(i18n.tr("stranded.h"), i18n.tr("stranded.err"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::OpenStranded(id) => {
+                let title = i18n.tr("stranded.h");
+                let ok_msg = i18n.tr("stranded.open");
+                let err_msg = i18n.tr("stranded.err");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::StrandedMutate {
+                            path: "/api/stranded/open",
+                            id,
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let entry = app_state
+                            .stranded
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .entry(&id);
+                        if let Some(entry) = entry {
+                            let path = PathBuf::from(&entry.item.path);
+                            let toast_tx = bridge.toast_tx.clone();
+                            std::thread::spawn(move || {
+                                let ok = station_core::state::stranded::open_folder(&path).is_ok();
+                                let _ = toast_tx.try_send((title, if ok { ok_msg } else { err_msg }));
+                            });
+                        } else {
+                            ui.push_toast(title, i18n.tr("stranded.gone"));
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::RemoveStranded(id) => {
+                let title = i18n.tr("stranded.h");
+                let ok_msg = i18n.tr("stranded.removed");
+                let err_msg = i18n.tr("stranded.err");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::StrandedMutate {
+                            path: "/api/stranded/remove",
+                            id,
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        let toast_tx = bridge.toast_tx.clone();
+                        std::thread::spawn(move || {
+                            let (dirs, in_use) = collect_in_process_stranded_dirs(&state);
+                            let res = state
+                                .stranded
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .remove(&id, &in_use);
+                            let _ = toast_tx.try_send((
+                                title,
+                                if res.ok { ok_msg } else { err_msg },
+                            ));
+                            let snap = state
+                                .stranded
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .scan(&dirs, &in_use, now_ms(), true);
+                            let (items, repos) =
+                                parse_stranded_from_json(&json!({ "repos": snap.repos, "items": snap.items }));
+                            let _ = async_tx.try_send(BridgeAsyncResult::StrandedData { items, repos });
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::FetchAiAccounts => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::FetchAiAccounts);
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    let state = Arc::clone(app_state);
+                    let async_tx = bridge.async_tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = async_tx.try_send(build_in_process_ai_accounts(&state));
+                    });
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.ai_accounts.loaded = true;
+                    ui.push_toast(i18n.tr("acct.h"), i18n.tr("err.network"));
+                    continue;
+                }
+            },
+            UiAction::AiAccountMutate {
+                provider,
+                action,
+                body,
+            } => {
+                let clean_body = redact_ai_mutate_body(body);
+                let title = i18n.tr("acct.h");
+                let ok_msg = i18n.tr("acct.switched");
+                let err_msg = i18n.tr("err.network");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::AiAccountMutate {
+                            provider,
+                            action,
+                            body: clean_body,
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        let toast_tx = bridge.toast_tx.clone();
+                        std::thread::spawn(move || {
+                            let res = match provider {
+                                AiProviderTab::Claude => state
+                                    .claude_accounts
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .mutate(&action, &clean_body),
+                                AiProviderTab::Codex => state
+                                    .codex_accounts
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .mutate(&action, &clean_body),
+                                AiProviderTab::Antigravity => state
+                                    .ag_accounts
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .mutate(&action, &clean_body),
+                            };
+                            let ok = res.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                            let detail = res
+                                .get("message")
+                                .or_else(|| res.get("code"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            let _ = toast_tx.try_send((
+                                title,
+                                if ok {
+                                    ok_msg
+                                } else {
+                                    detail.unwrap_or(err_msg)
+                                },
+                            ));
+                            let _ = async_tx.try_send(build_in_process_ai_accounts(&state));
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::FetchPhoneStatus => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::FetchPhoneStatus);
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    let state = Arc::clone(app_state);
+                    let async_tx = bridge.async_tx.clone();
+                    std::thread::spawn(move || {
+                        let _ = async_tx.try_send(build_in_process_phone_status(&state));
+                    });
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.phone_modal.loaded = true;
+                    ui.push_toast(i18n.tr("phone.title"), i18n.tr("err.network"));
+                    continue;
+                }
+            },
+            UiAction::ToggleLan(on) => {
+                let title = i18n.tr("phone.title");
+                let ok_msg = if on {
+                    i18n.tr("phone.lan.on")
+                } else {
+                    i18n.tr("phone.lan.off")
+                };
+                let err_msg = i18n.tr("err.network");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
+                            path: "/api/lan",
+                            body: json!({ "on": on }),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        {
+                            let mut prefs = app_state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = prefs.set("lan", if on { Some(Value::Bool(true)) } else { None });
+                        }
+                        ui.phone_modal.lan_on = on;
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let _ = async_tx.try_send(build_in_process_phone_status(&state));
+                        });
+                        ui.push_toast(title, ok_msg);
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::ToggleTunnel(on) => {
+                let title = i18n.tr("phone.anywhere");
+                let ok_msg = if on {
+                    i18n.tr("phone.cf.starting")
+                } else {
+                    i18n.tr("phone.lan.off")
+                };
+                let err_msg = i18n.tr("err.network");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
+                            path: "/api/tunnel",
+                            body: json!({ "on": on }),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess {
+                        app_state,
+                        runtime_handle,
+                        ..
+                    } => {
+                        {
+                            let mut prefs = app_state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = prefs.set("tunnel", if on { Some(Value::Bool(true)) } else { None });
+                        }
+                        ui.phone_modal.tunnel_on = on;
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        let toast_tx = bridge.toast_tx.clone();
+                        if on {
+                            if let Some(rt) = runtime_handle.clone() {
+                                rt.spawn(async move {
+                                    let _ = state.tunnel.start(Arc::clone(&state)).await;
+                                    let _ = async_tx.try_send(build_in_process_phone_status(&state));
+                                    let _ = toast_tx.try_send((title, ok_msg));
+                                });
+                            } else {
+                                ui.push_toast(title, err_msg);
+                            }
+                        } else {
+                            std::thread::spawn(move || {
+                                let _ = state.tunnel.stop();
+                                let _ = async_tx.try_send(build_in_process_phone_status(&state));
+                                let _ = toast_tx.try_send((title, ok_msg));
+                            });
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::SetTunnelDomain(host) => {
+                let clean = station_core::redact::redact(&host).trim().to_ascii_lowercase();
+                let title = i18n.tr("phone.anywhere");
+                let err_msg = i18n.tr("err.network");
+                if !clean.is_empty() && !is_valid_tunnel_host_input(&clean) {
+                    ui.push_toast(title, err_msg);
+                    continue;
+                }
+                let ok_msg = i18n.tr("phone.cf.domainSave");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
+                            path: "/api/tunnel/domain",
+                            body: json!({ "host": clean }),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        {
+                            let mut prefs = app_state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = prefs.set(
+                                "tunnelDomain",
+                                if clean.is_empty() {
+                                    None
+                                } else {
+                                    Some(Value::String(clean.clone()))
+                                },
+                            );
+                        }
+                        ui.phone_modal.tunnel_domain = clean.clone();
+                        ui.phone_modal.tunnel_domain_draft = clean;
+                        let state = Arc::clone(app_state);
+                        let async_tx = bridge.async_tx.clone();
+                        std::thread::spawn(move || {
+                            let _ = async_tx.try_send(build_in_process_phone_status(&state));
+                        });
+                        ui.push_toast(title, ok_msg);
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::TogglePhoneApprove(approve) => {
+                let title = i18n.tr("phone.approve");
+                let ok_msg = if approve {
+                    i18n.tr("phone.lan.on")
+                } else {
+                    i18n.tr("phone.lan.off")
+                };
+                let err_msg = i18n.tr("err.network");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
+                            path: "/api/phone",
+                            body: json!({ "approve": approve }),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        let tasks_on = {
+                            let mut prefs = app_state.prefs.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ = prefs.set(
+                                "phoneApprove",
+                                if approve { Some(Value::Bool(true)) } else { None },
+                            );
+                            prefs
+                                .get("phoneTasks")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                        };
+                        app_state
+                            .office
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .broadcast(json!({ "k": "phone", "approve": approve, "tasks": tasks_on }));
+                        ui.phone_modal.phone_approve = approve;
+                        ui.push_toast(title, ok_msg);
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::UpdatePin { pin } => {
+                let title = i18n.tr("phone.pin");
+                let ok_msg = i18n.tr("phone.pin.saved");
+                let weak_msg = i18n.tr("station.pinWeak");
+                let err_msg = i18n.tr("err.network");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let body = match pin {
+                            Some(p) => json!({ "pin": p.trim() }),
+                            None => json!({}),
+                        };
+                        let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
+                            path: "/api/pin",
+                            body,
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: weak_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => match pin {
+                        None => match app_state.auth.regenerate_pin() {
+                            Ok(new_pin) => {
+                                ui.pairing_pin = new_pin;
+                                ui.push_toast(title, ok_msg);
+                            }
+                            Err(_) => ui.push_toast(title, err_msg),
+                        },
+                        Some(raw) => {
+                            let trimmed = raw.trim();
+                            if station_core::auth::pin_weak(trimmed) {
+                                ui.push_toast(title, weak_msg);
+                            } else if app_state.auth.set_pin(trimmed).unwrap_or(false) {
+                                ui.pairing_pin = app_state.auth.current_pin();
+                                ui.push_toast(title, ok_msg);
+                            } else {
+                                ui.push_toast(title, err_msg);
+                            }
+                        }
+                    },
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
+            }
+            UiAction::TestWebPush => {
+                let title = i18n.tr("phone.push.title");
+                let ok_msg = i18n.tr("phone.push.sent");
+                let err_msg = i18n.tr("err.network");
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { query_tx, .. } => {
+                        let _ = query_tx.try_send(RemoteQueryCmd::PhoneMutate {
+                            path: "/api/push/test",
+                            body: json!({}),
+                            toast_title: title,
+                            toast_ok: ok_msg,
+                            toast_err: err_msg,
+                        });
+                    }
+                    BridgeBackend::InProcess {
+                        app_state,
+                        runtime_handle,
+                        ..
+                    } => {
+                        let msg = station_core::store::push::PushMessage {
+                            title: title.clone(),
+                            body: ok_msg.clone(),
+                            tag: Some("station-test".to_owned()),
+                            url: "/phone".to_owned(),
+                            urgent: false,
+                        };
+                        let deliveries = app_state
+                            .push
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .prepare_deliveries(&msg, now_ms() / 1000);
+                        if deliveries.is_empty() {
+                            ui.push_toast(title, i18n.tr("phone.push.empty"));
+                        } else if let Some(rt) = runtime_handle.clone() {
+                            let state = Arc::clone(app_state);
+                            let toast_tx = bridge.toast_tx.clone();
+                            rt.spawn(async move {
+                                let dead = station_core::store::push::deliver_prepared(deliveries).await;
+                                if !dead.is_empty()
+                                    && let Ok(mut push) = state.push.lock()
+                                {
+                                    for ep in dead {
+                                        push.remove(&ep);
+                                    }
+                                }
+                                let _ = toast_tx.try_send((title, ok_msg));
+                            });
+                        } else {
+                            ui.push_toast(title, ok_msg);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(title, err_msg);
+                        continue;
+                    }
+                }
             }
             UiAction::RefreshTelemetry => {
                 bridge.sys_refresh_due = true;
@@ -9750,6 +11707,94 @@ mod tests {
         assert!(
             all_synced,
             "AttachedHttp must persist poll (/api/chat), todos (/api/todos), and load /api/wrapped"
+        );
+        drop(daemon);
+    }
+
+    #[test]
+    fn task7_attached_http_fetches_burn_vault_accounts_phone_and_updates_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let daemon = LiveServerBridge::connect_or_start(
+            data_dir.clone(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            false,
+        );
+        let daemon_state = daemon.in_process_state().expect("daemon InProcess");
+        let old_pin = daemon_state.auth.current_pin();
+
+        let attached = LiveServerBridge::connect_or_start(
+            data_dir.clone(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            true,
+        );
+        assert_eq!(attached.mode(), BridgeMode::AttachedHttp);
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(attached)
+            .add_event::<AppExit>()
+            .add_systems(Update, (sync_live_state_to_ui, process_ui_actions).chain());
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::FetchBurn(BurnRange::Days30));
+            ui.push_action(UiAction::FetchVaultList {
+                query: String::new(),
+                fresh: false,
+            });
+            ui.push_action(UiAction::FetchVaultReport);
+            ui.push_action(UiAction::FetchAiAccounts);
+            ui.push_action(UiAction::FetchPhoneStatus);
+            ui.push_action(UiAction::ToggleLan(true));
+            ui.push_action(UiAction::TogglePhoneApprove(true));
+            ui.push_action(UiAction::SetSysAutoClose(4));
+            ui.push_action(UiAction::UpdatePin { pin: None });
+        }
+        app.update();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        let mut all_ok = false;
+        while std::time::Instant::now() < deadline {
+            app.update();
+            let ui = app.world().resource::<UiState>();
+            let burn_ok = ui.burn_drawer.loaded_range == Some(BurnRange::Days30);
+            let vault_ok = ui.vault_drawer.loaded && ui.vault_drawer.report.loaded;
+            let accts_ok = ui.ai_accounts.loaded;
+            let phone_ok = ui.phone_modal.loaded
+                && ui.phone_modal.lan_on
+                && ui.phone_modal.phone_approve
+                && ui.pairing_pin.len() == 6
+                && ui.pairing_pin != old_pin;
+            let auto_ok = daemon_state.prefs.lock().unwrap().auto_close() == 4;
+            if burn_ok && vault_ok && accts_ok && phone_ok && auto_ok {
+                all_ok = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            all_ok,
+            "AttachedHttp must load Burn 30d, Vault + Report, AI Accounts, Phone status, LAN/Approve/AutoClose, and regenerate PIN"
         );
         drop(daemon);
     }
