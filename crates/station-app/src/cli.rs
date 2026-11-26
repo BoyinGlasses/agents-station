@@ -63,6 +63,9 @@ pub struct Cli {
     pub capture_scene: Option<String>,
 
     #[arg(long)]
+    pub lang: Option<String>,
+
+    #[arg(long)]
     pub out: Option<PathBuf>,
 }
 
@@ -111,6 +114,8 @@ mod tests {
             "agents-station",
             "--capture-scene",
             "smoke",
+            "--lang",
+            "vi",
             "--out",
             "out.png",
             "--gpu",
@@ -118,6 +123,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(cap.capture_scene.as_deref(), Some("smoke"));
+        assert_eq!(cap.lang.as_deref(), Some("vi"));
         assert_eq!(cap.out.as_deref(), Some(std::path::Path::new("out.png")));
         assert_eq!(cap.gpu, GpuPreference::Integrated);
     }

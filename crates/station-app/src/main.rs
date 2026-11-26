@@ -149,12 +149,13 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             );
             ui_state.view_mode = station_ui::ViewMode::Lite2D;
             ui_state.sys.private_mb = 78.0;
+            let initial_lang = cli.lang.clone().unwrap_or_else(|| "en".to_owned());
             app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
                 .add_systems(Startup, spawn_lite_2d_camera)
                 .add_plugins(station_ui::StationUiPlugin {
                     assets_dir,
                     initial_state: ui_state,
-                    initial_lang: "en".to_owned(),
+                    initial_lang,
                 });
         }
         Some("hud-pro") => {
@@ -163,6 +164,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 station_3d::BackdropKind::City,
                 false,
             );
+            let initial_lang = cli.lang.clone().unwrap_or_else(|| "en".to_owned());
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Pro,
                 backdrop: station_3d::BackdropKind::City,
@@ -172,7 +174,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             .add_plugins(station_ui::StationUiPlugin {
                 assets_dir,
                 initial_state: ui_state,
-                initial_lang: "en".to_owned(),
+                initial_lang,
             });
         }
         Some("cozy") => {
@@ -232,7 +234,10 @@ fn build_gui_app(cli: &cli::Cli) -> App {
         None => {
             let data_dir = commands::resolve_runtime_data_dir();
             let prefs = station_core::prefs::PrefsStore::load(&data_dir);
-            let initial_lang = prefs.lang().to_owned();
+            let initial_lang = cli
+                .lang
+                .clone()
+                .unwrap_or_else(|| prefs.lang().to_owned());
             let mut ui_state = station_ui::UiState::new_live(
                 station_3d::OfficeLayout::Pro,
                 station_3d::BackdropKind::City,
