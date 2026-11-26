@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod backdrops;
 pub mod camera;
+pub mod cast;
 pub mod chibi;
 pub mod chibi_meshes;
 pub mod chibi_props;
@@ -27,6 +28,7 @@ use bevy::prelude::*;
 pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
+pub use cast::{FarewellStage, InternTenure, OfficeStaffNpc, StaffCastState, StaffRole};
 pub use chibi::{ChibiLook, ChibiRig, OutfitKind, solve_two_bone_ik};
 pub use chibi_meshes::{ChibiMeshCache, HairStyle};
 pub use chibi_props::{ActivePropEntity, HeldPropRoot, PropKind, set_active_prop};
@@ -119,6 +121,7 @@ fn register_office_runtime(
         .insert_resource(furniture::RocketLaunchQueue::default())
         .insert_resource(furniture::ServerRackTelemetry::default())
         .insert_resource(props_detail::PropsLiveTelemetry::default())
+        .insert_resource(cast::StaffCastState::default())
         .insert_resource(SharedFontEngine::new(assets_dir))
         .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
@@ -135,6 +138,7 @@ fn register_office_runtime(
                 props_detail::leisure::animate_leisure_system,
                 props_detail::microwave::animate_microwaves_system,
                 props_detail::shredder_cups::animate_shredder_bins_and_cups_system,
+                cast::step_staff_roles_system.before(people::step_nav_walkers_system),
                 people::step_nav_walkers_system.before(people::animate_chibis_system),
                 people::animate_chibis_system,
                 people::update_team_lines_system.after(people::step_nav_walkers_system),
@@ -189,6 +193,7 @@ pub fn spawn_full_office_world(
     furniture::spawn_furniture(commands, &mut pal, materials, images, fonts, &spec);
     props::spawn_all_props(commands, &mut pal, materials, images, fonts, &spec);
     people::spawn_office_cast(commands, &chibi_cache, &mut pal, materials, &spec, look);
+    cast::spawn_office_staff_cast(commands, &chibi_cache, &mut pal, materials, &spec, look);
     life::spawn_life_elements(
         commands,
         &mut pal,
