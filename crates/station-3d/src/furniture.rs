@@ -96,12 +96,11 @@ pub fn redraw_whiteboard_surface(
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    if let Some(slot) = images.get_mut(&tex_handle) {
-        *slot = new_img;
-        true
-    } else {
-        false
-    }
+    // Always re-insert under the existing Handle<Image> id: `RenderAssetUsages::RENDER_WORLD`
+    // drops the CPU copy from `Assets<Image>` after frame-1 GPU extraction, so `get_mut` would
+    // return `None` at runtime while `insert` re-queues GPU upload under the same handle.
+    images.insert(&tex_handle, new_img);
+    true
 }
 
 /// Spawns whiteboard + stickies, coffee corner, meeting table, 3 server racks + fans,
@@ -342,5 +341,58 @@ pub fn spawn_furniture(
         let ocean_m = palette.mat(materials, "#3B7CB8", 0.35, 0.1);
         spawn_cyl(commands, palette, wood_dark, Vec3::new(gx, 0.36, gz), 0.08, 0.72);
         spawn_sphere(commands, palette, ocean_m, Vec3::new(gx, 0.92, gz), Vec3::splat(0.42));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn redraw_whiteboard_surface_succeeds_after_render_world_extraction() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let mut images = Assets::<Image>::default();
+        let mut pal = WorldPalette::new(&mut meshes);
+
+        let initial_surf = draw_whiteboard(
+            &WhiteboardInput {
+                title: "Whiteboard".into(),
+                yours_title: "Yours".into(),
+                streamer: false,
+                tasks: Vec::new(),
+                open_todos: 0,
+                total_todos: 0,
+            },
+            &mut fonts,
+        );
+        let wb_mat = pal.textured_lit(&mut images, &mut materials, initial_surf, 0.35);
+        let tex_handle = materials
+            .get(&wb_mat)
+            .and_then(|m| m.base_color_texture.clone())
+            .expect("whiteboard material must have base_color_texture");
+
+        // Simulate Bevy frame-1 RenderAssetUsages::RENDER_WORLD extraction removing the CPU Image.
+        images.remove(&tex_handle);
+        assert!(images.get(&tex_handle).is_none());
+
+        let ok = redraw_whiteboard_surface(
+            "- Ship Fix 1\n- [x] Verify redraw",
+            false,
+            &wb_mat,
+            &mut materials,
+            &mut images,
+            &mut fonts,
+        );
+        assert!(ok, "redraw_whiteboard_surface must succeed after RENDER_WORLD extraction");
+        let reinserted = images
+            .get(&tex_handle)
+            .expect("redraw must reinsert updated Image under the same Handle<Image> id");
+        assert!(reinserted.width() > 0 && reinserted.height() > 0);
+        assert_eq!(images.len(), 1, "redraw must not leak extra Image entries");
+        assert_eq!(materials.len(), 1, "redraw must not leak extra StandardMaterial entries");
     }
 }
