@@ -8,6 +8,7 @@ pub struct FontBundle {
     pub ui_bold: Vec<Vec<u8>>,
     pub mono_regular: Vec<Vec<u8>>,
     pub thai_regular: Vec<u8>,
+    pub thai_bold: Vec<u8>,
 }
 
 const UI_REGULAR_FILES: [&str; 3] = [
@@ -29,6 +30,7 @@ const MONO_REGULAR_FILES: [&str; 3] = [
 ];
 
 const THAI_REGULAR_FILE: &str = "fonts/PlexThaiLooped-400-thai.ttf";
+const THAI_BOLD_FILE: &str = "fonts/PlexThaiLooped-700-thai.ttf";
 
 fn load_chain(assets_dir: &Path, files: &[&str]) -> Result<Vec<Vec<u8>>> {
     files
@@ -42,12 +44,15 @@ fn load_chain(assets_dir: &Path, files: &[&str]) -> Result<Vec<Vec<u8>>> {
 
 pub fn load_font_bundle(assets_dir: &Path) -> Result<FontBundle> {
     let thai_path = assets_dir.join(THAI_REGULAR_FILE);
+    let thai_bold_path = assets_dir.join(THAI_BOLD_FILE);
     Ok(FontBundle {
         ui_regular: load_chain(assets_dir, &UI_REGULAR_FILES)?,
         ui_bold: load_chain(assets_dir, &UI_BOLD_FILES)?,
         mono_regular: load_chain(assets_dir, &MONO_REGULAR_FILES)?,
         thai_regular: std::fs::read(&thai_path)
             .with_context(|| format!("missing bundled font {}", thai_path.display()))?,
+        thai_bold: std::fs::read(&thai_bold_path)
+            .with_context(|| format!("missing bundled font {}", thai_bold_path.display()))?,
     })
 }
 
@@ -75,6 +80,7 @@ pub fn verify_required_glyphs(bundle: &FontBundle) -> Result<()> {
     let ui_bold = parse_faces(&bundle.ui_bold)?;
     let mono = parse_faces(&bundle.mono_regular)?;
     let thai = Face::parse(&bundle.thai_regular, 0).context("invalid Thai TTF face")?;
+    let thai_bold = Face::parse(&bundle.thai_bold, 0).context("invalid Thai bold TTF face")?;
 
     let ascii = "Hello 0123456789";
     let vi = "Tiếng Việt: Ă Ắ Ặ Đ Ơ Ư Ỹ ệ ổ";
@@ -87,6 +93,7 @@ pub fn verify_required_glyphs(bundle: &FontBundle) -> Result<()> {
     check_sample_covered("mono_regular ascii", &mono, ascii)?;
     check_sample_covered("mono_regular vietnamese", &mono, vi)?;
     check_sample_covered("thai_regular thai", &[thai], th)?;
+    check_sample_covered("thai_bold thai", &[thai_bold], th)?;
     Ok(())
 }
 
@@ -104,5 +111,6 @@ mod tests {
         assert!(assets.join("i18n").exists());
         assert!(assets.join("brands/grab.svg").exists());
         assert!(assets.join("vehicles/cars.json").exists());
+        assert!(!bundle.thai_bold.is_empty(), "thai_bold 700 weight must be loaded");
     }
 }
