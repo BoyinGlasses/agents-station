@@ -1,6 +1,7 @@
 pub mod meals_breaks;
 pub mod office_games;
 pub mod staff_roles;
+pub mod street_outings;
 
 use crate::chibi_meshes::ChibiMeshCache;
 use crate::chibi_props::{ActivePropEntity, PropKind, set_active_prop};
@@ -20,6 +21,10 @@ pub use office_games::{
 pub use staff_roles::{
     FarewellStage, InternTenure, OfficeStaffNpc, StaffCastState, StaffRole,
     spawn_office_staff_cast, step_staff_roles_system,
+};
+pub use street_outings::{
+    NHAU_CHEERS_LINE, NHAU_NO_DRIVE_LINE, PhotoboothFlashLight, PhotoboothStage,
+    StreetOutingsState, step_street_outings_system,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -331,5 +336,174 @@ pub fn begin_cast_tick_system(
         for ent in &active_q {
             co.claim(ent);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backdrops::BackdropKind;
+    use crate::chibi::{ChibiLook, ChibiWorker, WorkerAnim};
+    use crate::chibi_props::ActivePropEntity;
+    use crate::interact::PropActivated;
+    use crate::layout::OfficeLayout;
+    use crate::nav::NavGraph;
+    use crate::people::{
+        LiveSessionWorker, LiveWorkerSpec, NavWalker, step_nav_walkers_system,
+        sync_live_workers_in_world,
+    };
+    use crate::{SharedFontEngine, spawn_full_office_world};
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    #[test]
+    fn coordinator_prevents_double_booking_across_all_three_modules_and_recalls_on_work() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(CastClock::default());
+        world.insert_resource(CastEvents::default());
+        world.insert_resource(RoutineCoordinator::default());
+        world.insert_resource(OfficeGamesState::default());
+        world.insert_resource(MealsBreaksState::default());
+        world.insert_resource(StreetOutingsState::default());
+        world.init_resource::<Events<PropActivated>>();
+
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Pro,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        // Only 2 resting workers available while ALL 3 routine suites fire on the exact same tick.
+        let specs = vec![
+            LiveWorkerSpec {
+                session_id: "w0".to_owned(),
+                agent: "claude".to_owned(),
+                name: "W0".to_owned(),
+                status: "rest".to_owned(),
+                desk_hint: 0,
+                tool_kind: None,
+                tool_label: None,
+                git_dirty: 0,
+                subagents: Vec::new(),
+            },
+            LiveWorkerSpec {
+                session_id: "w1".to_owned(),
+                agent: "codex".to_owned(),
+                name: "W1".to_owned(),
+                status: "rest".to_owned(),
+                desk_hint: 1,
+                tool_kind: None,
+                tool_label: None,
+                git_dirty: 0,
+                subagents: Vec::new(),
+            },
+        ];
+        sync_live_workers_in_world(&mut world, &specs, ChibiLook::Pixar);
+        let nav = world.resource::<NavGraph>().clone();
+        for (live, mut chibi, mut walker) in world
+            .query::<(&LiveSessionWorker, &mut ChibiWorker, &mut NavWalker)>()
+            .iter_mut(&mut world)
+        {
+            if let Some(ds) = nav.desk_spot(live.desk_index) {
+                chibi.base_pos = ds.pos;
+                chibi.base_yaw = ds.face;
+                chibi.sitting = true;
+                chibi.anim = WorkerAnim::Sleep;
+                walker.waypoints.clear();
+                walker.cursor = 0;
+            }
+        }
+
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                begin_cast_tick_system,
+                step_office_games_system,
+                step_meals_breaks_system,
+                step_street_outings_system,
+                step_nav_walkers_system,
+            )
+                .chain(),
+        );
+
+        {
+            let mut clk = world.resource_mut::<CastClock>();
+            clk.minutes = 12 * 60;
+            clk.weekday = 5;
+        }
+        {
+            let mut ev = world.resource_mut::<CastEvents>();
+            ev.force_billiards = true;
+            ev.bell_rung = true;
+            ev.battery_pct = 12;
+        }
+
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(50));
+        sched.run(&mut world);
+        world.flush();
+
+        // Both workers must belong strictly to Billiards; neither Meals/Breaks nor Street Outings
+        // may steal or double-book them in the same frame!
+        let kinds: Vec<RoutineKind> = world
+            .query::<&ActiveRoutine>()
+            .iter(&world)
+            .map(|r| r.kind)
+            .collect();
+        assert_eq!(kinds, vec![RoutineKind::Billiards, RoutineKind::Billiards]);
+        assert!(!world.resource::<MealsBreaksState>().gathering_active);
+        assert!(!world.resource::<StreetOutingsState>().evswap_active);
+        assert_eq!(world.resource::<RoutineCoordinator>().claimed_count(), 2);
+
+        // Work recall: switching both workers to "work" must abort Billiards, stow Cue props, and walk home.
+        for mut live in world.query::<&mut LiveSessionWorker>().iter_mut(&mut world) {
+            live.status = "work".to_owned();
+        }
+        for _ in 0..160 {
+            world
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(100));
+            sched.run(&mut world);
+            world.flush();
+        }
+
+        assert_eq!(
+            world.query::<&ActiveRoutine>().iter(&world).count(),
+            0,
+            "Recalled workers must complete return walk and drop ActiveRoutine"
+        );
+        assert_eq!(
+            world
+                .query_filtered::<&ActivePropEntity, With<LiveSessionWorker>>()
+                .iter(&world)
+                .count(),
+            0,
+            "Recalled workers must stow all lazy props upon return"
+        );
     }
 }
