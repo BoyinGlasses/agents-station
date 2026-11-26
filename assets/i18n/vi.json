@@ -5262,6 +5262,9 @@
     "moveDown": "Đẩy xuống",
     "emailLabel": "Email (không bắt buộc)",
     "accountsOpen": "Quản lý tài khoản AI",
-    "pinWeak": "Mã PIN phải gồm 6–10 chữ số, không liên tiếp hoặc trùng lặp"
+    "pinWeak": "Mã PIN phải gồm 6–10 chữ số, không liên tiếp hoặc trùng lặp",
+    "kb": "{n} KB",
+    "cpu": "CPU",
+    "loadEarlier": "Tải thêm {n} tin nhắn cũ hơn"
   }
 }

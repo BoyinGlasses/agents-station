@@ -5571,6 +5571,9 @@
     "moveDown": "Move down",
     "emailLabel": "Email (optional)",
     "accountsOpen": "Manage AI accounts",
-    "pinWeak": "PIN must be 6–10 digits and not sequential or repeated"
+    "pinWeak": "PIN must be 6–10 digits and not sequential or repeated",
+    "kb": "{n} KB",
+    "cpu": "CPU",
+    "loadEarlier": "Load {n} earlier messages"
   }
 }
