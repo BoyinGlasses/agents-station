@@ -6,9 +6,14 @@ edition.workspace = true
 [dependencies]
 bevy.workspace = true
 chrono.workspace = true
+image.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 station-canvas2d = { path = "../station-canvas2d" }
 station-core = { path = "../station-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
