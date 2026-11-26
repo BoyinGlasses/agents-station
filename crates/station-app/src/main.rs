@@ -167,6 +167,10 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             app.add_plugins(station_3d::SmokeScenePlugin)
                 .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
+        Some("chibi-closeup") => {
+            app.add_plugins(station_3d::ChibiCloseupPlugin)
+                .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
+        }
         Some("lite-2d") => {
             let mut ui_state = station_ui::UiState::with_demo_seed(
                 station_3d::OfficeLayout::Pro,
