@@ -2274,6 +2274,7 @@ pub async fn post_push_test(
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
     Query(q): Query<HashMap<String, String>>,
+    body: Option<Json<Value>>,
 ) -> Result<Json<Value>, StatusCode> {
     enforce_same_origin_post_with_transport(
         &headers,
@@ -2281,9 +2282,26 @@ pub async fn post_push_test(
         via_tunnel,
     )?;
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let payload = body.map(|Json(v)| v);
+    let title: String = payload
+        .as_ref()
+        .and_then(|v| v.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::redact::redact(s).chars().take(120).collect())
+        .unwrap_or_else(|| "Agents Station".to_owned());
+    let body_text: String = payload
+        .as_ref()
+        .and_then(|v| v.get("body"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::redact::redact(s).chars().take(240).collect())
+        .unwrap_or_else(|| "Test notification".to_owned());
     let msg = crate::store::push::PushMessage {
-        title: "Agents Station".to_owned(),
-        body: "Test notification from Agents Station".to_owned(),
+        title,
+        body: body_text,
         tag: Some("station-test".to_owned()),
         url: "/phone".to_owned(),
         urgent: false,

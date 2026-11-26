@@ -162,7 +162,7 @@ impl AuthStore {
     pub fn regenerate_pin(&self) -> Result<String> {
         let prev = self.current_pin();
         let mut rng = rand::rng();
-        for _ in 0..64 {
+        for _ in 0..4096 {
             let n: u32 = rng.random_range(0..1_000_000);
             let pin = format!("{n:06}");
             if !pin_weak(&pin) && pin != prev {
@@ -170,9 +170,7 @@ impl AuthStore {
                 return Ok(pin);
             }
         }
-        let fallback = "492817".to_owned();
-        write_bytes_atomic(&self.pin_file, fallback.as_bytes())?;
-        Ok(fallback)
+        anyhow::bail!("failed to generate non-weak random PIN")
     }
 
     fn sign(&self, exp_ms: u64, kind: &str, pin: &str) -> String {
