@@ -487,6 +487,7 @@ fn draw_subagent_rows(ui: &mut egui::Ui, sess: &SessionCard, state: &mut UiState
         })
         .show(ui, |ui| {
             for sub in &sess.subagents {
+                let bg_idx = ui.painter().add(Shape::Noop);
                 let sub_resp = egui::Frame::NONE
                     .fill(Color32::TRANSPARENT)
                     .corner_radius(CornerRadius::same(9))
@@ -511,8 +512,10 @@ fn draw_subagent_rows(ui: &mut egui::Ui, sess: &SessionCard, state: &mut UiState
                     });
                 let click = sub_resp.response.interact(Sense::click());
                 if click.hovered() {
-                    ui.painter()
-                        .rect_filled(sub_resp.response.rect, CornerRadius::same(9), CARD_2);
+                    ui.painter().set(
+                        bg_idx,
+                        Shape::rect_filled(sub_resp.response.rect, CornerRadius::same(9), CARD_2),
+                    );
                 }
                 if click.clicked() {
                     state.selected_session = Some(sess.id.clone());
@@ -601,5 +604,80 @@ fn clip_chars(s: &str, max_chars: usize) -> String {
         format!("{collected}…")
     } else {
         collected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::SubagentItem;
+
+    #[test]
+    fn subagent_hover_background_paints_behind_icon_and_text_shapes() {
+        let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+
+        let sess = SessionCard {
+            id: "s-1".to_owned(),
+            agent: "claude".to_owned(),
+            project: "agents-station".to_owned(),
+            status: "work".to_owned(),
+            subagents: vec![SubagentItem {
+                id: "sub-1".to_owned(),
+                label: "shell-inspector".to_owned(),
+                doing: "cargo test".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let mut state = UiState::default();
+
+        // Frame 0: activate fonts and capture the subagent row center coordinate.
+        let mut sub_center = pos2(100.0, 24.0);
+        let raw0 = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 200.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw0, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let top = ui.cursor().top();
+                draw_subagent_rows(ui, &sess, &mut state);
+                let bottom = ui.cursor().top();
+                sub_center = pos2(120.0, (top + bottom) * 0.5);
+            });
+        });
+
+        // Frame 1: hover over the subagent row and inspect painted shape z-order.
+        let raw1 = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(320.0, 200.0))),
+            events: vec![egui::Event::PointerMoved(sub_center)],
+            ..Default::default()
+        };
+        let out = ctx.run(raw1, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                draw_subagent_rows(ui, &sess, &mut state);
+            });
+        });
+
+        let mut hover_rect_idx = None;
+        let mut first_text_idx = None;
+        for (idx, clipped) in out.shapes.iter().enumerate() {
+            match &clipped.shape {
+                Shape::Rect(r) if r.fill == CARD_2 => {
+                    hover_rect_idx.get_or_insert(idx);
+                }
+                Shape::Text(_) => {
+                    first_text_idx.get_or_insert(idx);
+                }
+                _ => {}
+            }
+        }
+        let bg_i = hover_rect_idx.expect("expected hovered CARD_2 background rect");
+        let txt_i = first_text_idx.expect("expected subagent label text shapes");
+        assert!(
+            bg_i < txt_i,
+            "hover background rect (shape #{bg_i}) must paint BEFORE text (shape #{txt_i})"
+        );
     }
 }
