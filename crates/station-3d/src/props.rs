@@ -1,4 +1,3 @@
-use crate::furniture::ServerFan;
 use crate::interact::InteractiveProp;
 use crate::layout::LayoutSpec;
 use crate::palette::{
@@ -255,14 +254,8 @@ pub fn spawn_all_props(
         spawn_cyl(commands, palette, dark_m, Vec3::new(px - 0.55, 0.22, pz), 0.28, 0.42); // bin
     }
 
-    // 9. Neon Sign (neon.js) + String Lights (string-lights.js) + Wall Switch (switches.js)
+    // 9. String Lights (string-lights.js) + Wall Switch (switches.js) — `SHIP IT` neon is in `furniture.rs`
     {
-        let [nx, ny, nz, nry] = spec.neon;
-        let rot = Quat::from_rotation_y(nry);
-        let neon_m = palette.emissive(materials, "#FF7A4D", 2.2);
-        let neon_ent = spawn_box_rot(commands, palette, neon_m, Vec3::new(nx, ny, nz), Vec3::new(2.1, 0.14, 0.05), rot);
-        commands.entity(neon_ent).insert(InteractiveProp::new("neon", "office", "Neon Sign"));
-
         let fairy_m = palette.emissive(materials, "#FFE2A0", 1.8);
         for k in 0..8 {
             let lx = spec.bounds.x0 + 1.4 + k as f32 * 1.8;
@@ -322,17 +315,12 @@ pub fn spawn_all_props(
 
 pub fn animate_props_system(
     time: Res<Time>,
-    mut fans: Query<(&ServerFan, &mut Transform), (Without<AquariumFish>, Without<RobotVacuum>, Without<OfficeCat>)>,
-    mut fish: Query<(&AquariumFish, &mut Transform), (Without<ServerFan>, Without<RobotVacuum>, Without<OfficeCat>)>,
-    mut vacs: Query<(&RobotVacuum, &mut Transform), (Without<ServerFan>, Without<AquariumFish>, Without<OfficeCat>)>,
-    mut cats: Query<(&OfficeCat, &mut Transform), (Without<ServerFan>, Without<AquariumFish>, Without<RobotVacuum>)>,
+    mut fish: Query<(&AquariumFish, &mut Transform), (Without<RobotVacuum>, Without<OfficeCat>)>,
+    mut vacs: Query<(&RobotVacuum, &mut Transform), (Without<AquariumFish>, Without<OfficeCat>)>,
+    mut cats: Query<(&OfficeCat, &mut Transform), (Without<AquariumFish>, Without<RobotVacuum>)>,
 ) {
-    let dt = time.delta_secs();
     let t = time.elapsed_secs();
 
-    for (f, mut tf) in &mut fans {
-        tf.rotate_y(f.speed * dt);
-    }
     for (f, mut tf) in &mut fish {
         let a = t * f.speed + f.phase;
         tf.translation.x = f.center.x + a.cos() * f.radius;

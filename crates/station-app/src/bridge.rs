@@ -5005,6 +5005,7 @@ fn sync_live_sessions_to_3d(
             desk_hint: s.desk,
             tool_kind: s.tool_kind.clone(),
             tool_label: s.tool.clone(),
+            git_dirty: s.git_dirty,
         })
         .collect();
     station_3d::people::sync_live_workers_and_screens(
@@ -5587,6 +5588,7 @@ struct AuxActionParams<'w, 's> {
     camera_rig: Option<ResMut<'w, station_3d::camera::CameraRig>>,
     cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
     replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
+    rocket_queue: Option<ResMut<'w, station_3d::RocketLaunchQueue>>,
     pending_photo: Option<ResMut<'w, PendingPhotoCapture>>,
     pending_timelapse: Option<ResMut<'w, PendingTimelapseCapture>>,
     wb_q: Query<
@@ -7256,6 +7258,9 @@ fn process_ui_actions(
                         ui.push_toast(i18n.tr("places.lounge.title"), i18n.tr("places.lounge.cat"));
                     }
                     "rocket" | "test_launch" => {
+                        if let Some(rq) = aux.rocket_queue.as_deref_mut() {
+                            rq.pending = true;
+                        }
                         if let Some(sfx) = aux.sfx.as_deref_mut() {
                             sfx.play_sfx(SfxKind::Deploy);
                         }
@@ -10948,6 +10953,7 @@ mod tests {
                 desk_index: 0,
                 status: "work".to_owned(),
                 tool_label: Some("Edit".to_owned()),
+                git_dirty: 0,
             },
             Transform::from_xyz(0.0, 0.0, 0.0),
         ));
@@ -10959,6 +10965,7 @@ mod tests {
                 desk_index: 1,
                 status: "wait".to_owned(),
                 tool_label: Some("Bash".to_owned()),
+                git_dirty: 0,
             },
             Transform::from_xyz(0.0, 0.0, 22.0),
         ));

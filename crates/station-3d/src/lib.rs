@@ -24,8 +24,9 @@ pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
-pub use desks::DeskScreen;
+pub use desks::{DeskBedding, DeskKit, DeskMess, DeskScreen, LaptopLid};
 pub use entrance::{ElevatorDoors, Stairwell};
+pub use furniture::{DeployRocket, NeonSign, RocketLaunchQueue, ServerRackTelemetry, WallClock};
 pub use hq_wing::{DeptSign, HqWing, SprintBoard};
 pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
@@ -104,6 +105,8 @@ fn register_office_runtime(
         .insert_resource(replay::ReplayState::default())
         .insert_resource(audio::SfxEngine::new(true))
         .insert_resource(interact::PlaceCardState::default())
+        .insert_resource(furniture::RocketLaunchQueue::default())
+        .insert_resource(furniture::ServerRackTelemetry::default())
         .insert_resource(SharedFontEngine::new(assets_dir))
         .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
@@ -113,6 +116,8 @@ fn register_office_runtime(
             Update,
             (
                 lights::sync_lighting_system.in_set(lights::LightingSyncSet),
+                desks::animate_desks_system,
+                furniture::animate_furniture_system,
                 props::animate_props_system,
                 people::animate_chibis_system,
                 backdrops::animate_backdrop_traffic_system,

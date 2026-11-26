@@ -24,6 +24,7 @@ pub struct LiveSessionWorker {
     pub desk_index: usize,
     pub status: String,
     pub tool_label: Option<String>,
+    pub git_dirty: usize,
 }
 
 /// Snapshot describing a live session to reflect onto a 3D desk worker and monitor screen.
@@ -36,6 +37,7 @@ pub struct LiveWorkerSpec {
     pub desk_hint: usize,
     pub tool_kind: Option<String>,
     pub tool_label: Option<String>,
+    pub git_dirty: usize,
 }
 
 pub fn anim_for_status(status: &str) -> WorkerAnim {
@@ -236,6 +238,7 @@ pub fn sync_live_workers_and_screens(
         live.status = spec.status.clone();
         live.tool_label = spec.tool_label.clone();
         live.name = spec.name.clone();
+        live.git_dirty = spec.git_dirty;
         chibi.name = spec.name.clone();
     }
 
@@ -271,6 +274,7 @@ pub fn sync_live_workers_and_screens(
             desk_index: *desk_idx,
             status: spec.status.clone(),
             tool_label: spec.tool_label.clone(),
+            git_dirty: spec.git_dirty,
         });
     }
 
@@ -456,6 +460,7 @@ mod tests {
             desk_hint: 0,
             tool_kind: Some("bash".to_owned()),
             tool_label: Some("cargo test".to_owned()),
+            git_dirty: 0,
         };
         sync_live_workers_in_world(&mut world, std::slice::from_ref(&s1), ChibiLook::Pixar);
         assert_eq!(world.query::<&LiveSessionWorker>().iter(&world).count(), 1);
