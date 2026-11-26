@@ -243,15 +243,17 @@ async function main() {
 
   let oraclePort = await getFreePort();
   let rustPort = await getFreePort();
-  let oracleProc = startOracleServer(oraclePort, oracleDataDir, sharedClaudeDir);
-  let rustProc = startRustServer(rustPort, rustDataDir, sharedClaudeDir);
-
+  let oracleProc = null;
+  let rustProc = null;
   let oracleStderr = '';
   let rustStderr = '';
-  oracleProc.stderr?.on('data', (b) => { oracleStderr += b.toString(); });
-  rustProc.stderr?.on('data', (b) => { rustStderr += b.toString(); });
 
   try {
+    oracleProc = startOracleServer(oraclePort, oracleDataDir, sharedClaudeDir);
+    oracleProc.stderr?.on('data', (b) => { oracleStderr += b.toString(); });
+    rustProc = startRustServer(rustPort, rustDataDir, sharedClaudeDir);
+    rustProc.stderr?.on('data', (b) => { rustStderr += b.toString(); });
+
     await Promise.all([
       waitForHealth(oraclePort, 'Golden Oracle'),
       waitForHealth(rustPort, 'Rust agents-station'),
@@ -595,7 +597,10 @@ async function main() {
     if (rustStderr) console.error('--- Rust stderr ---\n', rustStderr.slice(-1500));
     throw err;
   } finally {
-    await Promise.all([stopServer(oracleProc), stopServer(rustProc)]);
+    const stops = [];
+    if (oracleProc) stops.push(stopServer(oracleProc));
+    if (rustProc) stops.push(stopServer(rustProc));
+    await Promise.all(stops);
     for (const d of [oracleDataDir, rustDataDir, sharedClaudeDir]) {
       try {
         fs.rmSync(d, { recursive: true, force: true });
