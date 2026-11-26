@@ -4,10 +4,10 @@ use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::camera::{RenderTarget, Viewport};
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
 use bevy::window::PrimaryWindow;
 use bevy_egui::egui;
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Timelike};
 use serde_json::{Value, json};
 use station_3d::{BackdropAssets, BackdropEntity, LayoutSpec, SfxKind, WorldEntity, WorldPalette};
 use station_canvas2d::BrandRegistry;
@@ -21,8 +21,8 @@ use station_ui::labels3d::{
     project_world_to_stage,
 };
 use station_ui::state::{
-    BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, PlaceCardAction,
-    PlaceCardInfo, PlaceCardRow, ReplayRange, SessionCard, SysSnapshot, UiAction,
+    BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, PhotoSize,
+    PlaceCardAction, PlaceCardInfo, PlaceCardRow, ReplayRange, SessionCard, SysSnapshot, UiAction,
     normalize_feed_kind, normalize_status,
 };
 use station_ui::theme::{ACCENT, AMBER, BLUE, GREEN, RED};
@@ -1461,6 +1461,62 @@ pub fn compute_camera_viewport(
     })
 }
 
+#[derive(Debug, Clone)]
+struct PendingPhotoJob {
+    size: PhotoSize,
+    shots_dir: PathBuf,
+    title: String,
+    frames_until_shoot: u8,
+}
+
+#[derive(Resource, Default)]
+struct PendingPhotoCapture(Option<PendingPhotoJob>);
+
+pub(crate) fn is_night_for_hour(hour: u32) -> bool {
+    !(6..18).contains(&hour)
+}
+
+pub(crate) fn fp_prop_i18n_key(prop_id: &str, prop_place: &str) -> &'static str {
+    match prop_id {
+        "cat" => "fp.petCat",
+        "whiteboard" => "places.chip.board",
+        "printer" => "places.chip.printer",
+        "tv" | "dev-servers" => "places.chip.server",
+        "duty-board" => "places.chip.dining",
+        _ => match prop_place {
+            "pantry" | "coffee" => "places.chip.dining",
+            "server" => "places.chip.server",
+            "lounge" => "places.chip.lounge",
+            "meeting" => "places.chip.meeting",
+            "library" => "places.chip.library",
+            "director" => "places.chip.director",
+            "deploy" => "places.chip.deploy",
+            "board" => "places.chip.board",
+            "printer" => "places.chip.printer",
+            "door" => "places.chip.lobby",
+            "wc" => "places.chip.wc",
+            "window" => "places.chip.window",
+            _ => "places.chip.desks",
+        },
+    }
+}
+
+fn place_title_i18n_key(place_id: &str) -> &'static str {
+    match place_id {
+        "meeting" => "places.meeting.title",
+        "coffee" | "pantry" => "places.coffee.title",
+        "lounge" => "places.lounge.title",
+        "deploy" => "places.deploy.title",
+        "library" => "places.library.title",
+        "director" => "places.director.title",
+        "printer" => "places.printer.title",
+        "door" => "places.door.title",
+        "wc" => "places.wc.title",
+        "window" => "places.window.title",
+        _ => "places.desks.title",
+    }
+}
+
 fn zone_specs_for_layout(spec: &LayoutSpec) -> Vec<(&'static str, IconKind, &'static str, Vec3)> {
     if spec.layout.is_pro() {
         vec![
@@ -1754,12 +1810,8 @@ pub fn project_stage_labels_to_ui(
             for (prop, gtf) in &props_q {
                 let d = rig.fp_pos.distance(gtf.translation());
                 if d < 3.2 && nearest.as_ref().is_none_or(|(best, _)| d < *best) {
-                    let label = if prop.id == "cat" {
-                        i18n.tr("fp.petCat")
-                    } else {
-                        i18n.tr(&format!("places.chip.{}", prop.place))
-                    };
-                    nearest = Some((d, label));
+                    let key = fp_prop_i18n_key(prop.id, prop.place);
+                    nearest = Some((d, i18n.tr(key)));
                 }
             }
             for (w, gtf) in &live_workers {
@@ -1844,11 +1896,14 @@ pub fn project_stage_labels_to_ui(
                 let p_size =
                     estimate_label_size(ProjectedLabelKind::PermissionBadge, &p_text, None);
                 let p_accent = if p.kind == "denied" { RED } else { AMBER };
+                let min_badge_y = stage_rect.top() + 22.0;
+                let max_badge_y = (stage_rect.bottom() - 82.0).max(min_badge_y);
+                let badge_y = (screen_pos.y - 32.0).clamp(min_badge_y, max_badge_y);
                 labels.push(ProjectedLabel {
                     id: format!("perm:{}", p.id),
                     kind: ProjectedLabelKind::PermissionBadge,
                     priority: LabelPriority::Permission,
-                    screen_pos: egui::pos2(screen_pos.x, screen_pos.y - 32.0),
+                    screen_pos: egui::pos2(screen_pos.x, badge_y),
                     depth: (depth - 0.1).max(0.0),
                     behind_camera: false,
                     size: p_size,
@@ -2019,17 +2074,20 @@ impl Plugin for LiveServerBridgePlugin {
             self.start_http,
             true,
         );
-        app.insert_resource(bridge).add_systems(
-            Update,
-            (
-                sync_live_state_to_ui,
-                process_ui_actions,
-                sync_live_sessions_to_3d,
-                handle_picking_events,
-                step_replay_system,
-            )
-                .chain(),
-        );
+        app.insert_resource(bridge)
+            .init_resource::<PendingPhotoCapture>()
+            .add_systems(
+                Update,
+                (
+                    sync_live_state_to_ui,
+                    drive_pending_photo_capture,
+                    process_ui_actions,
+                    sync_live_sessions_to_3d,
+                    handle_picking_events,
+                    step_replay_system,
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -2559,6 +2617,54 @@ struct TrayActionParams<'w, 's> {
     tray: Option<ResMut<'w, TrayState>>,
 }
 
+fn drive_pending_photo_capture(
+    mut commands: Commands,
+    bridge: Res<LiveServerBridge>,
+    mut ui: ResMut<UiState>,
+    mut pending: ResMut<PendingPhotoCapture>,
+) {
+    if let Some(job) = pending.0.as_mut() {
+        if job.frames_until_shoot > 0 {
+            job.frames_until_shoot -= 1;
+            return;
+        }
+        let job = pending.0.take().expect("checked Some");
+        let toast_tx = bridge.toast_tx.clone();
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(move |trigger: Trigger<ScreenshotCaptured>| {
+                let raw_img = trigger.event().0.clone();
+                if let Ok(dyn_img) = raw_img.try_into_dynamic() {
+                    let rgb = dyn_img.to_rgb8();
+                    let (target_w, target_h) =
+                        job.size.target_dimensions(rgb.width(), rgb.height());
+                    let out_rgb = if (target_w, target_h) == (rgb.width(), rgb.height()) {
+                        rgb
+                    } else {
+                        image::imageops::resize(
+                            &rgb,
+                            target_w,
+                            target_h,
+                            image::imageops::FilterType::Lanczos3,
+                        )
+                    };
+                    let _ = std::fs::create_dir_all(&job.shots_dir);
+                    let fname = format!("shot-{target_w}x{target_h}-{}.png", now_ms());
+                    let shot_path = job.shots_dir.join(&fname);
+                    if out_rgb.save(&shot_path).is_ok() {
+                        let _ = toast_tx.try_send((
+                            job.title.clone(),
+                            format!("shots/{fname} ({target_w}x{target_h})"),
+                        ));
+                    }
+                }
+            });
+    }
+    if ui.photo_capture_hide_frames > 0 {
+        ui.photo_capture_hide_frames -= 1;
+    }
+}
+
 #[derive(SystemParam)]
 struct AuxActionParams<'w, 's> {
     sfx: Option<ResMut<'w, station_3d::audio::SfxEngine>>,
@@ -2566,6 +2672,7 @@ struct AuxActionParams<'w, 's> {
     camera_rig: Option<ResMut<'w, station_3d::camera::CameraRig>>,
     cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
     replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
+    pending_photo: Option<ResMut<'w, PendingPhotoCapture>>,
     wb_q: Query<
         'w,
         's,
@@ -3077,7 +3184,12 @@ fn process_ui_actions(
             }
             UiAction::SetPhotoMode(enabled) => {
                 ui.photo_mode = enabled;
-                if enabled {
+                if !enabled {
+                    ui.photo_capture_hide_frames = 0;
+                    if let Some(pending) = aux.pending_photo.as_deref_mut() {
+                        pending.0 = None;
+                    }
+                } else {
                     ui.active_place_card = None;
                     if let Some(rig) = aux.camera_rig.as_deref_mut()
                         && rig.first_person
@@ -3094,6 +3206,18 @@ fn process_ui_actions(
                     sfx.play_sfx(SfxKind::Click);
                 }
             }
+            UiAction::SetPhotoTimeAuto => {
+                let night = is_night_for_hour(Local::now().hour());
+                ui.night = night;
+                if let Some(l) = world_params.lighting.as_mut() {
+                    l.night = night;
+                }
+                world_params.clear_color.0 = if night {
+                    Color::srgb(0.06, 0.08, 0.13)
+                } else {
+                    Color::srgb(0.75, 0.85, 0.94)
+                };
+            }
             UiAction::CapturePhoto {
                 size,
                 show_names,
@@ -3104,27 +3228,31 @@ fn process_ui_actions(
                 ui.photo_show_mark = show_mark;
                 let shots_dir = bridge.data_dir.join("shots");
                 let _ = std::fs::create_dir_all(&shots_dir);
-                let fname = format!("shot-{}-{}.png", size.dimensions_tag(), now_ms());
-                let shot_path = shots_dir.join(&fname);
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Shutter);
                 }
-                if !aux.primary_win_q.is_empty() {
-                    commands
-                        .spawn(Screenshot::primary_window())
-                        .observe(save_to_disk(shot_path));
+                if !aux.primary_win_q.is_empty()
+                    && let Some(pending) = aux.pending_photo.as_deref_mut()
+                {
+                    // Hide PhotoBar HUD for the capture frame, then screenshot + scale cleanly.
+                    ui.photo_capture_hide_frames = 2;
+                    pending.0 = Some(PendingPhotoJob {
+                        size,
+                        shots_dir,
+                        title: i18n.tr("ui.photo.label"),
+                        frames_until_shoot: 1,
+                    });
                 } else {
+                    let fname = format!("photostrip-{}.png", now_ms());
+                    let shot_path = shots_dir.join(&fname);
                     let _ = save_photostrip_png(
                         &shot_path,
                         &ui,
                         world_params.shared_fonts.as_deref_mut(),
                         &bridge.assets_dir,
                     );
+                    ui.push_toast(i18n.tr("ui.photo.label"), format!("shots/{fname}"));
                 }
-                ui.push_toast(
-                    i18n.tr("ui.photo.label"),
-                    format!("shots/{fname} ({})", size.dimensions_tag()),
-                );
             }
             UiAction::TriggerTimelapseClip { shape, music } => {
                 ui.clip_shape = shape;
@@ -3355,7 +3483,7 @@ fn process_ui_actions(
                             sfx.play_sfx(SfxKind::Brew);
                         }
                         ui.push_toast(
-                            i18n.tr(&format!("places.{place_id}.title")),
+                            i18n.tr(place_title_i18n_key(&place_id)),
                             i18n.tr("places.coffee.brew"),
                         );
                     }
@@ -5777,5 +5905,140 @@ mod tests {
         app.update();
         assert_eq!(app.world().resource::<station_3d::camera::CameraRig>().zoom_pct(), 100);
         assert!(app.world().resource::<UiState>().active_place_card.is_none());
+    }
+
+    #[test]
+    fn all_interactive_props_resolve_valid_fp_near_i18n_keys_in_en_vi_th() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let all_props = [
+            ("whiteboard", "office"),
+            ("cat", "lounge"),
+            ("tv", "server"),
+            ("arcade", "lounge"),
+            ("aquarium", "lounge"),
+            ("game-tv", "lounge"),
+            ("billiards", "lounge"),
+            ("karaoke", "lounge"),
+            ("duty-board", "pantry"),
+            ("printer", "office"),
+            ("neon", "office"),
+            ("dev-servers", "server"),
+            ("vacuum", "office"),
+        ];
+        for lang in ["en", "vi", "th"] {
+            let i18n = I18nStore::load_from_assets(&assets, lang);
+            for (prop_id, prop_place) in all_props {
+                let key = fp_prop_i18n_key(prop_id, prop_place);
+                let text = i18n.tr(key);
+                assert!(
+                    !text.is_empty() && text != key && !text.starts_with("places."),
+                    "lang={lang} prop=({prop_id},{prop_place}) leaked raw i18n key '{key}' -> '{text}'"
+                );
+            }
+            for place in ["pantry", "office", "meeting", "coffee", "lounge", "deploy", "library", "director"] {
+                let tkey = place_title_i18n_key(place);
+                let title = i18n.tr(tkey);
+                assert!(
+                    !title.is_empty() && title != tkey,
+                    "lang={lang} place={place} leaked raw title key '{tkey}'"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn photo_time_auto_restores_clock_driven_lighting_and_capture_hides_photobar() {
+        assert!(is_night_for_hour(0));
+        assert!(is_night_for_hour(5));
+        assert!(!is_night_for_hour(6));
+        assert!(!is_night_for_hour(12));
+        assert!(!is_night_for_hour(17));
+        assert!(is_night_for_hour(18));
+        assert!(is_night_for_hour(23));
+
+        assert_eq!(PhotoSize::Screen.target_dimensions(1280, 720), (1280, 720));
+        assert_eq!(PhotoSize::Fhd.target_dimensions(1280, 720), (1920, 1080));
+        assert_eq!(PhotoSize::Uhd4k.target_dimensions(1280, 720), (3840, 2160));
+
+        let dir = tempfile::tempdir().unwrap();
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let expected_night = is_night_for_hour(Local::now().hour());
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(station_3d::lights::LightingState {
+                night: !expected_night,
+            })
+            .insert_resource(i18n)
+            .insert_resource(UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                !expected_night,
+            ))
+            .add_event::<station_3d::WorkerSelected>()
+            .add_event::<station_3d::interact::PropActivated>()
+            .add_event::<AppExit>()
+            .add_plugins(LiveServerBridgePlugin {
+                data_dir: dir.path().to_path_buf(),
+                assets_dir: assets,
+                host: "127.0.0.1".to_owned(),
+                port: 0,
+                start_http: false,
+            });
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+
+        // 1. SetPhotoTimeAuto restores real clock-driven day/night state.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::SetPhotoTimeAuto);
+        app.update();
+        assert_eq!(app.world().resource::<UiState>().night, expected_night);
+        assert_eq!(
+            app.world().resource::<station_3d::lights::LightingState>().night,
+            expected_night
+        );
+
+        // 2. CapturePhoto hides PhotoBar first, then spawns Screenshot on the clean frame.
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::CapturePhoto {
+                size: PhotoSize::Fhd,
+                show_names: true,
+                show_mark: true,
+            });
+        app.update();
+        assert!(
+            app.world().resource::<UiState>().photo_capture_hide_frames >= 1,
+            "PhotoBar must be hidden on capture frame before screenshot runs"
+        );
+        assert_eq!(
+            app.world_mut().query::<&Screenshot>().iter(app.world()).count(),
+            0,
+            "Screenshot must wait 1 clean frame so PhotoBar HUD is not captured"
+        );
+
+        // Frame 2 decrements wait; Frame 3 spawns Screenshot while PhotoBar is still hidden (hide_frames == 1).
+        app.update();
+        app.update();
+        assert_eq!(
+            app.world_mut().query::<&Screenshot>().iter(app.world()).count(),
+            1,
+            "Screenshot must spawn cleanly once PhotoBar is hidden"
+        );
+        assert_eq!(
+            app.world().resource::<UiState>().photo_capture_hide_frames,
+            1,
+            "PhotoBar must remain hidden during the screenshot frame itself"
+        );
+
+        // Frame 4 restores PhotoBar cleanly after the capture frame completes.
+        app.update();
+        assert_eq!(
+            app.world().resource::<UiState>().photo_capture_hide_frames,
+            0,
+            "PhotoBar must reappear after capture frame completes"
+        );
     }
 }
