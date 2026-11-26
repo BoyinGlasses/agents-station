@@ -6007,14 +6007,20 @@ fn process_ui_actions(
                         }
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast("Permission", "Server offline — cannot send decision");
+                        ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
                         continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Click);
                 }
-                ui.push_toast("Permission", format!("{id} -> {decision}"));
+                let done_key = match decision.as_str() {
+                    "allow" => "perm.done.allow",
+                    "always" => "perm.done.always",
+                    "deny" => "perm.done.deny",
+                    _ => "perm.sent",
+                };
+                ui.push_toast(i18n.tr("station.approval"), i18n.tr(done_key));
             }
             UiAction::SubmitAskAnswers { id, answers } => {
                 match &bridge.backend {
@@ -6818,7 +6824,10 @@ fn process_ui_actions(
                     life.weather_city = code.clone();
                 }
                 persist_pref(&bridge, "weatherCity", json!(code));
-                ui.push_toast("Weather", format!("City set to {display}"));
+                ui.push_toast(
+                    i18n.tr("ui.topBar.weather"),
+                    i18n.tr_vars("station.weatherSet", &[("city", &display)]),
+                );
             }
             UiAction::SetSound(enabled) => {
                 ui.sound_on = enabled;
@@ -7100,7 +7109,7 @@ fn process_ui_actions(
                         &bridge.assets_dir,
                     );
                 }
-                ui.push_toast("Photo Booth", format!("Saved shots/{fname}"));
+                ui.push_toast(i18n.tr("ui.photo.label"), format!("shots/{fname}"));
             }
             UiAction::ToggleDemo => {
                 ui.demo_running = !ui.demo_running;
@@ -7115,7 +7124,7 @@ fn process_ui_actions(
                     if let Some(sfx) = aux.sfx.as_deref_mut() {
                         sfx.play_sfx(SfxKind::Ding);
                     }
-                    ui.push_toast("Demo Mode", "Office demo cast activated");
+                    ui.push_toast(i18n.tr("station.demoChip"), i18n.tr("station.demoOn"));
                 } else {
                     ui.sessions.clear();
                     ui.pending_perms.clear();
@@ -7127,7 +7136,7 @@ fn process_ui_actions(
                         let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
                         apply_remote_snapshot_to_ui(&snap, &mut ui);
                     }
-                    ui.push_toast("Demo Mode", "Returned to live session state");
+                    ui.push_toast(i18n.tr("station.demoChip"), i18n.tr("station.demoOff"));
                 }
             }
             UiAction::ToggleReplay => {
@@ -7396,7 +7405,7 @@ fn process_ui_actions(
                         }
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast("Prompt", "Server offline — prompt not sent");
+                        ui.push_toast(i18n.tr("drawer.compose.send"), i18n.tr("drawer.unreachable"));
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {

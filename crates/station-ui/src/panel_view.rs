@@ -804,7 +804,7 @@ fn draw_compact_mac_section(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nS
                 let cpu_r = (state.sys.cpu_pct / 100.0).clamp(0.0, 1.0);
                 draw_meter_row(
                     ui,
-                    "CPU",
+                    &i18n.tr("station.cpu"),
                     &format!("{:.0}%", state.sys.cpu_pct),
                     cpu_r,
                     level_color(cpu_r),
