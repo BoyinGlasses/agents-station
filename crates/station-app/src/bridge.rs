@@ -5143,6 +5143,7 @@ struct WorldActionParams<'w, 's> {
     lite_cam_q: Query<'w, 's, Entity, With<station_3d::Lite2dCamera>>,
     pal: Option<ResMut<'w, WorldPalette>>,
     backdrop_assets: Option<ResMut<'w, BackdropAssets>>,
+    ibl: Option<Res<'w, station_3d::OfficeIbl>>,
     meshes: Option<ResMut<'w, Assets<Mesh>>>,
     materials: Option<ResMut<'w, Assets<StandardMaterial>>>,
     images: Option<ResMut<'w, Assets<Image>>>,
@@ -5734,6 +5735,7 @@ fn unload_world_if_possible(commands: &mut Commands, wp: &mut WorldActionParams<
             wp.world_q.iter(),
             wp.pal.as_deref_mut(),
             wp.backdrop_assets.as_deref_mut(),
+            wp.ibl.as_deref(),
             meshes,
             mats,
             imgs,
@@ -5768,6 +5770,7 @@ fn rebuild_3d_office_world(
                 wp.world_q.iter(),
                 wp.pal.as_deref_mut(),
                 wp.backdrop_assets.as_deref_mut(),
+                wp.ibl.as_deref(),
                 meshes,
                 mats,
                 imgs,
@@ -11099,9 +11102,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(Time::<()>::default())
             .insert_resource(ClearColor::default())
-            .insert_resource(station_3d::lights::LightingState {
-                night: !expected_night,
-            })
+            .insert_resource(station_3d::lights::LightingState::new(!expected_night))
             .insert_resource(i18n)
             .insert_resource(UiState::with_demo_seed(
                 station_3d::OfficeLayout::Pro,

@@ -1,8 +1,50 @@
+use crate::ibl::OfficeIbl;
 use crate::layout::{LayoutSpec, OfficeLayout};
+use crate::lights::{DAY_IBL_INTENSITY, NIGHT_IBL_INTENSITY};
 use crate::palette::WorldEntity;
+use bevy::core_pipeline::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
-use bevy::render::camera::ScalingMode;
+use bevy::render::camera::{Exposure, ScalingMode};
+
+/// Calibrated EV100 matching Three.js `ACESFilmicToneMapping` day/night exposure ratio (`room-update.js:162`):
+/// Day (`10.45`) prevents `15_500` lux highlight washout while preserving crisp shadow contrast;
+/// Night (`9.54`, ~`1.12x` over Blender 9.7 baseline) lifts warm room lamps and emissive bloom cleanly.
+pub const DAY_EV100: f32 = 10.45;
+pub const NIGHT_EV100: f32 = 9.54;
+
+/// Day bloom stays at intensity `0.0` so `BloomNode` skips all passes (matching `room-update.js:163`).
+pub fn day_bloom() -> Bloom {
+    Bloom {
+        intensity: 0.0,
+        low_frequency_boost: 0.45,
+        low_frequency_boost_curvature: 0.85,
+        high_pass_frequency: 1.0,
+        prefilter: BloomPrefilter {
+            threshold: 1.6,
+            threshold_softness: 0.25,
+        },
+        composite_mode: BloomCompositeMode::Additive,
+        ..default()
+    }
+}
+
+/// Night bloom highlights lamps, monitors, neon signs, and streetlamps (`room-update.js:163-164`).
+pub fn night_bloom() -> Bloom {
+    Bloom {
+        intensity: 0.22,
+        low_frequency_boost: 0.45,
+        low_frequency_boost_curvature: 0.85,
+        high_pass_frequency: 1.0,
+        prefilter: BloomPrefilter {
+            threshold: 0.85,
+            threshold_softness: 0.25,
+        },
+        composite_mode: BloomCompositeMode::Additive,
+        ..default()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CameraPreset {
@@ -157,21 +199,69 @@ impl CameraRig {
 pub fn spawn_office_camera(commands: &mut Commands, spec: &LayoutSpec) {
     let rig = CameraRig::from_layout(spec);
     let tf = rig.compute_transform();
-    let proj = Projection::Orthographic(OrthographicProjection {
-        scaling_mode: ScalingMode::FixedVertical {
-            viewport_height: rig.viewport_height,
-        },
-        near: -80.0,
-        far: 180.0,
-        ..OrthographicProjection::default_3d()
-    });
+    let proj = rig.projection();
     commands.insert_resource(rig);
     commands.spawn((
         WorldEntity,
         MainOfficeCamera,
+        Camera {
+            hdr: true,
+            ..default()
+        },
         Camera3d::default(),
         proj,
-        Msaa::Off,
+        Msaa::Sample4,
+        Tonemapping::AcesFitted,
+        Exposure { ev100: DAY_EV100 },
+        day_bloom(),
+        tf,
+    ));
+}
+
+pub fn spawn_office_camera_with_ibl(
+    commands: &mut Commands,
+    spec: &LayoutSpec,
+    ibl: &OfficeIbl,
+    night: bool,
+) {
+    let rig = CameraRig::from_layout(spec);
+    let tf = rig.compute_transform();
+    let proj = rig.projection();
+    let env_map = EnvironmentMapLight {
+        diffuse_map: if night {
+            ibl.night_diffuse.clone()
+        } else {
+            ibl.day_diffuse.clone()
+        },
+        specular_map: if night {
+            ibl.night_specular.clone()
+        } else {
+            ibl.day_specular.clone()
+        },
+        intensity: if night {
+            NIGHT_IBL_INTENSITY
+        } else {
+            DAY_IBL_INTENSITY
+        },
+        ..default()
+    };
+    commands.insert_resource(rig);
+    commands.spawn((
+        WorldEntity,
+        MainOfficeCamera,
+        Camera {
+            hdr: true,
+            ..default()
+        },
+        Camera3d::default(),
+        proj,
+        Msaa::Sample4,
+        Tonemapping::AcesFitted,
+        Exposure {
+            ev100: if night { NIGHT_EV100 } else { DAY_EV100 },
+        },
+        env_map,
+        if night { night_bloom() } else { day_bloom() },
         tf,
     ));
 }

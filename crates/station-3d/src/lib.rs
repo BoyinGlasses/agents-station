@@ -6,6 +6,7 @@ pub mod demo;
 pub mod desks;
 pub mod entrance;
 pub mod furniture;
+pub mod ibl;
 pub mod interact;
 pub mod layout;
 pub mod life;
@@ -22,6 +23,7 @@ pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
 pub use desks::DeskScreen;
+pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use palette::{WorldEntity, WorldPalette};
@@ -88,7 +90,7 @@ fn register_office_runtime(
 ) {
     app.insert_resource(layout)
         .insert_resource(backdrop)
-        .insert_resource(lights::LightingState { night })
+        .insert_resource(lights::LightingState::new(night))
         .insert_resource(life::OfficeLifeState::default())
         .insert_resource(replay::ReplayState::default())
         .insert_resource(audio::SfxEngine::new(true))
@@ -101,6 +103,7 @@ fn register_office_runtime(
     app.add_systems(
             Update,
             (
+                lights::sync_lighting_system,
                 props::animate_props_system,
                 people::animate_chibis_system,
                 backdrops::animate_backdrop_traffic_system,
@@ -134,8 +137,9 @@ pub fn spawn_full_office_world(
     let mut backdrop_assets = BackdropAssets::default();
     let life_state = life::OfficeLifeState::default();
 
+    let ibl = ibl::OfficeIbl::generate(images);
     lights::spawn_office_lights(commands, &spec, night);
-    camera::spawn_office_camera(commands, &spec);
+    camera::spawn_office_camera_with_ibl(commands, &spec, &ibl, night);
     rooms::spawn_office_shell(commands, &mut pal, materials, images, fonts, &spec);
     entrance::spawn_entrance(commands, &mut pal, materials, &spec);
     let scr_mats = desks::spawn_desks(commands, &mut pal, materials, images, fonts, &spec);
@@ -167,20 +171,23 @@ pub fn spawn_full_office_world(
 
     commands.insert_resource(layout);
     commands.insert_resource(backdrop);
-    commands.insert_resource(lights::LightingState { night });
+    commands.insert_resource(lights::LightingState::new(night));
+    commands.insert_resource(ibl);
     commands.insert_resource(scr_mats);
     commands.insert_resource(backdrop_assets);
     commands.insert_resource(pal);
 }
 
 /// True Unload helper: despawns every `WorldEntity` and purges every `WorldPalette`
-/// mesh/material/image and `BackdropAssets` material/image so switching `3D -> 2D Lite`,
-/// rebuilding layouts, or minimizing to System Tray leaks zero GPU/CPU assets.
+/// mesh/material/image, `BackdropAssets` material/image, and `OfficeIbl` cubemap
+/// so switching `3D -> 2D Lite`, rebuilding layouts, or minimizing to System Tray leaks zero GPU/CPU assets.
+#[allow(clippy::too_many_arguments)]
 pub fn unload_full_office_world(
     commands: &mut Commands,
     world_entities: impl IntoIterator<Item = Entity>,
     pal: Option<&mut WorldPalette>,
     backdrop_assets: Option<&mut BackdropAssets>,
+    ibl: Option<&OfficeIbl>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -194,8 +201,12 @@ pub fn unload_full_office_world(
     if let Some(ba) = backdrop_assets {
         ba.purge(materials, images);
     }
+    if let Some(env_ibl) = ibl {
+        env_ibl.purge(images);
+    }
     commands.remove_resource::<WorldPalette>();
     commands.remove_resource::<BackdropAssets>();
+    commands.remove_resource::<OfficeIbl>();
     commands.remove_resource::<desks::ScreenMaterials>();
     commands.remove_resource::<camera::CameraRig>();
 }
@@ -398,6 +409,15 @@ mod tests {
         assert!(world.resource::<Assets<StandardMaterial>>().len() > 20);
         assert!(world.resource::<Assets<Image>>().len() > 10);
 
+        assert!(world.get_resource::<OfficeIbl>().is_some());
+        assert_eq!(
+            *world
+                .query_filtered::<&Msaa, With<camera::MainOfficeCamera>>()
+                .single(&world)
+                .unwrap(),
+            Msaa::Sample4
+        );
+
         // 2. Unload full 3D world and spawn Lite2dCamera (never tagged WorldEntity).
         let world_ents: Vec<Entity> = world
             .query_filtered::<Entity, With<WorldEntity>>()
@@ -408,12 +428,14 @@ mod tests {
                 world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
                     let mut pal = world.remove_resource::<WorldPalette>();
                     let mut ba = world.remove_resource::<BackdropAssets>();
+                    let ibl = world.remove_resource::<OfficeIbl>();
                     let mut cmds = world.commands();
                     unload_full_office_world(
                         &mut cmds,
                         world_ents,
                         pal.as_mut(),
                         ba.as_mut(),
+                        ibl.as_ref(),
                         &mut meshes,
                         &mut mats,
                         &mut imgs,
@@ -425,11 +447,19 @@ mod tests {
         world.flush();
 
         assert_eq!(world.query_filtered::<Entity, With<WorldEntity>>().iter(&world).count(), 0);
+        assert!(world.get_resource::<OfficeIbl>().is_none());
         assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
         assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
         assert_eq!(world.resource::<Assets<Image>>().len(), 0);
         assert_eq!(world.query_filtered::<Entity, With<Camera3d>>().iter(&world).count(), 1);
         assert_eq!(world.query_filtered::<Entity, With<Lite2dCamera>>().iter(&world).count(), 1);
+        assert_eq!(
+            *world
+                .query_filtered::<&Msaa, With<Lite2dCamera>>()
+                .single(&world)
+                .unwrap(),
+            Msaa::Off
+        );
         assert_eq!(world.query_filtered::<Entity, (With<Lite2dCamera>, With<WorldEntity>)>().iter(&world).count(), 0);
 
         // 3. Despawn Lite2dCamera and rebuild HQ 3D world with 44 desks.
