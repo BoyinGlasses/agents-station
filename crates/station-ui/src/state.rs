@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use station_3d::{BackdropKind, CameraPreset, ChibiLook, OfficeLayout};
 use station_launcher::HarnessStatus;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Logical `egui::Rect` of the transparent central 3D stage area, updated each frame by the shell.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
@@ -240,8 +240,10 @@ pub struct AccountOption {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TodoItem {
+    pub id: String,
     pub text: String,
     pub done: bool,
+    pub done_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -283,12 +285,86 @@ pub struct FeedEntry {
     pub attention: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatReplyRefUi {
+    pub id: String,
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatPollOptUi {
+    pub t: String,
+    pub by: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatPollUi {
+    pub q: String,
+    pub opts: Vec<ChatPollOptUi>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChatRemindUi {
+    pub title: String,
+    pub at_ms: u64,
+    pub repeat: String,
+    pub yes: Vec<String>,
+    pub no: Vec<String>,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatImagePreview {
+    pub id: String,
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct ChatMessage {
+    pub id: String,
+    pub from: String,
     pub sender: String,
     pub role: String,
     pub text: String,
     pub ts: String,
+    pub at_ms: u64,
+    pub tag: Option<String>,
+    pub recalled: bool,
+    pub sticker: Option<u32>,
+    pub photo: Option<String>,
+    pub reply: Option<ChatReplyRefUi>,
+    pub reacts: BTreeMap<String, Vec<String>>,
+    pub poll: Option<ChatPollUi>,
+    pub remind: Option<ChatRemindUi>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WrappedSummaryUi {
+    pub loading: bool,
+    pub loaded: bool,
+    pub error: Option<String>,
+    pub from: String,
+    pub to: String,
+    pub days: usize,
+    pub hours_sum: f64,
+    pub hours_wall: f64,
+    pub wait_hours: f64,
+    pub prompts: u64,
+    pub edits: u64,
+    pub reads: u64,
+    pub cmds: u64,
+    pub deploys: u64,
+    pub commits: u64,
+    pub pushes: u64,
+    pub longest_min: u64,
+    pub cost: f64,
+    pub sessions: usize,
+    pub top_project: Option<(String, f64)>,
+    pub busiest_day: Option<(String, u32, f64)>,
+    pub last_saved_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -515,7 +591,44 @@ pub enum UiAction {
         text: String,
     },
     PostGroupChat(String),
+    SendGroupChat {
+        text: String,
+        reply_to: Option<String>,
+        sticker: Option<u32>,
+    },
+    ReactGroupChat {
+        id: String,
+        emoji: String,
+    },
+    RecallGroupChat {
+        id: String,
+    },
+    PinGroupChat {
+        id: String,
+    },
+    CreateGroupPoll {
+        q: String,
+        opts: Vec<String>,
+    },
+    VoteGroupPoll {
+        id: String,
+        option_index: usize,
+    },
+    RsvpGroupRemind {
+        id: String,
+        yes: bool,
+    },
+    SendGroupPhoto,
+    FetchChatImage {
+        id: String,
+    },
     SaveWhiteboard(String),
+    SyncWhiteboardTodos(Vec<TodoItem>),
+    FetchWrapped,
+    ExportWrappedPng {
+        copy_clipboard: bool,
+    },
+    CancelTimelapseClip,
     RefreshTelemetry,
     MinimizeToTray,
 }
@@ -622,6 +735,23 @@ pub struct UiState {
     pub perm_plan_notes: HashMap<String, String>,
     pub perm_stuck_hints: HashMap<String, String>,
     pub perm_danger_armed: HashMap<String, bool>,
+    pub chat_pinned_id: Option<String>,
+    pub chat_typing: Vec<String>,
+    pub chat_reply_to: Option<ChatReplyRefUi>,
+    pub chat_poll_open: bool,
+    pub chat_poll_q: String,
+    pub chat_poll_opts: Vec<String>,
+    pub chat_sticker_open: bool,
+    pub chat_sticker_tab: u8,
+    pub chat_mention_open: bool,
+    pub chat_image_id_draft: String,
+    pub chat_preview_image: Option<ChatImagePreview>,
+    pub chat_poll_show_voters: HashSet<String>,
+    pub whiteboard_note_draft: String,
+    pub wrapped: WrappedSummaryUi,
+    pub timelapse_recording: bool,
+    pub timelapse_progress: f32,
+    pub timelapse_elapsed_sec: u32,
     pub pending_actions: Vec<UiAction>,
     next_toast_id: u64,
 }
@@ -736,6 +866,23 @@ impl UiState {
             perm_plan_notes: HashMap::new(),
             perm_stuck_hints: HashMap::new(),
             perm_danger_armed: HashMap::new(),
+            chat_pinned_id: None,
+            chat_typing: Vec::new(),
+            chat_reply_to: None,
+            chat_poll_open: false,
+            chat_poll_q: String::new(),
+            chat_poll_opts: vec![String::new(), String::new()],
+            chat_sticker_open: false,
+            chat_sticker_tab: 0,
+            chat_mention_open: false,
+            chat_image_id_draft: String::new(),
+            chat_preview_image: None,
+            chat_poll_show_voters: HashSet::new(),
+            whiteboard_note_draft: String::new(),
+            wrapped: WrappedSummaryUi::default(),
+            timelapse_recording: false,
+            timelapse_progress: 0.0,
+            timelapse_elapsed_sec: 0,
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
@@ -970,16 +1117,47 @@ impl UiState {
             ],
             chat: vec![
                 ChatMessage {
+                    id: "demo-chat-1".to_owned(),
+                    from: "sess-claude-1".to_owned(),
                     sender: "Claude".to_owned(),
-                    role: "Architect".to_owned(),
+                    role: "text".to_owned(),
                     text: "Gate P4 passed at 148.5 MB HQ Private WS.".to_owned(),
                     ts: "16:40".to_owned(),
+                    tag: Some("claude".to_owned()),
+                    reacts: BTreeMap::from([("❤️".to_owned(), vec!["sess-agy-3".to_owned()])]),
+                    ..Default::default()
                 },
                 ChatMessage {
+                    id: "demo-chat-2".to_owned(),
+                    from: "sess-agy-3".to_owned(),
                     sender: "Antigravity".to_owned(),
-                    role: "Builder".to_owned(),
+                    role: "text".to_owned(),
                     text: "Starting native HUD, 2D Lite & Tray bridge now.".to_owned(),
                     ts: "16:42".to_owned(),
+                    tag: Some("antigravity".to_owned()),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "demo-poll-1".to_owned(),
+                    from: "me".to_owned(),
+                    sender: "Boss".to_owned(),
+                    role: "poll".to_owned(),
+                    text: "Afternoon drink?".to_owned(),
+                    ts: "16:44".to_owned(),
+                    poll: Some(ChatPollUi {
+                        q: "Afternoon drink?".to_owned(),
+                        opts: vec![
+                            ChatPollOptUi {
+                                t: "Iced milk coffee".to_owned(),
+                                by: vec!["sess-claude-1".to_owned()],
+                            },
+                            ChatPollOptUi {
+                                t: "Peach tea".to_owned(),
+                                by: vec!["sess-agy-3".to_owned()],
+                            },
+                        ],
+                    }),
+                    ..Default::default()
                 },
             ],
             toasts: Vec::new(),
@@ -1071,12 +1249,16 @@ impl UiState {
             undo_armed_session: None,
             session_todos: vec![
                 TodoItem {
+                    id: "demo-todo-1".to_owned(),
                     text: "Implement 6 interactive perm cards".to_owned(),
                     done: true,
+                    done_at: 1,
                 },
                 TodoItem {
+                    id: "demo-todo-2".to_owned(),
                     text: "Wire SessionDrawer tabs & compose".to_owned(),
                     done: false,
+                    done_at: 0,
                 },
             ],
             accounts: vec![
@@ -1100,6 +1282,44 @@ impl UiState {
             perm_plan_notes: HashMap::new(),
             perm_stuck_hints: HashMap::new(),
             perm_danger_armed: HashMap::new(),
+            chat_pinned_id: Some("demo-poll-1".to_owned()),
+            chat_typing: Vec::new(),
+            chat_reply_to: None,
+            chat_poll_open: false,
+            chat_poll_q: String::new(),
+            chat_poll_opts: vec![String::new(), String::new()],
+            chat_sticker_open: false,
+            chat_sticker_tab: 0,
+            chat_mention_open: false,
+            chat_image_id_draft: String::new(),
+            chat_preview_image: None,
+            chat_poll_show_voters: HashSet::new(),
+            whiteboard_note_draft: String::new(),
+            wrapped: WrappedSummaryUi {
+                loaded: true,
+                from: "2026-11-19".to_owned(),
+                to: "2026-11-25".to_owned(),
+                days: 7,
+                hours_sum: 63.4,
+                hours_wall: 38.2,
+                wait_hours: 9.6,
+                prompts: 312,
+                edits: 1840,
+                reads: 4210,
+                cmds: 2985,
+                deploys: 9,
+                commits: 46,
+                pushes: 21,
+                longest_min: 214,
+                cost: 412.5,
+                sessions: 27,
+                top_project: Some(("agents-station".to_owned(), 21.3)),
+                busiest_day: Some(("2026-11-23".to_owned(), 4, 14.2)),
+                ..Default::default()
+            },
+            timelapse_recording: false,
+            timelapse_progress: 0.0,
+            timelapse_elapsed_sec: 0,
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }

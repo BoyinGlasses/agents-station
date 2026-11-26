@@ -1,5 +1,6 @@
 use crate::fps::AdaptiveFpsState;
 use crate::tray::{TrayState, notify_parent_hold_alert, notify_parent_in_tray};
+use base64::Engine as _;
 use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -21,10 +22,11 @@ use station_ui::labels3d::{
     project_world_to_stage,
 };
 use station_ui::state::{
-    AccountOption, BurnSnapshot, CacheWarmth, ChatMessage, FeedEntry, HarnessDockItem,
+    AccountOption, BurnSnapshot, CacheWarmth, ChatImagePreview, ChatMessage, ChatPollOptUi,
+    ChatPollUi, ChatRemindUi, ChatReplyRefUi, ClipShape, FeedEntry, HarnessDockItem,
     PendingPermCard, PhotoSize, PlaceCardAction, PlaceCardInfo, PlaceCardRow, ReplayRange,
     SessionCard, SessionLogItem, SessionUndoView, SysSnapshot, TodoItem, UiAction, UndoFileEntry,
-    normalize_feed_kind, normalize_status,
+    WrappedSummaryUi, normalize_feed_kind, normalize_status,
 };
 use station_ui::theme::{ACCENT, AMBER, BLUE, GREEN, RED};
 use station_ui::{ActiveDrawer, I18nStore, StageViewportRect, UiState, ViewMode};
@@ -74,6 +76,8 @@ enum RemoteQueryCmd {
     FetchUndo { session_id: String },
     ApplyUndo { session_id: String, files: Vec<String> },
     RewritePrompt { text: String, lang: String },
+    FetchWrapped,
+    FetchImage { id: String },
 }
 
 enum BridgeAsyncResult {
@@ -83,6 +87,8 @@ enum BridgeAsyncResult {
     },
     SessionUndo(SessionUndoView),
     RewriteResult(Result<String, String>),
+    WrappedSummary(Result<WrappedSummaryUi, String>),
+    ChatImage(Result<ChatImagePreview, String>),
 }
 
 #[derive(Clone)]
@@ -226,11 +232,14 @@ struct RemoteSnapshot {
     burn: Option<BurnSnapshot>,
     has_chat: bool,
     chat: Vec<ChatMessage>,
+    chat_pinned_id: Option<String>,
+    chat_typing: Vec<String>,
     ci_alerts: Vec<PendingPermCard>,
     has_vault: bool,
     vault_results: Vec<(String, String)>,
     has_pins: bool,
     pins: HashMap<String, Vec<String>>,
+    has_todos: bool,
     todos: Vec<TodoItem>,
     accounts: Vec<AccountOption>,
 }
@@ -649,18 +658,100 @@ fn parse_ci_alerts_from_chat_json(val: &Value) -> Vec<PendingPermCard> {
 
 fn parse_todos_from_values(arr: &[Value]) -> Vec<TodoItem> {
     arr.iter()
-        .filter_map(|t| {
+        .enumerate()
+        .filter_map(|(idx, t)| {
             let text = t.get("text").and_then(Value::as_str)?.trim();
             if text.is_empty() {
                 return None;
             }
+            let id = t
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("td-{idx}"));
             let done = t.get("done").and_then(Value::as_bool).unwrap_or(false);
+            let done_at = t.get("doneAt").and_then(Value::as_u64).unwrap_or(0);
             Some(TodoItem {
+                id,
                 text: text.to_owned(),
                 done,
+                done_at,
             })
         })
         .collect()
+}
+
+fn todos_to_json_values(todos: &[TodoItem]) -> Vec<Value> {
+    todos
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "text": t.text,
+                "done": t.done,
+                "doneAt": t.done_at,
+            })
+        })
+        .collect()
+}
+
+fn parse_wrapped_from_json(val: &Value) -> WrappedSummaryUi {
+    let stats = val.get("stats");
+    let top_project = val
+        .get("projects")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|p| {
+            let name = p.get("name").and_then(Value::as_str)?.to_owned();
+            let hrs = p.get("hours").and_then(Value::as_f64).unwrap_or(0.0);
+            Some((name, hrs))
+        });
+    let busiest_day = val
+        .get("busiest")
+        .filter(|v| v.is_object())
+        .and_then(|b| {
+            let day = b.get("day").and_then(Value::as_str)?.to_owned();
+            let wd = b.get("weekday").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let hrs = b.get("hours").and_then(Value::as_f64).unwrap_or(0.0);
+            Some((day, wd, hrs))
+        });
+    WrappedSummaryUi {
+        loading: false,
+        loaded: true,
+        error: None,
+        from: val.get("from").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        to: val.get("to").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        days: val.get("days").and_then(Value::as_u64).unwrap_or(0) as usize,
+        hours_sum: val.get("hoursSum").and_then(Value::as_f64).unwrap_or(0.0),
+        hours_wall: val.get("hoursWall").and_then(Value::as_f64).unwrap_or(0.0),
+        wait_hours: val.get("waitHours").and_then(Value::as_f64).unwrap_or(0.0),
+        prompts: stats.and_then(|s| s.get("prompts")).and_then(Value::as_u64).unwrap_or(0),
+        edits: stats.and_then(|s| s.get("edit")).and_then(Value::as_u64).unwrap_or(0),
+        reads: stats.and_then(|s| s.get("read")).and_then(Value::as_u64).unwrap_or(0),
+        cmds: stats.and_then(|s| s.get("cmd")).and_then(Value::as_u64).unwrap_or(0),
+        deploys: stats.and_then(|s| s.get("deploy")).and_then(Value::as_u64).unwrap_or(0),
+        commits: val.get("commits").and_then(Value::as_u64).unwrap_or(0),
+        pushes: val.get("pushes").and_then(Value::as_u64).unwrap_or(0),
+        longest_min: val.get("longestMin").and_then(Value::as_u64).unwrap_or(0),
+        cost: val.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
+        sessions: val.get("sessions").and_then(Value::as_u64).unwrap_or(0) as usize,
+        top_project,
+        busiest_day,
+        last_saved_path: None,
+    }
+}
+
+fn decode_bounded_chat_preview(id: String, bytes: &[u8]) -> Result<ChatImagePreview, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    let thumb = img.thumbnail(360, 270).to_rgba8();
+    let (w, h) = (thumb.width() as usize, thumb.height() as usize);
+    Ok(ChatImagePreview {
+        id,
+        width: w,
+        height: h,
+        rgba: thumb.into_raw(),
+    })
 }
 
 fn parse_accounts_from_view(val: &Value) -> Vec<AccountOption> {
@@ -953,45 +1044,159 @@ fn apply_snapshot_to_remote(snap_lock: &Arc<Mutex<RemoteSnapshot>>, val: &Value)
         snap.pins = pm;
     }
     if let Some(t) = todos {
+        snap.has_todos = true;
         snap.todos = t;
     }
 }
 
-fn parse_chat_from_json(val: &Value) -> Vec<ChatMessage> {
+fn parse_chat_from_json(val: &Value) -> (Vec<ChatMessage>, Option<String>, Vec<String>) {
+    let pinned = val
+        .get("pinned")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let typing = val
+        .get("typing")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     let Some(arr) = val.get("msgs").and_then(Value::as_array) else {
-        return Vec::new();
+        return (Vec::new(), pinned, typing);
     };
-    arr.iter()
+    let msgs = arr
+        .iter()
         .rev()
-        .take(40)
+        .take(80)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .filter_map(|m| {
-            let text = m.get("text").and_then(Value::as_str).unwrap_or("");
-            if text.is_empty() {
+            let id = m.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+            let role = m
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("text")
+                .to_owned();
+            let text = m.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+            let recalled = m.get("recalled").and_then(Value::as_bool).unwrap_or(false);
+            let sticker = m.get("sticker").and_then(Value::as_u64).map(|v| v as u32);
+            let photo = m
+                .get("photo")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let poll = m.get("poll").and_then(|p| {
+                let q = p.get("q").and_then(Value::as_str)?.to_owned();
+                let opts = p
+                    .get("opts")
+                    .and_then(Value::as_array)?
+                    .iter()
+                    .filter_map(|o| {
+                        let t = o.get("t").and_then(Value::as_str)?.to_owned();
+                        let by = o
+                            .get("by")
+                            .and_then(Value::as_array)
+                            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                            .unwrap_or_default();
+                        Some(ChatPollOptUi { t, by })
+                    })
+                    .collect();
+                Some(ChatPollUi { q, opts })
+            });
+            let remind = m.get("remind").and_then(|r| {
+                let title = r.get("title").and_then(Value::as_str)?.to_owned();
+                let at_ms = r.get("at").and_then(Value::as_u64).unwrap_or(0);
+                let repeat = r.get("repeat").and_then(Value::as_str).unwrap_or("").to_owned();
+                let yes = r
+                    .get("yes")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                    .unwrap_or_default();
+                let no = r
+                    .get("no")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                    .unwrap_or_default();
+                let done = r.get("done").and_then(Value::as_bool).unwrap_or(false);
+                Some(ChatRemindUi {
+                    title,
+                    at_ms,
+                    repeat,
+                    yes,
+                    no,
+                    done,
+                })
+            });
+            let reply = m.get("reply").and_then(|r| {
+                Some(ChatReplyRefUi {
+                    id: r.get("id").and_then(Value::as_str)?.to_owned(),
+                    name: r.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    text: r.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
+                })
+            });
+            let mut reacts = std::collections::BTreeMap::new();
+            if let Some(obj) = m.get("reacts").and_then(Value::as_object) {
+                for (k, v) in obj {
+                    if let Some(list) = v.as_array() {
+                        let who: Vec<String> = list
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect();
+                        if !who.is_empty() {
+                            reacts.insert(k.clone(), who);
+                        }
+                    }
+                }
+            }
+            if text.is_empty()
+                && !recalled
+                && sticker.is_none()
+                && photo.is_none()
+                && poll.is_none()
+                && remind.is_none()
+            {
                 return None;
             }
+            let from = m
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or("office")
+                .to_owned();
             let sender = m
                 .get("name")
                 .and_then(Value::as_str)
                 .or_else(|| m.get("from").and_then(Value::as_str))
                 .unwrap_or("Office")
                 .to_owned();
-            let role = m
-                .get("kind")
-                .and_then(Value::as_str)
-                .unwrap_or("chat")
-                .to_owned();
-            let ts = format_hhmm_ms(m.get("at").and_then(Value::as_u64).unwrap_or(0));
+            let at_ms = m.get("at").and_then(Value::as_u64).unwrap_or(0);
+            let ts = format_hhmm_ms(at_ms);
+            let tag = m.get("tag").and_then(Value::as_str).map(str::to_owned);
             Some(ChatMessage {
+                id,
+                from,
                 sender,
                 role,
-                text: text.to_owned(),
+                text,
                 ts,
+                at_ms,
+                tag,
+                recalled,
+                sticker,
+                photo,
+                reply,
+                reacts,
+                poll,
+                remind,
             })
         })
-        .collect()
+        .collect();
+    (msgs, pinned, typing)
 }
 
 fn parse_sys_from_json(val: &Value) -> SysSnapshot {
@@ -1140,7 +1345,7 @@ fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
     if snap.has_pins {
         ui.session_pins = snap.pins.clone();
     }
-    if !snap.todos.is_empty() {
+    if snap.has_todos {
         ui.session_todos = snap.todos.clone();
     }
     if !snap.accounts.is_empty() {
@@ -1157,6 +1362,8 @@ fn apply_remote_snapshot_to_ui(snap: &RemoteSnapshot, ui: &mut UiState) {
     }
     if snap.has_chat {
         ui.chat = snap.chat.clone();
+        ui.chat_pinned_id = snap.chat_pinned_id.clone();
+        ui.chat_typing = snap.chat_typing.clone();
     }
     if snap.has_vault {
         ui.vault_results = snap.vault_results.clone();
@@ -1218,10 +1425,12 @@ async fn fetch_remote_chat(
         && resp.status().is_success()
         && let Ok(val) = resp.json::<Value>().await
     {
-        let chat = parse_chat_from_json(&val);
+        let (chat, pinned, typing) = parse_chat_from_json(&val);
         let ci_alerts = parse_ci_alerts_from_chat_json(&val);
         let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
         snap.chat = chat;
+        snap.chat_pinned_id = pinned;
+        snap.chat_typing = typing;
         snap.ci_alerts = ci_alerts;
         snap.has_chat = true;
     }
@@ -1267,7 +1476,10 @@ async fn fetch_remote_telemetry(
         snap.burn = Some(parse_burn_from_json(&today, burn_30d.as_ref()));
     }
     if let Some(v) = chat_v {
-        snap.chat = parse_chat_from_json(&v);
+        let (chat, pinned, typing) = parse_chat_from_json(&v);
+        snap.chat = chat;
+        snap.chat_pinned_id = pinned;
+        snap.chat_typing = typing;
         snap.ci_alerts = parse_ci_alerts_from_chat_json(&v);
         snap.has_chat = true;
     }
@@ -1429,6 +1641,44 @@ fn spawn_attached_sse_client(
                                             Err(e) => Err(e.to_string()),
                                         };
                                         let _ = async_q.try_send(BridgeAsyncResult::RewriteResult(res));
+                                    }
+                                    RemoteQueryCmd::FetchWrapped => {
+                                        let url = format!("{base_q}/api/wrapped");
+                                        let res = match client_q
+                                            .get(url)
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(5))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => r
+                                                .json::<Value>()
+                                                .await
+                                                .map(|v| parse_wrapped_from_json(&v))
+                                                .map_err(|e| e.to_string()),
+                                            Ok(r) => Err(format!("HTTP {}", r.status().as_u16())),
+                                            Err(e) => Err(e.to_string()),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::WrappedSummary(res));
+                                    }
+                                    RemoteQueryCmd::FetchImage { id } => {
+                                        let url = format!("{base_q}/api/image");
+                                        let res = match client_q
+                                            .get(url)
+                                            .query(&[("id", id.as_str())])
+                                            .header("host", &host_q)
+                                            .timeout(Duration::from_secs(4))
+                                            .send()
+                                            .await
+                                        {
+                                            Ok(r) if r.status().is_success() => match r.bytes().await {
+                                                Ok(bytes) => decode_bounded_chat_preview(id, &bytes),
+                                                Err(e) => Err(e.to_string()),
+                                            },
+                                            Ok(r) => Err(format!("HTTP {}", r.status().as_u16())),
+                                            Err(e) => Err(e.to_string()),
+                                        };
+                                        let _ = async_q.try_send(BridgeAsyncResult::ChatImage(res));
                                     }
                                 }
                             }
@@ -2050,12 +2300,33 @@ pub fn compute_camera_viewport(
 struct PendingPhotoJob {
     size: PhotoSize,
     shots_dir: PathBuf,
+    assets_dir: PathBuf,
     title: String,
+    show_names: bool,
+    show_mark: bool,
+    tags: Vec<station_canvas2d::PhotoNameTag>,
     frames_until_shoot: u8,
 }
 
 #[derive(Resource, Default)]
 struct PendingPhotoCapture(Option<PendingPhotoJob>);
+
+struct PendingTimelapseJob {
+    shape: ClipShape,
+    music: bool,
+    gif_path: PathBuf,
+    wav_path: Option<PathBuf>,
+    title: String,
+    total_frames: u32,
+    captured_frames: u32,
+    frame_interval_sec: f32,
+    elapsed_since_last: f32,
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
+    encoder: Arc<Mutex<Option<image::codecs::gif::GifEncoder<std::fs::File>>>>,
+}
+
+#[derive(Resource, Default)]
+struct PendingTimelapseCapture(Option<PendingTimelapseJob>);
 
 pub(crate) fn is_night_for_hour(hour: u32) -> bool {
     !(6..18).contains(&hour)
@@ -2661,11 +2932,13 @@ impl Plugin for LiveServerBridgePlugin {
         );
         app.insert_resource(bridge)
             .init_resource::<PendingPhotoCapture>()
+            .init_resource::<PendingTimelapseCapture>()
             .add_systems(
                 Update,
                 (
                     sync_live_state_to_ui,
                     drive_pending_photo_capture,
+                    drive_pending_timelapse_capture,
                     process_ui_actions,
                     sync_live_sessions_to_3d,
                     handle_picking_events,
@@ -2689,17 +2962,28 @@ fn parse_ui_perm_decision(decision: &str) -> Option<PermDecision> {
 }
 
 fn sync_office_chat_to_ui(office: &station_core::state::sessions::OfficeState, ui: &mut UiState) {
+    ui.chat_pinned_id = office.chat.pinned.clone();
+    ui.chat_typing = office.chat.typing.clone();
     ui.chat = office
         .chat
         .msgs
         .iter()
         .rev()
-        .take(40)
+        .take(80)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .filter(|m| !m.text.is_empty())
+        .filter(|m| {
+            !m.text.is_empty()
+                || m.recalled
+                || m.sticker.is_some()
+                || m.photo.is_some()
+                || m.poll.is_some()
+                || m.remind.is_some()
+        })
         .map(|m| ChatMessage {
+            id: m.id.clone(),
+            from: m.from.clone().unwrap_or_else(|| "office".to_owned()),
             sender: m
                 .name
                 .clone()
@@ -2708,6 +2992,36 @@ fn sync_office_chat_to_ui(office: &station_core::state::sessions::OfficeState, u
             role: m.kind.clone(),
             text: m.text.clone(),
             ts: format_hhmm_ms(m.at),
+            at_ms: m.at,
+            tag: m.tag.clone(),
+            recalled: m.recalled,
+            sticker: m.sticker,
+            photo: m.photo.clone(),
+            reply: m.reply.as_ref().map(|r| ChatReplyRefUi {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                text: r.text.clone(),
+            }),
+            reacts: m.reacts.clone(),
+            poll: m.poll.as_ref().map(|p| ChatPollUi {
+                q: p.q.clone(),
+                opts: p
+                    .opts
+                    .iter()
+                    .map(|o| ChatPollOptUi {
+                        t: o.t.clone(),
+                        by: o.by.clone(),
+                    })
+                    .collect(),
+            }),
+            remind: m.remind.as_ref().map(|r| ChatRemindUi {
+                title: r.title.clone(),
+                at_ms: r.at,
+                repeat: r.repeat.clone(),
+                yes: r.yes.clone(),
+                no: r.no.clone(),
+                done: r.done,
+            }),
         })
         .collect();
 }
@@ -3050,6 +3364,29 @@ fn sync_live_state_to_ui(
                     }
                 }
             }
+            BridgeAsyncResult::WrappedSummary(res) => match res {
+                Ok(mut summary) => {
+                    summary.last_saved_path = ui.wrapped.last_saved_path.clone();
+                    ui.wrapped = summary;
+                }
+                Err(err) => {
+                    ui.wrapped.loading = false;
+                    ui.wrapped.loaded = true;
+                    ui.wrapped.error = Some(err);
+                }
+            },
+            BridgeAsyncResult::ChatImage(res) => match res {
+                Ok(preview) => {
+                    ui.chat_preview_image = Some(preview);
+                }
+                Err(err) => {
+                    let title = i18n
+                        .as_deref()
+                        .map(|t| t.tr("chat.photo"))
+                        .unwrap_or_else(|| "chat.photo".to_owned());
+                    ui.push_toast(title, err);
+                }
+            },
         }
     }
 
@@ -3372,23 +3709,38 @@ fn drive_pending_photo_capture(
             .observe(move |trigger: Trigger<ScreenshotCaptured>| {
                 let raw_img = trigger.event().0.clone();
                 if let Ok(dyn_img) = raw_img.try_into_dynamic() {
-                    let rgb = dyn_img.to_rgb8();
+                    let rgba = dyn_img.to_rgba8();
                     let (target_w, target_h) =
-                        job.size.target_dimensions(rgb.width(), rgb.height());
-                    let out_rgb = if (target_w, target_h) == (rgb.width(), rgb.height()) {
-                        rgb
+                        job.size.target_dimensions(rgba.width(), rgba.height());
+                    let mut out_rgba = if (target_w, target_h) == (rgba.width(), rgba.height()) {
+                        rgba
                     } else {
                         image::imageops::resize(
-                            &rgb,
+                            &rgba,
                             target_w,
                             target_h,
                             image::imageops::FilterType::Lanczos3,
                         )
                     };
+                    if job.show_names || job.show_mark {
+                        let mut fonts = station_canvas2d::FontEngine::from_assets_dir(&job.assets_dir);
+                        let tags = if job.show_names { job.tags.as_slice() } else { &[] };
+                        let mark = job.show_mark.then_some("Agents Station");
+                        station_canvas2d::paint_photo_overlays(
+                            out_rgba.as_mut(),
+                            target_w,
+                            target_h,
+                            tags,
+                            mark,
+                            &mut fonts,
+                        );
+                    }
                     let _ = std::fs::create_dir_all(&job.shots_dir);
                     let fname = format!("shot-{target_w}x{target_h}-{}.png", now_ms());
                     let shot_path = job.shots_dir.join(&fname);
-                    if out_rgb.save(&shot_path).is_ok() {
+                    let saved = out_rgba.save(&shot_path).is_ok();
+                    drop(out_rgba);
+                    if saved {
                         let _ = toast_tx.try_send((
                             job.title.clone(),
                             format!("shots/{fname} ({target_w}x{target_h})"),
@@ -3402,6 +3754,388 @@ fn drive_pending_photo_capture(
     }
 }
 
+fn timelapse_dimensions(shape: ClipShape) -> (u32, u32) {
+    match shape {
+        ClipShape::Square => (360, 360),
+        ClipShape::Tall => (360, 640),
+    }
+}
+
+fn write_timelapse_wav_if_enabled(path: &std::path::Path) -> bool {
+    let wav = crate::clip_music::generate_lofi_wav(15.0, 22_050);
+    let ok = std::fs::write(path, &wav).is_ok();
+    drop(wav);
+    ok
+}
+
+fn write_headless_timelapse_gif(
+    gif_path: &std::path::Path,
+    shape: ClipShape,
+    ui: &UiState,
+    shared_fonts: Option<&mut station_3d::SharedFontEngine>,
+    assets_dir: &std::path::Path,
+) -> bool {
+    let (w, h) = timelapse_dimensions(shape);
+    let Ok(file) = std::fs::File::create(gif_path) else {
+        return false;
+    };
+    let mut encoder = image::codecs::gif::GifEncoder::new_with_speed(file, 20);
+    let _ = encoder.set_repeat(image::codecs::gif::Repeat::Infinite);
+    let mut fallback_fonts = if shared_fonts.is_none() {
+        Some(station_canvas2d::FontEngine::from_assets_dir(assets_dir))
+    } else {
+        None
+    };
+    let fonts = match shared_fonts {
+        Some(sf) => sf.get_or_init(),
+        None => fallback_fonts.as_mut().expect("fallback fonts"),
+    };
+
+    const FRAMES: u32 = 15;
+    for f in 0..FRAMES {
+        let mut c = station_canvas2d::Canvas2d::new(w, h);
+        let dusk = f >= 10;
+        let top = if dusk {
+            station_canvas2d::hex("#101628")
+        } else {
+            station_canvas2d::hex("#1C2740")
+        };
+        let bot = if dusk {
+            station_canvas2d::hex("#0A0E19")
+        } else {
+            station_canvas2d::hex("#121A2C")
+        };
+        c.linear_gradient_rect(
+            0.0,
+            0.0,
+            w as f32,
+            h as f32,
+            (0.0, 0.0),
+            (0.0, h as f32),
+            &[(0.0, top), (1.0, bot)],
+        );
+        let prog = f as f32 / (FRAMES - 1) as f32;
+        let hour = 8 + (prog * 15.0).round() as u32;
+        let clock = format!("{hour:02}:00");
+        c.round_rect(14.0, 14.0, 88.0, 30.0, 15.0, [14, 19, 27, 200]);
+        fonts.draw_text(
+            &mut c,
+            &clock,
+            58.0,
+            19.0,
+            16.0,
+            station_canvas2d::hex("#FFD166"),
+            station_canvas2d::TextAlign::Center,
+            None,
+            true,
+            true,
+        );
+        let cx = w as f32 * (0.2 + 0.6 * prog);
+        let cy = h as f32 * 0.55;
+        c.fill_circle(cx, cy, 26.0, station_canvas2d::hex("#EF8A5F"));
+        fonts.draw_text(
+            &mut c,
+            &format!("Agents Station · {}", ui.sessions.len()),
+            w as f32 * 0.5,
+            h as f32 - 34.0,
+            14.0,
+            station_canvas2d::hex("#E8ECF4"),
+            station_canvas2d::TextAlign::Center,
+            Some(w as f32 - 24.0),
+            true,
+            false,
+        );
+        let surf = c.into_surface();
+        let Some(rgba) = image::RgbaImage::from_raw(surf.width, surf.height, surf.rgba) else {
+            return false;
+        };
+        let frame = image::Frame::from_parts(
+            rgba,
+            0,
+            0,
+            image::Delay::from_numer_denom_ms(1000, 1),
+        );
+        if encoder.encode_frame(frame).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+fn drive_pending_timelapse_capture(
+    mut commands: Commands,
+    time: Res<Time>,
+    bridge: Res<LiveServerBridge>,
+    mut ui: ResMut<UiState>,
+    mut pending: ResMut<PendingTimelapseCapture>,
+) {
+    let Some(job) = pending.0.as_mut() else {
+        return;
+    };
+
+    if job.captured_frames >= job.total_frames {
+        if job.in_flight.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        let job = pending.0.take().expect("checked Some");
+        // Drop encoder handle to flush GIF trailer to disk cleanly.
+        if let Ok(mut guard) = job.encoder.lock() {
+            guard.take();
+        }
+        ui.timelapse_recording = false;
+        ui.timelapse_progress = 1.0;
+        ui.timelapse_elapsed_sec = 15;
+        let gif_name = job
+            .gif_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("timelapse.gif")
+            .to_owned();
+        let wav_path = job.wav_path;
+        let music = job.music;
+        let title = job.title;
+        let toast_tx = bridge.toast_tx.clone();
+        std::thread::spawn(move || {
+            let mut detail = format!("shots/{gif_name}");
+            if music
+                && let Some(wp) = wav_path
+                && write_timelapse_wav_if_enabled(&wp)
+                && let Some(wn) = wp.file_name().and_then(|s| s.to_str())
+            {
+                detail = format!("shots/{gif_name} + shots/{wn}");
+            }
+            let _ = toast_tx.try_send((title, detail));
+        });
+        return;
+    }
+
+    job.elapsed_since_last += time.delta_secs();
+    if job.elapsed_since_last < job.frame_interval_sec
+        || job.in_flight.load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+    job.elapsed_since_last = 0.0;
+    job.captured_frames += 1;
+    let frac = (job.captured_frames as f32 / job.total_frames as f32).clamp(0.0, 1.0);
+    ui.timelapse_progress = frac;
+    ui.timelapse_elapsed_sec = (frac * 15.0).round() as u32;
+
+    let (tw, th) = timelapse_dimensions(job.shape);
+    let enc_arc = Arc::clone(&job.encoder);
+    let in_flight = Arc::clone(&job.in_flight);
+    in_flight.store(true, std::sync::atomic::Ordering::Release);
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(move |trigger: Trigger<ScreenshotCaptured>| {
+            let raw_img = trigger.event().0.clone();
+            if let Ok(dyn_img) = raw_img.try_into_dynamic() {
+                let resized = dyn_img.resize_to_fill(
+                    tw,
+                    th,
+                    image::imageops::FilterType::Triangle,
+                );
+                let frame = image::Frame::from_parts(
+                    resized.to_rgba8(),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(1000, 1),
+                );
+                if let Ok(mut guard) = enc_arc.lock()
+                    && let Some(enc) = guard.as_mut()
+                {
+                    let _ = enc.encode_frame(frame);
+                }
+            }
+            in_flight.store(false, std::sync::atomic::Ordering::Release);
+        });
+}
+
+fn build_wrapped_card_input(
+    ui: &UiState,
+    i18n: &I18nStore,
+) -> station_canvas2d::WrappedCardInput {
+    let w = &ui.wrapped;
+    let date_range = station_ui::drawers::modals::format_wrapped_date_range(w, i18n);
+    let hours_headline =
+        station_ui::drawers::modals::format_wrapped_hours_key("wrapped.hours", w.hours_sum, i18n);
+    let worked_line =
+        station_ui::drawers::modals::format_wrapped_hours_key("wrapped.worked", w.hours_wall, i18n);
+    let waited_str =
+        station_ui::drawers::modals::format_wrapped_hours_key("wrapped.waited", w.wait_hours, i18n);
+    let sess_str = i18n.tr_vars(
+        "wrapped.sessions",
+        &[
+            ("n", &w.sessions.to_string()),
+            ("c", &w.sessions.to_string()),
+        ],
+    );
+    let mut highlights = Vec::new();
+    if let Some((proj, hrs)) = &w.top_project {
+        let name = if ui.streamer_mode {
+            i18n.tr("wrapped.aProject")
+        } else {
+            proj.clone()
+        };
+        let rounded = (hrs * 10.0).round() / 10.0;
+        let h_str = format!("{rounded:.1}");
+        let n_str = if (rounded - 1.0).abs() < 0.05 { "1" } else { "2" };
+        highlights.push(i18n.tr_vars(
+            "wrapped.topProject",
+            &[("name", &name), ("h", &h_str), ("n", n_str)],
+        ));
+    }
+    if let Some((day, _, _)) = &w.busiest_day {
+        let date = station_ui::drawers::modals::format_wrapped_date(day, i18n);
+        highlights.push(i18n.tr_vars("wrapped.busiestDay", &[("day", day), ("date", &date)]));
+    }
+    if w.longest_min > 0 {
+        let time_str = if w.longest_min >= 60 {
+            i18n.tr_vars(
+                "time.hourMin",
+                &[
+                    ("h", &(w.longest_min / 60).to_string()),
+                    ("m", &(w.longest_min % 60).to_string()),
+                ],
+            )
+        } else {
+            i18n.tr_count("time.min", w.longest_min as usize)
+        };
+        highlights.push(i18n.tr_vars("wrapped.longest", &[("time", &time_str)]));
+    }
+    if w.commits > 0 || w.pushes > 0 {
+        let c = i18n.tr_vars(
+            "wrapped.commits",
+            &[
+                ("n", &w.commits.to_string()),
+                ("c", &w.commits.to_string()),
+            ],
+        );
+        let p = i18n.tr_vars(
+            "wrapped.pushes",
+            &[
+                ("n", &w.pushes.to_string()),
+                ("c", &w.pushes.to_string()),
+            ],
+        );
+        highlights.push(format!("{c} · {p}"));
+    }
+    highlights.truncate(3);
+
+    station_canvas2d::WrappedCardInput {
+        brand_title: "Agents Station".to_owned(),
+        date_range,
+        heading: i18n.tr("wrapped.title"),
+        hours_headline,
+        worked_line,
+        waited_sessions_line: format!("{waited_str} · {sess_str}"),
+        tiles: [
+            (w.prompts.to_string(), i18n.tr("wrapped.prompts")),
+            (w.edits.to_string(), i18n.tr("wrapped.edits")),
+            (w.cmds.to_string(), i18n.tr("wrapped.cmds")),
+            (format!("${:.1}", w.cost), i18n.tr("wrapped.cost")),
+        ],
+        highlights,
+        footer: i18n.tr("wrapped.footer"),
+        office_shot: None,
+    }
+}
+
+fn copy_png_or_path_to_clipboard(png_bytes: &[u8], path_str: &str) -> bool {
+    let Ok(mut cb) = arboard::Clipboard::new() else {
+        return false;
+    };
+    if let Ok(img) = image::load_from_memory(png_bytes) {
+        let rgba = img.to_rgba8();
+        let data = arboard::ImageData {
+            width: rgba.width() as usize,
+            height: rgba.height() as usize,
+            bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+        };
+        if cb.set_image(data).is_ok() {
+            return true;
+        }
+    }
+    cb.set_text(path_str.to_owned()).is_ok()
+}
+
+fn render_group_chat_photo_data_url(
+    ui: &UiState,
+    shared_fonts: Option<&mut station_3d::SharedFontEngine>,
+    assets_dir: &std::path::Path,
+) -> Option<String> {
+    let mut c = station_canvas2d::Canvas2d::new(480, 360);
+    c.linear_gradient_rect(
+        0.0,
+        0.0,
+        480.0,
+        360.0,
+        (0.0, 0.0),
+        (480.0, 360.0),
+        &[
+            (0.0, station_canvas2d::hex("#1C2436")),
+            (1.0, station_canvas2d::hex("#0D1219")),
+        ],
+    );
+    let mut fallback = if shared_fonts.is_none() {
+        Some(station_canvas2d::FontEngine::from_assets_dir(assets_dir))
+    } else {
+        None
+    };
+    let fonts = match shared_fonts {
+        Some(sf) => sf.get_or_init(),
+        None => fallback.as_mut()?,
+    };
+    fonts.draw_text(
+        &mut c,
+        "Agents Station",
+        24.0,
+        24.0,
+        26.0,
+        station_canvas2d::hex("#EF8A5F"),
+        station_canvas2d::TextAlign::Left,
+        Some(430.0),
+        true,
+        false,
+    );
+    fonts.draw_text(
+        &mut c,
+        &format!("{} live · {}", ui.sessions.len(), ui.clock_label),
+        24.0,
+        62.0,
+        18.0,
+        station_canvas2d::hex("#DCE3F0"),
+        station_canvas2d::TextAlign::Left,
+        Some(430.0),
+        false,
+        false,
+    );
+    for (idx, s) in ui.sessions.iter().take(4).enumerate() {
+        let y = 112.0 + idx as f32 * 54.0;
+        c.round_rect(24.0, y, 432.0, 42.0, 8.0, station_canvas2d::hex("#18202B"));
+        fonts.draw_text(
+            &mut c,
+            &s.project,
+            38.0,
+            y + 11.0,
+            16.0,
+            station_canvas2d::hex("#E8ECF4"),
+            station_canvas2d::TextAlign::Left,
+            Some(390.0),
+            true,
+            false,
+        );
+    }
+    let surf = c.into_surface();
+    let rgba = image::RgbaImage::from_raw(surf.width, surf.height, surf.rgba)?;
+    let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+    let mut jpg = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpg, 80);
+    enc.encode_image(&rgb).ok()?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&jpg);
+    Some(format!("data:image/jpeg;base64,{encoded}"))
+}
+
 #[derive(SystemParam)]
 struct AuxActionParams<'w, 's> {
     sfx: Option<ResMut<'w, station_3d::audio::SfxEngine>>,
@@ -3410,6 +4144,7 @@ struct AuxActionParams<'w, 's> {
     cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
     replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
     pending_photo: Option<ResMut<'w, PendingPhotoCapture>>,
+    pending_timelapse: Option<ResMut<'w, PendingTimelapseCapture>>,
     wb_q: Query<
         'w,
         's,
@@ -4757,12 +5492,27 @@ fn process_ui_actions(
                 if !aux.primary_win_q.is_empty()
                     && let Some(pending) = aux.pending_photo.as_deref_mut()
                 {
-                    // Hide PhotoBar HUD for the capture frame, then screenshot + scale cleanly.
+                    let tags: Vec<station_canvas2d::PhotoNameTag> = ui
+                        .projected_labels
+                        .iter()
+                        .filter(|l| l.kind == ProjectedLabelKind::WorkerTag && !l.behind_camera)
+                        .map(|l| station_canvas2d::PhotoNameTag {
+                            x_norm: (l.screen_pos.x / 1280.0).clamp(0.05, 0.95),
+                            y_norm: (l.screen_pos.y / 720.0).clamp(0.05, 0.95),
+                            text: l.text.clone(),
+                            dot_rgba: Some([l.accent.r(), l.accent.g(), l.accent.b(), 255]),
+                        })
+                        .collect();
+                    // Hide PhotoBar HUD for the capture frame, then screenshot + scale + paint overlays.
                     ui.photo_capture_hide_frames = 2;
                     pending.0 = Some(PendingPhotoJob {
                         size,
                         shots_dir,
+                        assets_dir: bridge.assets_dir.clone(),
                         title: i18n.tr("ui.photo.label"),
+                        show_names,
+                        show_mark,
+                        tags,
                         frames_until_shoot: 1,
                     });
                 } else {
@@ -4783,21 +5533,75 @@ fn process_ui_actions(
                 let shots_dir = bridge.data_dir.join("shots");
                 let _ = std::fs::create_dir_all(&shots_dir);
                 let shape_tag = match shape {
-                    station_ui::state::ClipShape::Square => "1x1",
-                    station_ui::state::ClipShape::Tall => "9x16",
+                    ClipShape::Square => "1x1",
+                    ClipShape::Tall => "9x16",
                 };
-                let fname = format!("timelapse-15s-{shape_tag}-{}.png", now_ms());
-                let clip_path = shots_dir.join(&fname);
-                let _ = save_photostrip_png(
-                    &clip_path,
-                    &ui,
-                    world_params.shared_fonts.as_deref_mut(),
-                    &bridge.assets_dir,
-                );
+                let ts = now_ms();
+                let gif_name = format!("timelapse-15s-{shape_tag}-{ts}.gif");
+                let gif_path = shots_dir.join(&gif_name);
+                let wav_name = format!("timelapse-15s-{shape_tag}-{ts}.wav");
+                let wav_path = music.then(|| shots_dir.join(&wav_name));
+
+                if !aux.primary_win_q.is_empty()
+                    && let Some(pending_tl) = aux.pending_timelapse.as_deref_mut()
+                    && let Ok(file) = std::fs::File::create(&gif_path)
+                {
+                    let mut enc = image::codecs::gif::GifEncoder::new_with_speed(file, 20);
+                    let _ = enc.set_repeat(image::codecs::gif::Repeat::Infinite);
+                    ui.timelapse_recording = true;
+                    ui.timelapse_progress = 0.0;
+                    ui.timelapse_elapsed_sec = 0;
+                    pending_tl.0 = Some(PendingTimelapseJob {
+                        shape,
+                        music,
+                        gif_path,
+                        wav_path,
+                        title: i18n.tr("ui.clip.button"),
+                        total_frames: 15,
+                        captured_frames: 0,
+                        frame_interval_sec: 1.0,
+                        elapsed_since_last: 1.0,
+                        in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        encoder: Arc::new(Mutex::new(Some(enc))),
+                    });
+                } else {
+                    let gif_ok = write_headless_timelapse_gif(
+                        &gif_path,
+                        shape,
+                        &ui,
+                        world_params.shared_fonts.as_deref_mut(),
+                        &bridge.assets_dir,
+                    );
+                    let wav_ok = wav_path
+                        .as_deref()
+                        .is_some_and(write_timelapse_wav_if_enabled);
+                    let detail = if gif_ok && wav_ok {
+                        format!("shots/{gif_name} + shots/{wav_name}")
+                    } else {
+                        format!("shots/{gif_name}")
+                    };
+                    ui.push_toast(i18n.tr("ui.clip.button"), detail);
+                }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Ding);
                 }
-                ui.push_toast(i18n.tr("ui.clip.button"), format!("shots/{fname}"));
+            }
+            UiAction::CancelTimelapseClip => {
+                ui.timelapse_recording = false;
+                ui.timelapse_progress = 0.0;
+                ui.timelapse_elapsed_sec = 0;
+                if let Some(pending_tl) = aux.pending_timelapse.as_deref_mut()
+                    && let Some(job) = pending_tl.0.take()
+                {
+                    if let Ok(mut guard) = job.encoder.lock() {
+                        guard.take();
+                    }
+                    let _ = std::fs::remove_file(&job.gif_path);
+                    if let Some(wp) = job.wav_path {
+                        let _ = std::fs::remove_file(wp);
+                    }
+                }
+                ui.push_toast(i18n.tr("ui.clip.button"), i18n.tr("ui.clip.canceled"));
             }
             UiAction::ToggleCameraFp => {
                 if let Some(rig) = aux.camera_rig.as_deref_mut() {
@@ -5171,15 +5975,317 @@ fn process_ui_actions(
                         }
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast("Group Chat", "Server offline — message not persisted");
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Chat);
                 }
             }
+            UiAction::SendGroupChat {
+                text,
+                reply_to,
+                sticker,
+            } => {
+                let clean = station_core::redact::redact(text.trim());
+                if clean.is_empty() && sticker.is_none() {
+                    continue;
+                }
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({
+                                "op": "send",
+                                "text": clean,
+                                "replyTo": reply_to,
+                                "sticker": sticker,
+                            }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            let ts = now_ms();
+                            let reply_ref = reply_to
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .and_then(|rid| office.chat.reply_ref(rid));
+                            let msg = office.chat.send_rich(
+                                "me",
+                                "Boss",
+                                &clean,
+                                ts,
+                                false,
+                                sticker,
+                                None,
+                                reply_ref,
+                            );
+                            let _ = office.save_chat();
+                            office.broadcast(json!({ "k": "chat", "op": "send", "m": msg }));
+                            sync_office_chat_to_ui(&office, &mut ui);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Chat);
+                }
+            }
+            UiAction::ReactGroupChat { id, emoji } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "react", "id": id, "emoji": emoji }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            if office.chat.react(&id, "me", &emoji) {
+                                let _ = office.save_chat();
+                                let m = office.chat.by_id(&id).cloned();
+                                office.broadcast(
+                                    json!({ "k": "chat", "op": "react", "id": id, "m": m }),
+                                );
+                                sync_office_chat_to_ui(&office, &mut ui);
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Pop);
+                }
+            }
+            UiAction::RecallGroupChat { id } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "recall", "id": id }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            if office.chat.recall(&id) {
+                                let _ = office.save_chat();
+                                office.broadcast(
+                                    json!({ "k": "chat", "op": "recall", "id": id }),
+                                );
+                                sync_office_chat_to_ui(&office, &mut ui);
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::PinGroupChat { id } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "pin", "id": id }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            if office.chat.pin(&id) {
+                                let _ = office.save_chat();
+                                office.broadcast(json!({ "k": "chat", "op": "pin", "id": id }));
+                                sync_office_chat_to_ui(&office, &mut ui);
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::CreateGroupPoll { q, opts } => {
+                let q_clean = station_core::redact::redact(q.trim());
+                let opts_clean: Vec<String> = opts
+                    .iter()
+                    .take(6)
+                    .map(|o| station_core::redact::redact(o.trim()))
+                    .filter(|o| !o.is_empty())
+                    .collect();
+                if q_clean.is_empty() || opts_clean.len() < 2 {
+                    continue;
+                }
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "poll", "q": q_clean, "opts": opts_clean }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            let ts = now_ms();
+                            if let Some(msg) =
+                                office.chat.poll("me", "Boss", &q_clean, &opts_clean, ts)
+                            {
+                                let _ = office.save_chat();
+                                office.broadcast(json!({ "k": "chat", "op": "poll", "m": msg }));
+                                sync_office_chat_to_ui(&office, &mut ui);
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Pop);
+                }
+            }
+            UiAction::VoteGroupPoll { id, option_index } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "vote", "id": id, "i": option_index }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            if office.chat.vote(&id, "me", option_index) {
+                                let _ = office.save_chat();
+                                let m = office.chat.by_id(&id).cloned();
+                                office.broadcast(
+                                    json!({ "k": "chat", "op": "vote", "id": id, "m": m }),
+                                );
+                                sync_office_chat_to_ui(&office, &mut ui);
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::RsvpGroupRemind { id, yes } => {
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "rsvp", "id": id, "yes": yes }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            if office.chat.rsvp(&id, "me", yes) {
+                                let _ = office.save_chat();
+                                let m = office.chat.by_id(&id).cloned();
+                                office.broadcast(
+                                    json!({ "k": "chat", "op": "rsvp", "id": id, "m": m }),
+                                );
+                                sync_office_chat_to_ui(&office, &mut ui);
+                            }
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+            }
+            UiAction::SendGroupPhoto => {
+                let Some(data_url) = render_group_chat_photo_data_url(
+                    &ui,
+                    world_params.shared_fonts.as_deref_mut(),
+                    &bridge.assets_dir,
+                ) else {
+                    continue;
+                };
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/chat",
+                            body: json!({ "op": "photo", "data": data_url }),
+                            refresh: RefreshKind::Chat,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            let ts = now_ms();
+                            let msg = office.chat.photo("me", "Boss", data_url, ts);
+                            let _ = office.save_chat();
+                            office.broadcast(json!({ "k": "chat", "op": "photo", "m": msg }));
+                            sync_office_chat_to_ui(&office, &mut ui);
+                        }
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("chat.group"), i18n.tr("drawer.unreachable"));
+                        continue;
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Shutter);
+                }
+            }
+            UiAction::FetchChatImage { id } => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::FetchImage { id });
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    let resolved = app_state
+                        .images
+                        .lock()
+                        .ok()
+                        .and_then(|st| st.lookup(&id).ok());
+                    if let Some((path, _mime)) = resolved {
+                        let async_tx = bridge.async_tx.clone();
+                        let img_id = id.clone();
+                        std::thread::spawn(move || {
+                            let res = station_core::store::images::read_image_bytes_bounded(
+                                &path,
+                                station_core::store::images::MAX_IMAGE_BYTES,
+                            )
+                            .map_err(|_| "image unavailable".to_owned())
+                            .and_then(|bytes| decode_bounded_chat_preview(img_id, &bytes));
+                            let _ = async_tx.try_send(BridgeAsyncResult::ChatImage(res));
+                        });
+                    } else {
+                        ui.push_toast(i18n.tr("chat.photo"), i18n.tr("drawer.unreachable"));
+                    }
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.push_toast(i18n.tr("chat.photo"), i18n.tr("drawer.unreachable"));
+                    continue;
+                }
+            },
             UiAction::SaveWhiteboard(text) => {
                 let todos = parse_whiteboard_todos(&text);
+                ui.session_todos = parse_todos_from_values(&todos);
                 let _ = station_core::atomic::write_json_atomic(
                     &bridge.data_dir.join("whiteboard.json"),
                     &json!({ "text": text, "todos": todos }),
@@ -5194,12 +6300,13 @@ fn process_ui_actions(
                         let _ = action_tx.try_send(RemoteActionCmd {
                             path: "/api/todos",
                             body: json!({ "todos": todos }),
-                            refresh: RefreshKind::None,
+                            refresh: RefreshKind::Live,
                             launch_toast_label: None,
                         });
                     }
                     BridgeBackend::BindError { .. } => {
-                        ui.push_toast("Whiteboard", "Saved locally to whiteboard.json");
+                        ui.push_toast(i18n.tr("board.cardTitle"), i18n.tr("board.saveOffline"));
+                        continue;
                     }
                 }
                 if let (Some(mats), Some(imgs), Some(shared_fonts)) = (
@@ -5221,6 +6328,132 @@ fn process_ui_actions(
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Rustle);
+                }
+            }
+            UiAction::SyncWhiteboardTodos(todos) => {
+                let text = station_ui::drawers::whiteboard::format_todos_markdown(&todos);
+                ui.whiteboard_text = text.clone();
+                let todos_json = todos_to_json_values(&todos);
+                let _ = station_core::atomic::write_json_atomic(
+                    &bridge.data_dir.join("whiteboard.json"),
+                    &json!({ "text": text, "todos": todos_json }),
+                );
+                match &bridge.backend {
+                    BridgeBackend::InProcess { app_state, .. } => {
+                        if let Ok(mut office) = app_state.office.lock() {
+                            office.todos = todos_json;
+                        }
+                    }
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "/api/todos",
+                            body: json!({ "todos": todos_json }),
+                            refresh: RefreshKind::Live,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::BindError { .. } => {
+                        ui.push_toast(i18n.tr("board.cardTitle"), i18n.tr("board.saveOffline"));
+                        continue;
+                    }
+                }
+                if let (Some(mats), Some(imgs), Some(shared_fonts)) = (
+                    world_params.materials.as_deref_mut(),
+                    world_params.images.as_deref_mut(),
+                    world_params.shared_fonts.as_deref_mut(),
+                ) {
+                    let fonts = shared_fonts.get_or_init();
+                    for wb_mat in &aux.wb_q {
+                        station_3d::furniture::redraw_whiteboard_surface(
+                            &text,
+                            ui.streamer_mode,
+                            &wb_mat.0,
+                            mats,
+                            imgs,
+                            fonts,
+                        );
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Pop);
+                }
+            }
+            UiAction::FetchWrapped => match &bridge.backend {
+                BridgeBackend::AttachedHttp { query_tx, .. } => {
+                    let _ = query_tx.try_send(RemoteQueryCmd::FetchWrapped);
+                }
+                BridgeBackend::InProcess { app_state, .. } => {
+                    let replay_dir = app_state.data_dir.join("replay");
+                    let async_tx = bridge.async_tx.clone();
+                    std::thread::spawn(move || {
+                        let val =
+                            station_core::store::wrapped::week_summary(&replay_dir, 7, now_ms());
+                        let _ = async_tx.try_send(BridgeAsyncResult::WrappedSummary(Ok(
+                            parse_wrapped_from_json(&val),
+                        )));
+                    });
+                }
+                BridgeBackend::BindError { .. } => {
+                    ui.wrapped.loading = false;
+                    ui.wrapped.loaded = true;
+                    ui.wrapped.error = Some(i18n.tr("wrapped.loadFailed"));
+                    ui.push_toast(i18n.tr("ui.wrapped.title"), i18n.tr("wrapped.loadFailed"));
+                    continue;
+                }
+            },
+            UiAction::ExportWrappedPng { copy_clipboard } => {
+                let input = build_wrapped_card_input(&ui, &i18n);
+                let png_res = if let Some(sf) = world_params.shared_fonts.as_deref_mut() {
+                    station_canvas2d::encode_wrapped_png(&input, sf.get_or_init())
+                } else {
+                    let mut fonts = station_canvas2d::FontEngine::from_assets_dir(&bridge.assets_dir);
+                    station_canvas2d::encode_wrapped_png(&input, &mut fonts)
+                };
+                match png_res {
+                    Ok(png_bytes) => {
+                        let shots_dir = bridge.data_dir.join("shots");
+                        let _ = std::fs::create_dir_all(&shots_dir);
+                        let date_tag = if ui.wrapped.to.is_empty() {
+                            i18n.tr("wrapped.fileNow")
+                        } else {
+                            ui.wrapped.to.clone()
+                        };
+                        let fname = format!("wrapped-{date_tag}-{}.png", now_ms());
+                        let out_path = shots_dir.join(&fname);
+                        if std::fs::write(&out_path, &png_bytes).is_ok() {
+                            let rel = format!("shots/{fname}");
+                            ui.wrapped.last_saved_path = Some(rel.clone());
+                            if copy_clipboard {
+                                let copied = copy_png_or_path_to_clipboard(
+                                    &png_bytes,
+                                    &out_path.to_string_lossy(),
+                                );
+                                let msg = if copied {
+                                    i18n.tr("wrapped.copied")
+                                } else {
+                                    i18n.tr_vars(
+                                        "wrapped.copyFailed",
+                                        &[("button", &i18n.tr("ui.wrapped.save"))],
+                                    )
+                                };
+                                ui.push_toast(i18n.tr("ui.wrapped.title"), msg);
+                            } else {
+                                ui.push_toast(i18n.tr("ui.wrapped.title"), rel);
+                            }
+                        } else {
+                            ui.push_toast(
+                                i18n.tr("ui.wrapped.title"),
+                                i18n.tr("ui.photo.failed"),
+                            );
+                        }
+                        drop(png_bytes);
+                        if let Some(sfx) = aux.sfx.as_deref_mut() {
+                            sfx.play_sfx(SfxKind::Shutter);
+                        }
+                    }
+                    Err(_) => {
+                        ui.push_toast(i18n.tr("ui.wrapped.title"), i18n.tr("ui.photo.failed"));
+                    }
                 }
             }
             UiAction::RefreshTelemetry => {
@@ -8102,5 +9335,277 @@ mod tests {
             "each offline action must emit exactly 1 offline toast, got {:?}",
             ui.toasts
         );
+    }
+
+    #[test]
+    fn task6_in_process_group_chat_whiteboard_wrapped_and_timelapse_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+
+        let bridge = LiveServerBridge::connect_or_start(
+            data_dir.clone(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let state = bridge.in_process_state().expect("InProcess state");
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        // 1. GroupChat: send message, create poll, send sticker, send photo, sync whiteboard, export wrapped, trigger timelapse
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::SendGroupChat {
+                text: "Hello @Claude".to_owned(),
+                reply_to: None,
+                sticker: None,
+            });
+            ui.push_action(UiAction::SendGroupChat {
+                text: String::new(),
+                reply_to: None,
+                sticker: Some(3),
+            });
+            ui.push_action(UiAction::CreateGroupPoll {
+                q: "Lunch?".to_owned(),
+                opts: vec!["Pho".to_owned(), "Com tam".to_owned()],
+            });
+            ui.push_action(UiAction::SendGroupPhoto);
+            ui.push_action(UiAction::SyncWhiteboardTodos(vec![
+                TodoItem {
+                    id: "td-1".to_owned(),
+                    text: "Ship Wrapped PNG".to_owned(),
+                    done: false,
+                    done_at: 0,
+                },
+                TodoItem {
+                    id: "td-2".to_owned(),
+                    text: "Verify Timelapse GIF".to_owned(),
+                    done: true,
+                    done_at: 2,
+                },
+            ]));
+            ui.push_action(UiAction::ExportWrappedPng {
+                copy_clipboard: false,
+            });
+            ui.push_action(UiAction::TriggerTimelapseClip {
+                shape: ClipShape::Square,
+                music: true,
+            });
+        }
+        app.update();
+
+        let (text_id, poll_id) = {
+            let office = state.office.lock().unwrap();
+            let text_id = office
+                .chat
+                .msgs
+                .iter()
+                .find(|m| m.text == "Hello @Claude")
+                .expect("text message persisted")
+                .id
+                .clone();
+            let poll_id = office
+                .chat
+                .msgs
+                .iter()
+                .find(|m| m.kind == "poll")
+                .expect("poll message persisted")
+                .id
+                .clone();
+            assert!(
+                office.chat.msgs.iter().any(|m| m.kind == "sticker" && m.sticker == Some(3)),
+                "sticker message persisted"
+            );
+            assert!(
+                office.chat.msgs.iter().any(|m| m.kind == "photo" && m.photo.is_some()),
+                "photo message persisted"
+            );
+            assert_eq!(office.todos.len(), 2, "SyncWhiteboardTodos updates office.todos");
+            (text_id, poll_id)
+        };
+
+        // 2. React, vote poll, reply, and recall own message
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::ReactGroupChat {
+                id: text_id.clone(),
+                emoji: "❤️".to_owned(),
+            });
+            ui.push_action(UiAction::VoteGroupPoll {
+                id: poll_id.clone(),
+                option_index: 1,
+            });
+            ui.push_action(UiAction::SendGroupChat {
+                text: "Replying now".to_owned(),
+                reply_to: Some(text_id.clone()),
+                sticker: None,
+            });
+            ui.push_action(UiAction::RecallGroupChat {
+                id: text_id.clone(),
+            });
+        }
+        app.update();
+
+        {
+            let office = state.office.lock().unwrap();
+            assert!(
+                office.chat.by_id(&text_id).expect("msg").recalled,
+                "RecallGroupChat must recall own message"
+            );
+            let poll_msg = office.chat.by_id(&poll_id).expect("poll");
+            assert_eq!(
+                poll_msg.poll.as_ref().unwrap().opts[1].by,
+                vec!["me".to_owned()],
+                "VoteGroupPoll must record vote on option 1"
+            );
+            assert!(
+                office
+                    .chat
+                    .msgs
+                    .iter()
+                    .any(|m| m.text == "Replying now"
+                        && m.reply.as_ref().is_some_and(|r| r.id == text_id)),
+                "Reply message must preserve reply_ref"
+            );
+        }
+
+        // 3. Verify 1080x1350 Wrapped PNG + Timelapse GIF + procedural lo-fi WAV on disk
+        let shots_dir = data_dir.join("shots");
+        let files: Vec<PathBuf> = std::fs::read_dir(&shots_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        let wrapped_png = files
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|n| n.starts_with("wrapped-") && n.ends_with(".png"))
+            })
+            .expect("wrapped PNG must be written to data/shots/");
+        let wrapped_bytes = std::fs::read(wrapped_png).unwrap();
+        assert!(wrapped_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let img = image::load_from_memory(&wrapped_bytes).unwrap();
+        assert_eq!((img.width(), img.height()), (1080, 1350));
+
+        let gif_file = files
+            .iter()
+            .find(|p| p.extension().and_then(|s| s.to_str()) == Some("gif"))
+            .expect("timelapse GIF must be written to data/shots/");
+        let gif_bytes = std::fs::read(gif_file).unwrap();
+        assert!(gif_bytes.starts_with(b"GIF89a") || gif_bytes.starts_with(b"GIF87a"));
+
+        let wav_file = files
+            .iter()
+            .find(|p| p.extension().and_then(|s| s.to_str()) == Some("wav"))
+            .expect("timelapse lo-fi WAV must be written to data/shots/");
+        let wav_bytes = std::fs::read(wav_file).unwrap();
+        assert_eq!(&wav_bytes[0..4], b"RIFF");
+        assert_eq!(&wav_bytes[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn task6_attached_http_persists_chat_poll_todos_and_fetches_wrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let daemon = LiveServerBridge::connect_or_start(
+            data_dir.clone(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            false,
+        );
+        let daemon_state = daemon.in_process_state().expect("daemon InProcess");
+
+        let attached = LiveServerBridge::connect_or_start(
+            data_dir.clone(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            true,
+        );
+        assert_eq!(attached.mode(), BridgeMode::AttachedHttp);
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(attached)
+            .add_event::<AppExit>()
+            .add_systems(Update, (sync_live_state_to_ui, process_ui_actions).chain());
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::CreateGroupPoll {
+                q: "Attached poll?".to_owned(),
+                opts: vec!["Yes".to_owned(), "No".to_owned()],
+            });
+            ui.push_action(UiAction::SyncWhiteboardTodos(vec![TodoItem {
+                id: "td-http-1".to_owned(),
+                text: "Sync over HTTP".to_owned(),
+                done: false,
+                done_at: 0,
+            }]));
+            ui.push_action(UiAction::FetchWrapped);
+        }
+        app.update();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        let mut all_synced = false;
+        while std::time::Instant::now() < deadline {
+            app.update();
+            let (poll_ok, todo_ok) = {
+                let office = daemon_state.office.lock().unwrap();
+                let p = office
+                    .chat
+                    .msgs
+                    .iter()
+                    .any(|m| m.kind == "poll" && m.text.contains("Attached poll?"));
+                let t = office
+                    .todos
+                    .iter()
+                    .any(|v| v.get("text").and_then(Value::as_str) == Some("Sync over HTTP"));
+                (p, t)
+            };
+            let wrapped_ok = app.world().resource::<UiState>().wrapped.loaded;
+            if poll_ok && todo_ok && wrapped_ok {
+                all_synced = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            all_synced,
+            "AttachedHttp must persist poll (/api/chat), todos (/api/todos), and load /api/wrapped"
+        );
+        drop(daemon);
     }
 }

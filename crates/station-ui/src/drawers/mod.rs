@@ -1,5 +1,8 @@
+pub mod group_chat;
 pub mod markdown;
+pub mod modals;
 pub mod session;
+pub mod whiteboard;
 
 use crate::i18n::I18nStore;
 use crate::state::{ActiveDrawer, GpuPrefUi, UiAction, UiState};
@@ -11,27 +14,47 @@ use bevy_egui::egui::{self, Color32, RichText, Stroke};
 use station_3d::{BackdropKind, ChibiLook, OfficeLayout};
 
 pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
+    if state.timelapse_recording {
+        modals::draw_timelapse_overlay(ctx, state, i18n);
+    }
+
     let drawer = state.active_drawer;
     if drawer == ActiveDrawer::None {
         return;
     }
 
-    if drawer == ActiveDrawer::Session {
-        session::draw_session_drawer(ctx, state, i18n);
-        return;
+    match drawer {
+        ActiveDrawer::Session => {
+            session::draw_session_drawer(ctx, state, i18n);
+            return;
+        }
+        ActiveDrawer::GroupChat => {
+            group_chat::draw_group_chat_drawer(ctx, state, i18n);
+            return;
+        }
+        ActiveDrawer::Whiteboard => {
+            whiteboard::draw_whiteboard_modal(ctx, state, i18n);
+            return;
+        }
+        ActiveDrawer::Wrapped => {
+            modals::draw_wrapped_modal(ctx, state, i18n);
+            return;
+        }
+        _ => {}
     }
 
     let title = match drawer {
-        ActiveDrawer::None | ActiveDrawer::Session => return,
+        ActiveDrawer::None
+        | ActiveDrawer::Session
+        | ActiveDrawer::GroupChat
+        | ActiveDrawer::Whiteboard
+        | ActiveDrawer::Wrapped => return,
         ActiveDrawer::System => "System & Ports Monitor",
         ActiveDrawer::Burn => "OTLP Burn & Tokens",
         ActiveDrawer::Vault => "Prompt Vault & Coach",
-        ActiveDrawer::GroupChat => "Office Group Chat",
         ActiveDrawer::Settings => "Station Settings",
         ActiveDrawer::Timeline => "Activity Timeline",
-        ActiveDrawer::Wrapped => "Agents Station Wrapped",
         ActiveDrawer::PhoneQr => "Phone Companion Pairing",
-        ActiveDrawer::Whiteboard => "Office Whiteboard",
         ActiveDrawer::AddHarness => "Add Custom GUI App",
     };
 
@@ -45,16 +68,17 @@ pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nS
         .resizable(false)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| match drawer {
-                ActiveDrawer::None | ActiveDrawer::Session => {}
+                ActiveDrawer::None
+                | ActiveDrawer::Session
+                | ActiveDrawer::GroupChat
+                | ActiveDrawer::Whiteboard
+                | ActiveDrawer::Wrapped => {}
                 ActiveDrawer::System => draw_system_drawer(ui, state),
                 ActiveDrawer::Burn => draw_burn_drawer(ui, state),
                 ActiveDrawer::Vault => draw_vault_drawer(ui, state),
-                ActiveDrawer::GroupChat => draw_group_chat_drawer(ui, state),
                 ActiveDrawer::Settings => draw_settings_drawer(ui, state, i18n),
                 ActiveDrawer::Timeline => draw_timeline_drawer(ui, state),
-                ActiveDrawer::Wrapped => draw_wrapped_drawer(ui, state),
                 ActiveDrawer::PhoneQr => draw_phone_qr_drawer(ui, state),
-                ActiveDrawer::Whiteboard => draw_whiteboard_drawer(ui, state),
                 ActiveDrawer::AddHarness => draw_add_harness_drawer(ui, state),
             });
         });
@@ -182,38 +206,6 @@ fn draw_vault_drawer(ui: &mut egui::Ui, state: &mut UiState) {
     }
 }
 
-fn draw_group_chat_drawer(ui: &mut egui::Ui, state: &mut UiState) {
-    for msg in &state.chat {
-        card_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&msg.sender).strong().color(ACCENT_TERRACOTTA));
-                ui.label(RichText::new(&msg.role).size(10.5).color(TEXT_MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(&msg.ts).size(10.0).color(TEXT_MUTED));
-                });
-            });
-            ui.label(RichText::new(&msg.text).size(11.5).color(TEXT_PRIMARY));
-        });
-        ui.add_space(4.0);
-    }
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let edit = ui.text_edit_singleline(&mut state.chat_draft);
-        let send = ui.button("Send").clicked()
-            || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-        if send && !state.chat_draft.trim().is_empty() {
-            let text = std::mem::take(&mut state.chat_draft);
-            state.chat.push(crate::state::ChatMessage {
-                sender: "You".to_owned(),
-                role: "Lead".to_owned(),
-                text: text.clone(),
-                ts: state.clock_label.clone(),
-            });
-            state.push_action(UiAction::PostGroupChat(text));
-        }
-    });
-}
-
 fn draw_settings_drawer(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Language (i18n)").strong().color(TEXT_PRIMARY));
@@ -322,17 +314,6 @@ fn draw_timeline_drawer(ui: &mut egui::Ui, state: &UiState) {
     }
 }
 
-fn draw_wrapped_drawer(ui: &mut egui::Ui, state: &UiState) {
-    card_frame().show(ui, |ui| {
-        ui.label(RichText::new("Season Highlights").strong().size(14.0).color(ACCENT_TERRACOTTA));
-        ui.add_space(4.0);
-        ui.label(format!("Active Agents: {}", state.sessions.len()));
-        ui.label(format!("Today Spend: ${:.2}", state.burn.today_usd));
-        ui.label(format!("Cache Read Saved: {} tokens", state.burn.cache_read_tokens));
-        ui.label(format!("Current Layout: {:?}", state.layout));
-    });
-}
-
 fn draw_phone_qr_drawer(ui: &mut egui::Ui, state: &UiState) {
     card_frame().show(ui, |ui| {
         ui.label(RichText::new("Phone Companion PWA").strong().color(TEXT_PRIMARY));
@@ -353,20 +334,6 @@ fn draw_phone_qr_drawer(ui: &mut egui::Ui, state: &UiState) {
                 .color(TEXT_MUTED),
         );
     });
-}
-
-fn draw_whiteboard_drawer(ui: &mut egui::Ui, state: &mut UiState) {
-    ui.add(
-        egui::TextEdit::multiline(&mut state.whiteboard_text)
-            .desired_rows(8)
-            .desired_width(f32::INFINITY),
-    );
-    ui.add_space(6.0);
-    if ui.button("Save to Office Whiteboard").clicked() {
-        let text = state.whiteboard_text.clone();
-        state.push_action(UiAction::SaveWhiteboard(text));
-        state.push_toast("Whiteboard", "Synced to office wall & data/whiteboard.json");
-    }
 }
 
 fn draw_add_harness_drawer(ui: &mut egui::Ui, state: &mut UiState) {

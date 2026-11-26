@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod capture;
 pub mod cli;
+pub mod clip_music;
 pub mod commands;
 pub mod fps;
 pub mod gpu;
@@ -301,9 +302,36 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             ui_state.weather_city = initial_city_display;
             if let Ok(raw) = std::fs::read_to_string(data_dir.join("whiteboard.json"))
                 && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
-                && let Some(text) = val.get("text").and_then(|v| v.as_str())
             {
-                ui_state.whiteboard_text = text.to_owned();
+                if let Some(text) = val.get("text").and_then(|v| v.as_str()) {
+                    ui_state.whiteboard_text = text.to_owned();
+                }
+                if let Some(arr) = val.get("todos").and_then(|v| v.as_array()) {
+                    ui_state.session_todos = arr
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, t)| {
+                            let text = t.get("text").and_then(|v| v.as_str())?.trim();
+                            if text.is_empty() {
+                                return None;
+                            }
+                            let id = t
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| format!("td-init-{i}"));
+                            let done = t.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let done_at = t.get("doneAt").and_then(|v| v.as_u64()).unwrap_or(0);
+                            Some(station_ui::state::TodoItem {
+                                id,
+                                text: text.to_owned(),
+                                done,
+                                done_at,
+                            })
+                        })
+                        .collect();
+                }
             }
             let initial_sound = ui_state.sound_on;
             let initial_city = initial_city_code;
