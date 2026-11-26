@@ -4,6 +4,7 @@ pub mod canvas;
 pub mod office_surfaces;
 pub mod street_surfaces;
 pub mod text;
+pub mod wrapped_card;
 
 pub use boards_and_social::{
     DutyBoardInput, DutyRowInput, PhotostripInput, StripPerson, WhiteboardInput, WhiteboardTask,
@@ -13,6 +14,10 @@ pub use canvas::{Canvas2d, RgbaSurface, hex, hex_rgba};
 pub use office_surfaces::{ALL_SCREEN_KINDS, ScreenKind, TvStatsInput};
 pub use street_surfaces::SignalColor;
 pub use text::{FontEngine, TextAlign};
+pub use wrapped_card::{
+    PhotoNameTag, WRAPPED_HEIGHT, WRAPPED_WIDTH, WrappedCardInput, draw_wrapped_card,
+    encode_wrapped_png, paint_photo_overlays,
+};
 
 pub fn canvas2d_ready() -> bool {
     true
