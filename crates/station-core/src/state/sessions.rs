@@ -357,6 +357,23 @@ fn perm_wire_json(perm: &PendingPerm, tool_input: Option<&Value>, meta: Option<&
     val
 }
 
+fn sanitize_todo_values(items: Vec<Value>) -> Vec<Value> {
+    items
+        .into_iter()
+        .take(200)
+        .filter_map(|mut v| {
+            let obj = v.as_object_mut()?;
+            let raw = obj.get("text").and_then(Value::as_str)?.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            let clean: String = crate::redact::redact(raw).chars().take(140).collect();
+            obj.insert("text".to_owned(), Value::String(clean));
+            Some(v)
+        })
+        .collect()
+}
+
 impl OfficeState {
     pub fn new(data_dir: PathBuf) -> Self {
         let (tx, _) = broadcast::channel(512);
@@ -375,6 +392,13 @@ impl OfficeState {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
+        let wb_file = data_dir.join("whiteboard.json");
+        let todos: Vec<Value> = std::fs::read_to_string(&wb_file)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("todos").and_then(Value::as_array).cloned())
+            .map(sanitize_todo_values)
+            .unwrap_or_default();
         Self {
             undo: UndoManager::new(data_dir.join("undo")),
             data_dir,
@@ -384,7 +408,7 @@ impl OfficeState {
             holds: HashMap::new(),
             pins,
             known_dirs,
-            todos: Vec::new(),
+            todos,
             stats: SessionStats::default(),
             loops: LoopGuard::default(),
             overlap: OverlapTracker::default(),
@@ -834,6 +858,35 @@ impl OfficeState {
         write_json_atomic(&self.data_dir.join("chat.json"), &self.chat.to_persisted())
     }
 
+    pub fn set_todos(&mut self, items: Vec<Value>) -> Result<()> {
+        self.todos = sanitize_todo_values(items);
+        self.save_todos()
+    }
+
+    pub fn save_todos(&self) -> Result<()> {
+        let text = self
+            .todos
+            .iter()
+            .filter_map(|t| {
+                let body = t.get("text").and_then(Value::as_str)?.trim();
+                if body.is_empty() {
+                    return None;
+                }
+                let done = t.get("done").and_then(Value::as_bool).unwrap_or(false);
+                Some(if done {
+                    format!("- [x] {body}")
+                } else {
+                    format!("- [ ] {body}")
+                })
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        write_json_atomic(
+            &self.data_dir.join("whiteboard.json"),
+            &json!({ "text": text, "todos": self.todos }),
+        )
+    }
+
     pub fn snapshot_json(&self, local: bool, lang: &str) -> Value {
         let sessions: Vec<&SessionRecord> = self.sessions.values().collect();
         let perms: Vec<Value> = self
@@ -884,6 +937,9 @@ impl OfficeState {
     pub fn flush_all(&self) -> Result<()> {
         self.save_pins()?;
         self.save_chat()?;
+        if !self.todos.is_empty() || self.data_dir.join("whiteboard.json").exists() {
+            self.save_todos()?;
+        }
         Ok(())
     }
 
@@ -1355,5 +1411,30 @@ mod tests {
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0]["sess"], "s-wire");
         assert_eq!(stuck[0]["kind"], "repeat");
+    }
+
+    #[test]
+    fn whiteboard_todos_persist_across_restart_and_redact_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut st = OfficeState::new(dir.path().to_path_buf());
+            st.set_todos(vec![
+                json!({ "id": "td-1", "text": "Rotate sk-ant-api03-secretvalue1234567890", "done": false, "doneAt": 0 }),
+                json!({ "id": "td-2", "text": "Ship release", "done": true, "doneAt": 42 }),
+            ])
+            .unwrap();
+            assert_eq!(st.todos.len(), 2);
+            let t0 = st.todos[0]["text"].as_str().unwrap();
+            assert!(!t0.contains("sk-ant-api03-secretvalue1234567890"));
+        }
+
+        // Simulate daemon restart: OfficeState::new must reload whiteboard.json todos.
+        let reloaded = OfficeState::new(dir.path().to_path_buf());
+        assert_eq!(reloaded.todos.len(), 2);
+        assert_eq!(reloaded.todos[0]["id"], "td-1");
+        assert_eq!(reloaded.todos[1]["text"], "Ship release");
+        assert_eq!(reloaded.todos[1]["done"], true);
+        let snap = reloaded.snapshot_json(true, "en");
+        assert_eq!(snap["todos"].as_array().unwrap().len(), 2);
     }
 }

@@ -2630,10 +2630,11 @@ pub async fn post_todos(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
+    let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(arr) = body.get("todos").and_then(Value::as_array) {
-        state.office.lock().unwrap_or_else(|e| e.into_inner()).todos = arr.clone();
+        let _ = office.set_todos(arr.clone());
     }
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "todos": office.todos })))
 }
 
 pub async fn post_codex_ai(
