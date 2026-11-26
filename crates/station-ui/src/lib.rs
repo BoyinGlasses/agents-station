@@ -1,9 +1,7 @@
 pub mod drawers;
 pub mod fonts;
-pub mod hud;
 pub mod i18n;
 pub mod icons;
-pub mod launcher_dock;
 pub mod lite_view;
 pub mod shell;
 pub mod state;
@@ -76,12 +74,12 @@ fn tick_ui_timers(time: Res<Time>, mut state: ResMut<UiState>) {
     state.tick_toasts(time.delta_secs());
 }
 
-fn draw_server_banner(ctx: &egui::Context, state: &mut UiState) {
+fn draw_server_banner(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
     let Some(msg) = state.server_banner.clone() else {
         return;
     };
     egui::Area::new(egui::Id::new("station_server_banner"))
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 56.0))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 62.0))
         .show(ctx, |ui| {
             egui::Frame::NONE
                 .fill(egui::Color32::from_rgba_unmultiplied(64, 22, 22, 242))
@@ -91,9 +89,7 @@ fn draw_server_banner(ctx: &egui::Context, state: &mut UiState) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("SERVER ERROR")
-                                .strong()
-                                .size(11.0)
+                            theme::heading_bold(i18n.tr("station.serverError"), 11.5)
                                 .color(theme::STATUS_ERR),
                         );
                         ui.label(
@@ -109,12 +105,22 @@ fn draw_server_banner(ctx: &egui::Context, state: &mut UiState) {
         });
 }
 
-fn draw_full_station_ui(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
+fn draw_full_station_ui(
+    ctx: &egui::Context,
+    state: &mut UiState,
+    i18n: &I18nStore,
+    stage_viewport: &mut StageViewportRect,
+) {
     match state.view_mode {
-        ViewMode::Mode3D => hud::draw_hud(ctx, state, i18n),
-        ViewMode::Lite2D | ViewMode::PanelCompact => lite_view::draw_lite_2d_view(ctx, state, i18n),
+        ViewMode::Mode3D => {
+            stage_viewport.0 = Some(shell::draw_shell(ctx, state, i18n));
+        }
+        ViewMode::Lite2D | ViewMode::PanelCompact => {
+            stage_viewport.0 = None;
+            lite_view::draw_lite_2d_view(ctx, state, i18n);
+        }
     }
-    draw_server_banner(ctx, state);
+    draw_server_banner(ctx, state, i18n);
     drawers::draw_active_drawer(ctx, state, i18n);
 }
 
@@ -126,6 +132,7 @@ fn render_primary_station_ui(
     assets_dir: Res<HudAssetsDir>,
     mut state: ResMut<UiState>,
     i18n: Res<I18nStore>,
+    mut stage_viewport: ResMut<StageViewportRect>,
     mut ui_capture: ResMut<station_3d::UiInputCapture>,
     capture_q: Query<(), With<EguiRenderToImage>>,
 ) {
@@ -137,6 +144,8 @@ fn render_primary_station_ui(
             install_egui_fonts(ctx, bundle);
         } else if let Ok(bundle) = fonts::load_font_bundle(&assets_dir.0) {
             install_egui_fonts(ctx, &bundle);
+        } else {
+            install_fallback_bold_family(ctx);
         }
         if capture_q.is_empty() {
             cached.0 = None;
@@ -144,7 +153,16 @@ fn render_primary_station_ui(
         theme::apply_station_theme(ctx);
         *initialized = true;
     }
-    draw_full_station_ui(ctx, &mut state, &i18n);
+    if !is_bold_family_active(ctx) {
+        ctx.request_repaint();
+        return;
+    }
+    if capture_q.is_empty() {
+        draw_full_station_ui(ctx, &mut state, &i18n, &mut stage_viewport);
+    } else {
+        let mut scratch = StageViewportRect::default();
+        draw_full_station_ui(ctx, &mut state, &i18n, &mut scratch);
+    }
     ui_capture.wants_keyboard = ctx.wants_keyboard_input();
     ui_capture.wants_pointer = ctx.wants_pointer_input();
 }
@@ -155,17 +173,24 @@ fn render_capture_station_ui(
     cached: Res<CachedFontBundle>,
     mut state: ResMut<UiState>,
     i18n: Res<I18nStore>,
+    mut stage_viewport: ResMut<StageViewportRect>,
 ) {
     for (entity, mut ctx, applied) in &mut query {
         let egui_ctx = ctx.get_mut();
         if !applied {
             if let Some(bundle) = cached.0.as_ref() {
                 install_egui_fonts(egui_ctx, bundle);
+            } else {
+                install_fallback_bold_family(egui_ctx);
             }
             theme::apply_station_theme(egui_ctx);
             commands.entity(entity).insert(FontsApplied);
         }
-        draw_full_station_ui(egui_ctx, &mut state, &i18n);
+        if !is_bold_family_active(egui_ctx) {
+            egui_ctx.request_repaint();
+            continue;
+        }
+        draw_full_station_ui(egui_ctx, &mut state, &i18n, &mut stage_viewport);
     }
 }
 
@@ -238,6 +263,23 @@ pub fn install_egui_fonts(ctx: &egui::Context, bundle: &fonts::FontBundle) {
     ctx.set_fonts(build_egui_font_definitions(bundle));
 }
 
+fn is_bold_family_active(ctx: &egui::Context) -> bool {
+    let target = egui::FontFamily::Name(theme::FONT_BOLD.into());
+    ctx.fonts(|f| f.families().contains(&target))
+}
+
+fn install_fallback_bold_family(ctx: &egui::Context) {
+    let mut defs = egui::FontDefinitions::default();
+    let fallback = defs
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    defs.families
+        .insert(egui::FontFamily::Name(theme::FONT_BOLD.into()), fallback);
+    ctx.set_fonts(defs);
+}
+
 fn draw_smoke_badge(ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("smoke_hud_badge"))
         .fixed_pos(egui::pos2(16.0, 16.0))
@@ -271,6 +313,8 @@ fn render_primary_smoke_hud(
             install_egui_fonts(ctx, bundle);
         } else if let Ok(bundle) = fonts::load_font_bundle(&assets_dir.0) {
             install_egui_fonts(ctx, &bundle);
+        } else {
+            install_fallback_bold_family(ctx);
         }
         *font_installed = true;
     }
@@ -396,5 +440,33 @@ mod tests {
             });
         });
         assert!(rendered);
+    }
+
+    #[test]
+    fn bold_family_guard_prevents_frame_zero_panic_when_fonts_installed_inside_pass() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = fonts::load_font_bundle(&assets_dir).expect("load_font_bundle");
+        let ctx = egui::Context::default();
+
+        let mut frame0_ready = true;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            install_egui_fonts(ctx, &bundle);
+            frame0_ready = is_bold_family_active(ctx);
+        });
+        assert!(
+            !frame0_ready,
+            "egui defers set_fonts until the next frame, so frame 0 must detect bold as not yet active"
+        );
+
+        let mut frame1_ready = false;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            frame1_ready = is_bold_family_active(ctx);
+            if frame1_ready {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.label(theme::heading_bold("Phiên làm việc", 16.0));
+                });
+            }
+        });
+        assert!(frame1_ready, "frame 1 must have bold font family active");
     }
 }

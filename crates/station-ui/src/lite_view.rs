@@ -1,5 +1,5 @@
 use crate::i18n::I18nStore;
-use crate::launcher_dock::draw_launcher_inline;
+use crate::shell::topbar::draw_launcher_inline;
 use crate::state::{ActiveDrawer, SessionCard, UiAction, UiState, ViewMode};
 use crate::theme::{
     ACCENT_TERRACOTTA, BG_DEEP, STATUS_ERR, STATUS_INFO, STATUS_WAIT, STATUS_WORK, TEXT_MUTED,
@@ -122,7 +122,7 @@ pub fn draw_lite_2d_view(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSt
                 .stroke(Stroke::new(1.0_f32, Color32::from_rgb(48, 55, 74))),
         )
         .show(ctx, |ui| {
-            draw_launcher_inline(ui, state);
+            draw_launcher_inline(ui, state, i18n);
         });
 
     egui::CentralPanel::default()
