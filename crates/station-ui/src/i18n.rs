@@ -44,20 +44,84 @@ impl I18nStore {
     }
 
     pub fn lookup(&self, key: &str) -> Option<&str> {
-        lookup_in(self.bundles.get(&self.lang), key)
-            .or_else(|| lookup_in(self.bundles.get("en"), key))
+        self.lookup_value(key).and_then(Value::as_str)
+    }
+
+    fn lookup_value(&self, key: &str) -> Option<&Value> {
+        lookup_value_in(self.bundles.get(&self.lang), key)
+            .or_else(|| lookup_value_in(self.bundles.get("en"), key))
+    }
+
+    fn device_label(&self, kind: &str) -> &str {
+        let os = device_os_key();
+        let path = format!("common.device.{kind}.{os}");
+        if let Some(s) = self.lookup(&path) {
+            return s;
+        }
+        match (os, kind) {
+            ("win32", _) => "PC",
+            ("darwin", _) => "Mac",
+            (_, "Mac") => "Computer",
+            _ => "computer",
+        }
+    }
+
+    fn substitute_device_tokens(&self, mut text: String) -> String {
+        if text.contains("{mac}") {
+            text = text.replace("{mac}", self.device_label("mac"));
+        }
+        if text.contains("{Mac}") {
+            text = text.replace("{Mac}", self.device_label("Mac"));
+        }
+        text
     }
 
     pub fn tr(&self, key: &str) -> String {
-        self.lookup(key).unwrap_or(key).to_owned()
+        let raw = self
+            .lookup_value(key)
+            .and_then(|v| resolve_template(v, None))
+            .unwrap_or(key)
+            .to_owned();
+        self.substitute_device_tokens(raw)
     }
 
     pub fn tr_vars(&self, key: &str, vars: &[(&str, &str)]) -> String {
-        let mut out = self.tr(key);
+        let count = vars
+            .iter()
+            .find(|(k, _)| *k == "n")
+            .or_else(|| vars.iter().find(|(k, _)| *k == "c" || *k == "h"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok());
+        let mut out = self
+            .lookup_value(key)
+            .and_then(|v| resolve_template(v, count))
+            .unwrap_or(key)
+            .to_owned();
         for (k, v) in vars {
             out = out.replace(&format!("{{{k}}}"), v);
         }
-        out
+        self.substitute_device_tokens(out)
+    }
+
+    pub fn tr_count(&self, key: &str, count: usize) -> String {
+        let n_str = count.to_string();
+        let raw = self
+            .lookup_value(key)
+            .and_then(|v| resolve_template(v, Some(count)))
+            .unwrap_or(key)
+            .replace("{n}", &n_str);
+        self.substitute_device_tokens(raw)
+    }
+
+    pub fn tr_pick(&self, key: &str, seed: usize) -> String {
+        let raw = match self.lookup_value(key) {
+            Some(Value::Array(arr)) if !arr.is_empty() => arr[seed % arr.len()]
+                .as_str()
+                .unwrap_or(key)
+                .to_owned(),
+            Some(v) => resolve_template(v, None).unwrap_or(key).to_owned(),
+            None => key.to_owned(),
+        };
+        self.substitute_device_tokens(raw)
     }
 
     pub fn loaded_langs(&self) -> usize {
@@ -65,12 +129,37 @@ impl I18nStore {
     }
 }
 
-fn lookup_in<'a>(root: Option<&'a Value>, key: &str) -> Option<&'a str> {
+fn device_os_key() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    }
+}
+
+fn lookup_value_in<'a>(root: Option<&'a Value>, key: &str) -> Option<&'a Value> {
     let mut cur = root?;
     for part in key.split('.') {
         cur = cur.get(part)?;
     }
-    cur.as_str()
+    Some(cur)
+}
+
+fn resolve_template(val: &Value, count: Option<usize>) -> Option<&str> {
+    match val {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(map) => {
+            let preferred = if count == Some(1) { "one" } else { "other" };
+            map.get(preferred)
+                .or_else(|| map.get("other"))
+                .or_else(|| map.get("one"))
+                .and_then(Value::as_str)
+        }
+        Value::Array(arr) => arr.first().and_then(Value::as_str),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +187,118 @@ mod tests {
         let interp = store.tr_vars("time.min", &[("n", "5")]);
         assert!(interp.contains('5'));
         assert_eq!(store.tr("nonexistent.deep.key"), "nonexistent.deep.key");
+    }
+
+    #[test]
+    fn tr_count_and_tr_vars_resolve_plural_objects_and_plain_templates() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let store = I18nStore::load_from_assets(&assets, "en");
+
+        assert_eq!(store.tr_count("time.min", 1), "1 min");
+        assert_eq!(store.tr_count("time.min", 5), "5 min");
+        assert_eq!(store.tr_count("time.day", 1), "1 day");
+        assert_eq!(store.tr_count("time.day", 5), "5 days");
+        assert_eq!(store.tr_count("activity.sessions", 1), "1 session");
+        assert_eq!(store.tr_count("activity.sessions", 3), "3 sessions");
+
+        assert_eq!(store.tr_vars("time.day", &[("n", "1")]), "1 day");
+        assert_eq!(store.tr_vars("time.day", &[("n", "5")]), "5 days");
+        assert_eq!(store.tr_vars("time.min", &[("n", "5")]), "5 min");
+    }
+
+    #[test]
+    fn tr_pick_resolves_array_keys_deterministically_by_seed() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let store = I18nStore::load_from_assets(&assets, "en");
+
+        let a0 = store.tr_pick("events.bubble.testok", 0);
+        let a1 = store.tr_pick("events.bubble.testok", 1);
+        let a2 = store.tr_pick("events.bubble.testok", 2);
+        let a3 = store.tr_pick("events.bubble.testok", 3);
+        assert_ne!(a0, "events.bubble.testok");
+        assert_ne!(a0, a1);
+        assert_ne!(a1, a2);
+        assert_eq!(a0, a3, "seed wrap-around must be deterministic");
+
+        let goal = store.tr_pick("people.foos.goal", 1);
+        assert!(!goal.is_empty() && goal != "people.foos.goal");
+        assert_eq!(store.tr_pick("nonexistent.array", 0), "nonexistent.array");
+    }
+
+    #[test]
+    fn device_tokens_substitute_mac_and_cap_mac_across_helpers() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut store = I18nStore::load_from_assets(&assets, "en");
+
+        let top_mac = store.tr("ui.topBar.mac");
+        let risky = store.tr("perm.riskyOnMac");
+        let scan = store.tr_vars("topbar.phone.scan", &[]);
+
+        assert!(!top_mac.contains("{Mac}") && !top_mac.contains("{mac}"));
+        assert!(!risky.contains("{mac}") && !scan.contains("{mac}"));
+        if cfg!(target_os = "windows") {
+            assert_eq!(top_mac, "PC");
+            assert!(risky.contains("PC"), "expected PC in '{risky}'");
+            assert!(scan.contains("PC"), "expected PC in '{scan}'");
+        }
+
+        // Caller-supplied vars override automatic device substitution.
+        assert_eq!(
+            store.tr_vars("ui.topBar.mac", &[("Mac", "Workstation")]),
+            "Workstation"
+        );
+
+        // Thai and Vietnamese also resolve without leaking placeholders.
+        store.set_lang("th");
+        let th_mac = store.tr("ui.topBar.mac");
+        assert!(!th_mac.contains("{Mac}"));
+        if cfg!(target_os = "windows") {
+            assert_eq!(th_mac, "PC");
+        }
+
+        store.set_lang("vi");
+        let vi_mac = store.tr("ui.topBar.mac");
+        let vi_risky = store.tr("perm.riskyOnMac");
+        assert!(!vi_mac.contains("{Mac}") && !vi_risky.contains("{mac}"));
+    }
+
+    #[test]
+    fn switching_en_vi_th_resolves_ui_keys_without_raw_key_leaks() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut store = I18nStore::load_from_assets(&assets, "en");
+        let keys = [
+            "ui.sessionRail.title",
+            "ui.activityPanel.title",
+            "ui.topBar.settings",
+            "ui.topBar.replay",
+            "ui.topBar.mac",
+            "ui.cameraToolbar.home",
+            "board.title",
+        ];
+
+        for lang in ["en", "vi", "th"] {
+            store.set_lang(lang);
+            for key in keys {
+                let val = store.tr(key);
+                assert!(
+                    !val.is_empty() && val != key,
+                    "lang={lang} leaked raw key '{key}' -> '{val}'"
+                );
+                assert!(
+                    !val.contains("{mac}") && !val.contains("{Mac}"),
+                    "lang={lang} leaked device token in '{key}' -> '{val}'"
+                );
+            }
+            let sessions = store.tr_count("activity.sessions", 2);
+            assert!(
+                sessions.contains('2') && !sessions.contains("{n}") && sessions != "activity.sessions",
+                "lang={lang} bad tr_count(activity.sessions, 2) -> '{sessions}'"
+            );
+            let picked = store.tr_pick("events.bubble.testok", 0);
+            assert!(
+                !picked.is_empty() && picked != "events.bubble.testok",
+                "lang={lang} bad tr_pick(events.bubble.testok) -> '{picked}'"
+            );
+        }
     }
 }
