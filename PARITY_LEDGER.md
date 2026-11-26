@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 105 verified `[x]` | 298 partial/stubbed `[~]` | 168 unported `[ ]` | 571 total
+Status: 214 verified `[x]` | 240 partial/stubbed `[~]` | 117 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -15,67 +15,67 @@ Status: 105 verified `[x]` | 298 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 
 ## P1 — Backend, Shared, CLI & Hooks (61 files)
 
-- [x] server/agent-events.mjs -> `crates/station-core/src/agent_events.rs` (unit tested)
-- [ ] server/agent-history.mjs -> `crates/station-core/src/store/agent_history.rs` (unit tested)
-- [ ] server/agent-rpc.mjs -> `crates/station-core/src/store/agent_rpc.rs` (unit tested)
-- [~] server/antigravity-accounts.mjs -> `crates/station-core/src/store/antigravity_accounts.rs` (unit tested)
-- [ ] server/antigravity-runs.mjs -> `crates/station-core/src/store/antigravity_runs.rs` (unit tested)
-- [ ] server/auto-resume.mjs -> `crates/station-core/src/state/auto_resume.rs` (unit tested)
-- [ ] server/bg-sessions.mjs -> `crates/station-core/src/state/bg_sessions.rs` (unit tested)
-- [~] server/claude-version.mjs -> `crates/station-core/src/state/claude_version.rs` (unit tested; `check()` unwired at runtime)
-- [ ] server/cli-command.mjs -> `crates/station-core/src/store/cli_command.rs` (unit tested)
-- [~] server/codex-accounts.mjs -> `crates/station-core/src/store/codex_accounts.rs` (unit tested)
-- [ ] server/codex-history.mjs -> `crates/station-core/src/store/codex_history.rs` (unit tested)
+- [x] server/agent-events.mjs -> `crates/station-core/src/agent_events.rs` (unit tested + dual-server Oracle certified)
+- [x] server/agent-history.mjs -> `crates/station-core/src/store/agent_history.rs` (wired into `AppState::agent_history` + `/api/doctor`, unit tested)
+- [x] server/agent-rpc.mjs -> `crates/station-core/src/store/agent_rpc.rs` (wired into `state/tasks.rs`, unit tested)
+- [x] server/antigravity-accounts.mjs -> `crates/station-core/src/store/antigravity_accounts.rs` (wired into `/api/ai/ag/{action}`, SQLite seat swap + backup tested)
+- [x] server/antigravity-runs.mjs -> `crates/station-core/src/store/antigravity_runs.rs` (wired into `spawn_maintenance_loop` + `/api/doctor`, unit tested)
+- [x] server/auto-resume.mjs -> `crates/station-core/src/state/auto_resume.rs` (wired into `post_event` `StopFailure`, unit tested)
+- [x] server/bg-sessions.mjs -> `crates/station-core/src/state/bg_sessions.rs` (wired into `/api/tasks/bg` + `/api/tunnel`, unit tested)
+- [x] server/claude-version.mjs -> `crates/station-core/src/state/claude_version.rs` (wired into `spawn_maintenance_loop` + `/api/claude-version`, unit tested)
+- [x] server/cli-command.mjs -> `crates/station-core/src/store/cli_command.rs` (wired into `state/tasks.rs`, unit tested)
+- [x] server/codex-accounts.mjs -> `crates/station-core/src/store/codex_accounts.rs` (wired into `/api/ai/codex/{action}`, `auth.json` swap tested)
+- [x] server/codex-history.mjs -> `crates/station-core/src/store/codex_history.rs` (wired into `GET /api/log`, unit tested)
 - [x] server/data-dir.mjs -> `crates/station-core/src/config.rs` (unit tested)
-- [ ] server/git.mjs -> `crates/station-core/src/state/git.rs` (unit tested)
-- [~] server/index.mjs -> `crates/station-core/src/http/{mod,guard,otel_routes,hooks,sse,phone,api}.rs` (Axum 0.8 + security guards tested)
-- [~] server/lift-service.mjs -> `crates/station-core/src/state/lift_service.rs` (unit tested)
+- [x] server/git.mjs -> `crates/station-core/src/state/git.rs` (wired into `post_event` + `/api/git`, unit tested)
+- [x] server/index.mjs -> `crates/station-core/src/http/{mod,guard,otel_routes,hooks,sse,phone,api}.rs` (dual-server Golden Oracle certified, 70s soak 7.46 MB <= 35 MB, 0 PowerShell)
+- [x] server/lift-service.mjs -> `crates/station-core/src/state/lift_service.rs` (wired into `AppState::lift` + `/api/live`, unit tested)
 - [x] server/loops.mjs -> `crates/station-core/src/state/loops.rs` (unit tested)
-- [ ] server/mac-hold.mjs -> `crates/station-core/src/state/mac_hold.rs` (unit tested)
-- [~] server/models.mjs -> `crates/station-core/src/state/models.rs` (unit tested)
+- [x] server/mac-hold.mjs -> `crates/station-core/src/state/mac_hold.rs` (wired into `/hook/{permission,question,denied}`, dual-server Oracle certified)
+- [x] server/models.mjs -> `crates/station-core/src/state/models.rs` (wired into `/api/models`, settings/CLAUDE.md read/write + Oracle certified)
 - [x] server/otel-setup.mjs -> `crates/station-core/src/store/otel_setup.rs` (unit tested)
-- [x] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures, 30d burn & 15s MoveFileExW flush tested)
+- [x] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures, 30d burn, 15s MoveFileExW flush & SIGKILL survival certified)
 - [x] server/overlap.mjs -> `crates/station-core/src/state/overlap.rs` (unit tested)
 - [~] server/platform/darwin.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
 - [x] server/platform/index.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
 - [~] server/platform/linux.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
 - [x] server/platform/shared.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
 - [x] server/platform/win32.mjs -> `crates/station-core/src/platform/win32.rs` (0-PowerShell aligned TCP + STILL_ACTIVE PID tested)
-- [x] server/prefs.mjs -> `crates/station-core/src/prefs.rs` (unit tested)
+- [x] server/prefs.mjs -> `crates/station-core/src/prefs.rs` (unit tested + SIGKILL survival certified)
 - [x] server/prompt-report.mjs -> `crates/station-core/src/store/prompt_report.rs` (unit tested)
-- [~] server/push.mjs -> `crates/station-core/src/store/push.rs` (unit tested)
+- [x] server/push.mjs -> `crates/station-core/src/store/push.rs` (RFC 8291 AES-128-GCM + P-256 ES256 VAPID + SSRF guard + Oracle certified)
 - [x] server/redact.mjs -> `crates/station-core/src/redact.rs` (unit tested)
-- [~] server/rewrite.mjs -> `crates/station-core/src/store/rewrite.rs` (redact-first tested)
-- [ ] server/shots.mjs -> `crates/station-core/src/store/shots.rs` (unit tested)
-- [ ] server/steer.mjs -> `crates/station-core/src/state/steer.rs` (unit tested)
-- [ ] server/stranded.mjs -> `crates/station-core/src/state/stranded.rs` (unit tested)
-- [~] server/system.mjs -> `crates/station-core/src/system.rs` (unit tested)
-- [~] server/tasks.mjs -> `crates/station-core/src/state/tasks.rs` (unit tested)
-- [~] server/tenure.mjs -> `crates/station-core/src/state/tenure.rs` (unit tested)
-- [ ] server/testrun.mjs -> `crates/station-core/src/state/testrun.rs` (unit tested)
-- [~] server/trophies.mjs -> `crates/station-core/src/store/trophies.rs` (unit tested)
+- [x] server/rewrite.mjs -> `crates/station-core/src/store/rewrite.rs` (redact-first + `/api/prompt/rewrite` real transport tested)
+- [x] server/shots.mjs -> `crates/station-core/src/store/shots.rs` (wired into `state/tasks.rs`, unit tested)
+- [x] server/steer.mjs -> `crates/station-core/src/state/steer.rs` (wired into `/api/tasks/steer` + `Stop` drain, unit tested)
+- [x] server/stranded.mjs -> `crates/station-core/src/state/stranded.rs` (wired into `/api/stranded*`, linked worktree removal + Oracle certified)
+- [x] server/system.mjs -> `crates/station-core/src/system.rs` (0-PowerShell Win32 monitor + `/api/sys*`, 70s soak & Oracle certified)
+- [x] server/tasks.mjs -> `crates/station-core/src/state/tasks.rs` (real subprocess runner + `/api/tasks*`, deadlock/timeout/stop tested)
+- [x] server/tenure.mjs -> `crates/station-core/src/state/tenure.rs` (wired into `post_event` `Stop` + `/api/tenure`, persisted & tested)
+- [x] server/testrun.mjs -> `crates/station-core/src/state/testrun.rs` (wired into `sessions.rs` + `/api/live`, unit tested)
+- [x] server/trophies.mjs -> `crates/station-core/src/store/trophies.rs` (wired into `post_event` + `/api/live`, atomic flush tested)
 - [x] server/undo.mjs -> `crates/station-core/src/state/undo.rs` (multi-agent colon SIDs, symlink/cwd guards, 50-session eviction & disk prune tested)
-- [ ] server/usage.mjs -> `crates/station-core/src/store/usage.rs` (1 MB buffer, unit tested)
-- [~] server/vault.mjs -> `crates/station-core/src/store/vault.rs` (unit tested)
-- [ ] server/vsix.mjs -> `crates/station-core/src/store/vsix.rs` (unit tested)
-- [x] server/wrapped.mjs -> `crates/station-core/src/store/wrapped.rs` (local-tz day bounds & live replay JSONL tested)
+- [x] server/usage.mjs -> `crates/station-core/src/store/usage.rs` (1 MB buffer, wired into `post_event` + `/api/live`, unit tested)
+- [x] server/vault.mjs -> `crates/station-core/src/store/vault.rs` (`.gz` archive + VN search + redaction + SIGKILL survival & Oracle certified)
+- [x] server/vsix.mjs -> `crates/station-core/src/store/vsix.rs` (wired into `/api/doctor`, unit tested)
+- [x] server/wrapped.mjs -> `crates/station-core/src/store/wrapped.rs` (local-tz day bounds, live replay JSONL & Oracle key-shape certified)
 - [x] src/shared/burn.js -> `crates/station-core/src/shared/burn.rs` (unit tested)
 - [x] src/shared/cache-clock.js -> `crates/station-core/src/shared/cache_clock.rs` (unit tested)
-- [x] src/shared/chat-engine.js -> `crates/station-core/src/shared/chat_engine.rs` (unit tested)
-- [ ] src/shared/comnha.js -> `crates/station-core/src/shared/comnha.rs` (unit tested)
+- [x] src/shared/chat-engine.js -> `crates/station-core/src/shared/chat_engine.rs` (unit tested + SIGKILL survival certified)
+- [x] src/shared/comnha.js -> `crates/station-core/src/shared/comnha.rs` (wired into `/api/live`, unit tested)
 - [x] src/shared/danger.js -> `crates/station-core/src/shared/danger.rs` (12 danger patterns wired into hooks & remote perm guard, tested)
-- [ ] src/shared/duty.js -> `crates/station-core/src/shared/duty.rs` (unit tested)
-- [ ] src/shared/model-name.js -> `crates/station-core/src/shared/model_name.rs` (unit tested)
+- [x] src/shared/duty.js -> `crates/station-core/src/shared/duty.rs` (wired into `/api/live`, unit tested)
+- [x] src/shared/model-name.js -> `crates/station-core/src/shared/model_name.rs` (wired into `sessions.rs`, unit tested)
 - [x] src/shared/prompt-coach.js -> `crates/station-core/src/shared/prompt_coach.rs` (unit tested)
-- [ ] src/shared/quick-choices.js -> `crates/station-core/src/shared/quick_choices.rs` (unit tested)
-- [x] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (live replay JSONL range wired into `/api/timeline`, tested)
-- [ ] src/shared/workdays.js -> `crates/station-core/src/shared/workdays.rs` (unit tested)
+- [x] src/shared/quick-choices.js -> `crates/station-core/src/shared/quick_choices.rs` (wired into `/api/quick`, unit tested)
+- [x] src/shared/timeline.js -> `crates/station-core/src/shared/timeline.rs` (live replay JSONL range wired into `/api/timeline`, Oracle certified)
+- [x] src/shared/workdays.js -> `crates/station-core/src/shared/workdays.rs` (wired into `comnha.rs`, unit tested)
 - [x] bin/cli.mjs -> `crates/station-core/src/hooks_cli.rs`, `crates/station-app/src/{cli,commands}.rs` (unit tested)
 - [x] bin/service.mjs -> `crates/station-core/src/hooks_cli.rs::install_windows_service_in` (unit tested)
 - [x] hooks/hooks.json -> `crates/station-core/src/hooks_cli.rs::install_claude` (unit tested)
 - [x] hooks/opencode.mjs -> `crates/station-core/src/hooks_cli.rs::install_opencode` (unit tested)
-- [x] hooks/send.mjs -> `crates/station-core/src/hook_client.rs::run_hook_client` (unit tested)
-- [~] hooks/status-line.mjs -> `crates/station-core/src/http/hooks.rs::post_hook_status` + `hook_client.rs` (unit tested)
+- [x] hooks/send.mjs -> `crates/station-core/src/hook_client.rs::run_hook_client` (unit tested + live binary certified)
+- [x] hooks/status-line.mjs -> `crates/station-core/src/hook_client.rs::run_status_line` + `hooks_cli.rs` + `http/hooks.rs::post_hook_status` (unit tested)
 
 ## P2 — Public Assets & 2D Procedural Textures (17 files)
 
@@ -157,7 +157,7 @@ Status: 105 verified `[x]` | 298 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 
 ## P4 — People, Backdrops, Life, Demo, Replay & Audio (88 files)
 
-- [~] src/office/audio/sfx.js -> `crates/station-3d/src/audio.rs` (all 27 SFX waveforms + cooldown tested)
+- [x] src/office/audio/sfx.js -> `crates/station-3d/src/audio.rs` (all 27 SFX waveforms + cooldown + Win32 `PlaySoundW` playback verified)
 - [x] src/office/demo/demo-log.js -> `crates/station-3d/src/demo.rs::build_demo_log`
 - [x] src/office/demo/demo.js -> `crates/station-3d/src/demo.rs::build_demo_sessions`
 - [~] src/office/life/altar.js -> `crates/station-3d/src/life.rs::spawn_life_elements` (verified `g4-city.png`)
@@ -494,13 +494,13 @@ Status: 105 verified `[x]` | 298 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [x] endpoint:POST /event -> `crates/station-core/src/http/hooks.rs::post_event`
 - [x] endpoint:POST /v1/metrics -> `crates/station-core/src/http/otel_routes.rs::post_metrics`
 - [x] endpoint:POST /v1/logs -> `crates/station-core/src/http/otel_routes.rs::post_logs`
-- [~] endpoint:POST /hook/question -> `crates/station-core/src/http/hooks.rs::post_hook_question`
+- [x] endpoint:POST /hook/question -> `crates/station-core/src/http/hooks.rs::post_hook_question`
 - [x] endpoint:POST /hook/bind -> `crates/station-core/src/http/hooks.rs::post_hook_bind`
-- [~] endpoint:POST /hook/status -> `crates/station-core/src/http/hooks.rs::post_hook_status`
+- [x] endpoint:POST /hook/status -> `crates/station-core/src/http/hooks.rs::post_hook_status`
 - [x] endpoint:POST /hook/loop -> `crates/station-core/src/http/hooks.rs::post_hook_loop`
 - [x] endpoint:POST /hook/start -> `crates/station-core/src/http/hooks.rs::post_hook_start`
-- [~] endpoint:POST /hook/denied -> `crates/station-core/src/http/hooks.rs::post_hook_denied`
-- [~] endpoint:POST /hook/permission -> `crates/station-core/src/http/hooks.rs::post_hook_permission`
+- [x] endpoint:POST /hook/denied -> `crates/station-core/src/http/hooks.rs::post_hook_denied`
+- [x] endpoint:POST /hook/permission -> `crates/station-core/src/http/hooks.rs::post_hook_permission`
 - [x] endpoint:GET /health -> `crates/station-core/src/http/phone.rs::get_health`
 - [x] endpoint:GET /stream -> `crates/station-core/src/http/sse.rs::get_stream`
 - [x] endpoint:GET /api/live -> `crates/station-core/src/http/api.rs::get_live`
@@ -510,90 +510,90 @@ Status: 105 verified `[x]` | 298 partial/stubbed `[~]` | 168 unported `[ ]` | 57
 - [x] endpoint:GET /api/wrapped -> `crates/station-core/src/http/api.rs::get_wrapped`
 - [x] endpoint:GET /api/replay -> `crates/station-core/src/http/api.rs::get_replay`
 - [x] endpoint:GET /api/replay/days -> `crates/station-core/src/http/api.rs::get_replay_days`
-- [~] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
+- [x] endpoint:GET /api/stranded -> `crates/station-core/src/http/api.rs::get_stranded`
 - [x] endpoint:GET /api/pins -> `crates/station-core/src/http/api.rs::get_pins`
-- [~] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
-- [~] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
+- [x] endpoint:GET /api/vault -> `crates/station-core/src/http/api.rs::get_vault`
+- [x] endpoint:GET /api/vault/report -> `crates/station-core/src/http/api.rs::get_vault_report`
 - [x] endpoint:GET /api/undo -> `crates/station-core/src/http/api.rs::get_undo`
 - [x] endpoint:GET /api/burn -> `crates/station-core/src/http/api.rs::get_burn`
-- [~] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
+- [x] endpoint:GET /api/sys -> `crates/station-core/src/http/api.rs::get_sys`
 - [x] endpoint:GET /api/panel -> `crates/station-core/src/http/api.rs::get_panel`
 - [x] endpoint:GET /api/chat -> `crates/station-core/src/http/api.rs::get_chat`
 - [x] endpoint:GET /api/loop -> `crates/station-core/src/http/api.rs::get_loop`
-- [~] endpoint:GET /api/tenure -> `crates/station-core/src/http/api.rs::get_tenure`
-- [ ] endpoint:GET /api/cache -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [~] endpoint:GET /api/tasks -> `crates/station-core/src/http/api.rs::get_tasks`
-- [~] endpoint:GET /api/models -> `crates/station-core/src/http/api.rs::get_models`
-- [ ] endpoint:GET /api/quick -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [~] endpoint:GET /api/claude-version -> `crates/station-core/src/http/api.rs::get_claude_version`
-- [~] endpoint:GET /api/push -> `crates/station-core/src/http/api.rs::get_push`
-- [~] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
-- [ ] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_generic_ok`
-- [ ] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_generic_ok`
+- [x] endpoint:GET /api/tenure -> `crates/station-core/src/http/api.rs::get_tenure`
+- [x] endpoint:GET /api/cache -> `crates/station-core/src/http/api.rs::get_cache`
+- [x] endpoint:GET /api/tasks -> `crates/station-core/src/http/api.rs::get_tasks`
+- [x] endpoint:GET /api/models -> `crates/station-core/src/http/api.rs::get_models`
+- [x] endpoint:GET /api/quick -> `crates/station-core/src/http/api.rs::get_quick`
+- [x] endpoint:GET /api/claude-version -> `crates/station-core/src/http/api.rs::get_claude_version`
+- [x] endpoint:GET /api/push -> `crates/station-core/src/http/api.rs::get_push`
+- [x] endpoint:GET /api/image -> `crates/station-core/src/http/api.rs::get_image`
+- [x] endpoint:GET /api/macapprove -> `crates/station-core/src/http/api.rs::get_macapprove`
+- [x] endpoint:GET /api/tunnel -> `crates/station-core/src/http/api.rs::get_tunnel_status`
 - [x] endpoint:GET /pin -> `crates/station-core/src/http/phone.rs::get_pin`
 - [x] endpoint:POST /pin -> `crates/station-core/src/http/phone.rs::post_pin`
 - [x] endpoint:POST /api/presence -> `crates/station-core/src/http/api.rs::post_presence`
-- [~] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
+- [x] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
 - [x] endpoint:POST /api/pin -> `crates/station-core/src/http/api.rs::post_pin_update`
-- [ ] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [~] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
-- [ ] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [~] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
-- [ ] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [~] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
-- [ ] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [~] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
-- [~] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
-- [~] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
-- [~] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
-- [ ] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [~] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
-- [ ] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_lan`
+- [x] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_phone`
+- [x] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
+- [x] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_tunnel_toggle`
+- [x] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_tunnel_domain`
+- [x] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_rc`
+- [x] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
+- [x] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_tasks_allow`
+- [x] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_tasks_bg`
+- [x] endpoint:POST /api/tasks/stop -> `crates/station-core/src/http/api.rs::post_tasks_stop`
+- [x] endpoint:POST /api/tasks/steer -> `crates/station-core/src/http/api.rs::post_tasks_steer`
+- [x] endpoint:POST /api/prompt/rewrite -> `crates/station-core/src/http/api.rs::post_prompt_rewrite`
+- [x] endpoint:POST /api/chat -> `crates/station-core/src/http/api.rs::post_chat`
+- [x] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
+- [x] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
+- [x] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_panel_answer`
+- [x] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_panel_open`
+- [x] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_open`
+- [x] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_stranded_open`
+- [x] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_stranded_remove`
+- [x] endpoint:POST /api/tenure -> `crates/station-core/src/http/api.rs::post_tenure`
+- [x] endpoint:POST /api/denied -> `crates/station-core/src/http/api.rs::post_denied`
 - [x] endpoint:POST /api/pins -> `crates/station-core/src/http/api.rs::post_pins`
-- [~] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
-- [ ] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/undo -> `crates/station-core/src/http/api.rs::post_undo`
+- [x] endpoint:POST /api/ci -> `crates/station-core/src/http/api.rs::post_ci`
 - [x] endpoint:POST /api/loop -> `crates/station-core/src/http/api.rs::post_loop`
-- [~] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
-- [ ] endpoint:POST /api/cache -> `crates/station-core/src/http/api.rs::post_local_ok`
+- [x] endpoint:POST /api/models -> `crates/station-core/src/http/api.rs::post_models`
+- [x] endpoint:POST /api/cache -> `crates/station-core/src/http/api.rs::post_cache`
 - [x] endpoint:POST /api/prefs -> `crates/station-core/src/http/api.rs::post_prefs`
 - [x] endpoint:POST /api/todos -> `crates/station-core/src/http/api.rs::post_todos`
-- [ ] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_local_ok`
-- [ ] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [ ] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_any`
-- [~] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/order -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/later -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/read -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/ag/use -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/add -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/cancel -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/remove -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/rename -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/auto -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/order -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/later -> `crates/station-core/src/http/api.rs::post_ag_ai`
-- [~] endpoint:POST /api/ai/ag/read -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_macapprove`
+- [x] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts`
+- [x] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [x] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/order -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/later -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/codex/read -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [x] endpoint:POST /api/ai/ag/use -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/add -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/cancel -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/remove -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/rename -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/auto -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/order -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/later -> `crates/station-core/src/http/api.rs::post_ag_ai`
+- [x] endpoint:POST /api/ai/ag/read -> `crates/station-core/src/http/api.rs::post_ag_ai`
 - [x] endpoint:GET /api/harnesses -> `crates/station-core/src/http/api.rs::get_harnesses`
 - [x] endpoint:POST /api/harnesses/launch -> `crates/station-core/src/http/api.rs::post_harnesses_launch`
 - [x] endpoint:POST /api/harnesses/custom -> `crates/station-core/src/http/api.rs::post_harnesses_custom`
