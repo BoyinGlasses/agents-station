@@ -1,7 +1,12 @@
 use bevy::prelude::*;
+use bevy_egui::egui;
 use serde::{Deserialize, Serialize};
 use station_3d::{BackdropKind, ChibiLook, OfficeLayout};
 use station_launcher::HarnessStatus;
+
+/// Logical `egui::Rect` of the transparent central 3D stage area, updated each frame by the shell.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
+pub struct StageViewportRect(pub Option<egui::Rect>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ViewMode {

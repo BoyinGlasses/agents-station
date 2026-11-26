@@ -5,6 +5,7 @@ pub mod i18n;
 pub mod icons;
 pub mod launcher_dock;
 pub mod lite_view;
+pub mod shell;
 pub mod state;
 pub mod theme;
 
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use i18n::I18nStore;
-pub use state::{ActiveDrawer, UiAction, UiState, ViewMode};
+pub use state::{ActiveDrawer, StageViewportRect, UiAction, UiState, ViewMode};
 
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CaptureUiPass;
@@ -59,6 +60,7 @@ impl Plugin for StationUiPlugin {
             .insert_resource(CachedFontBundle(bundle))
             .insert_resource(i18n)
             .insert_resource(self.initial_state.clone())
+            .init_resource::<StageViewportRect>()
             .init_resource::<station_3d::UiInputCapture>()
             .configure_sets(
                 PostUpdate,
