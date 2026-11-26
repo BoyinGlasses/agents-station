@@ -46,23 +46,58 @@ pub fn draw_traffic_countdown(seconds: u32, color: SignalColor) -> RgbaSurface {
     c.into_surface()
 }
 
-fn draw_qr_block(c: &mut Canvas2d, x: f32, y: f32, s: f32, mut seed: u32) {
-    c.fill_rect(x, y, s, s, hex("#FFFFFF"));
-    let n = 21usize;
-    let cell = s / n as f32;
-    for i in 0..n {
-        for j in 0..n {
-            seed = (seed.wrapping_mul(9301).wrapping_add(49297)) % 233_280;
-            if seed as f32 / 233_280.0 > 0.55 {
-                c.fill_rect(x + i as f32 * cell, y + j as f32 * cell, cell, cell, hex("#111111"));
+const QR_QUIET_ZONE: usize = 4;
+
+/// Renders a real ISO-18004 QR code with a 4-module quiet zone and crisp nearest-neighbor scaling.
+/// Returns `(rgba_bytes, width_px, height_px)`.
+pub fn render_qr_rgba(payload: &str, size_px: u32) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    let code = qrcode::QrCode::new(payload.as_bytes())?;
+    let mods = code.width();
+    let total_mods = mods + QR_QUIET_ZONE * 2;
+    let scale = (size_px as usize / total_mods).max(1);
+    let side = total_mods * scale;
+    let mut rgba = vec![255u8; side * side * 4];
+    let dark = hex("#111111");
+    for my in 0..mods {
+        for mx in 0..mods {
+            if code[(mx, my)] == qrcode::Color::Dark {
+                let x0 = (mx + QR_QUIET_ZONE) * scale;
+                let y0 = (my + QR_QUIET_ZONE) * scale;
+                for dy in 0..scale {
+                    let row = (y0 + dy) * side;
+                    for dx in 0..scale {
+                        let idx = (row + x0 + dx) * 4;
+                        rgba[idx..idx + 4].copy_from_slice(&dark);
+                    }
+                }
             }
         }
     }
-    for (a, b) in [(0, 0), (n - 7, 0), (0, n - 7)] {
-        c.fill_rect(x + a as f32 * cell, y + b as f32 * cell, 7.0 * cell, 7.0 * cell, hex("#111111"));
-        c.fill_rect(x + (a + 1) as f32 * cell, y + (b + 1) as f32 * cell, 5.0 * cell, 5.0 * cell, hex("#FFFFFF"));
-        c.fill_rect(x + (a + 2) as f32 * cell, y + (b + 2) as f32 * cell, 3.0 * cell, 3.0 * cell, hex("#111111"));
+    Ok((rgba, side as u32, side as u32))
+}
+
+/// Draws a real ISO-18004 QR code onto a `Canvas2d` with a 4-module white quiet zone.
+pub fn draw_qr_block(c: &mut Canvas2d, x: f32, y: f32, s: f32, payload: &str) -> anyhow::Result<()> {
+    let code = qrcode::QrCode::new(payload.as_bytes())?;
+    c.fill_rect(x, y, s, s, hex("#FFFFFF"));
+    let mods = code.width();
+    let total_mods = mods + QR_QUIET_ZONE * 2;
+    let cell = s / total_mods as f32;
+    let dark = hex("#111111");
+    for my in 0..mods {
+        for mx in 0..mods {
+            if code[(mx, my)] == qrcode::Color::Dark {
+                c.fill_rect(
+                    x + (mx + QR_QUIET_ZONE) as f32 * cell,
+                    y + (my + QR_QUIET_ZONE) as f32 * cell,
+                    cell,
+                    cell,
+                    dark,
+                );
+            }
+        }
     }
+    Ok(())
 }
 
 /// Exact Oracle `src/office/world/backdrops/street-atm.js` 512×512 Vietcombank ATM atlas.
@@ -144,7 +179,7 @@ pub fn draw_ev_cabinet_atlas(fonts: &mut FontEngine) -> RgbaSurface {
     fonts.draw_text(&mut c, "ĐỔI PIN", 256.0, 130.0, 20.0, hex("#FFFFFF"), TextAlign::Center, None, true, false);
     fonts.draw_text(&mut c, "9.000đ / lần", 256.0, 174.0, 20.0, hex("#16301F"), TextAlign::Center, None, true, false);
     fonts.draw_text(&mut c, "1.5 kWh · 2 phút", 256.0, 208.0, 15.0, hex("#5E6A66"), TextAlign::Center, None, false, false);
-    draw_qr_block(&mut c, 196.0, 324.0, 120.0, 77);
+    let _ = draw_qr_block(&mut c, 196.0, 324.0, 120.0, "https://vgreen.vn/swap/77");
 
     // Side [512, 0, 256, 640]
     c.fill_rect(512.0, 0.0, 256.0, 640.0, green);
@@ -343,7 +378,7 @@ pub fn draw_shop_cell(
     c.stroke_round_rect(836.0, 156.0, 172.0, 172.0, 16.0, 4.0, accent_col);
     fonts.draw_text(&mut c, "OPEN", 922.0, 202.0, 34.0, if accent_luma > 165 { hex("#7A1F12") } else { accent_col }, TextAlign::Center, None, true, false);
     fonts.draw_text(&mut c, "PUSH · ĐẨY", 922.0, 256.0, 18.0, hex("#4A515B"), TextAlign::Center, None, false, false);
-    draw_qr_block(&mut c, 830.0, 346.0, 84.0, 19);
+    let _ = draw_qr_block(&mut c, 830.0, 346.0, 84.0, &format!("https://agents-station.local/shop/{chain_id}"));
 
     // Back wall accent band [0, 432, 1024, 80]
     c.fill_rect(0.0, 432.0, 1024.0, 80.0, accent_col);
@@ -380,5 +415,50 @@ mod tests {
             assert_eq!((led.width, led.height), (64, 40));
             assert!(led.non_background_ratio(hex("#050505")) > 0.1);
         }
+    }
+
+    #[test]
+    fn real_qr_rgba_encodes_iso18004_finder_patterns_and_distinguishes_urls() {
+        let (a_rgba, aw, ah) =
+            render_qr_rgba("http://192.168.1.24:4310/phone", 200).expect("encode lan url");
+        let (b_rgba, bw, bh) =
+            render_qr_rgba("https://demo.trycloudflare.com/phone", 200).expect("encode tunnel url");
+
+        assert_eq!(aw, ah);
+        assert_eq!(bw, bh);
+        assert_eq!(a_rgba.len(), (aw * ah * 4) as usize);
+        assert_eq!(b_rgba.len(), (bw * bh * 4) as usize);
+        assert_ne!(
+            a_rgba, b_rgba,
+            "distinct URLs must produce distinct QR pixel matrices"
+        );
+
+        // Verify quiet zone (top-left pixel is pure white) and dark modules exist
+        assert_eq!(&a_rgba[0..4], &[255, 255, 255, 255], "quiet zone must be white");
+        let dark_pixels = a_rgba.chunks_exact(4).filter(|p| p[0] < 64).count();
+        assert!(
+            dark_pixels > (aw as usize * ah as usize) / 8,
+            "QR must contain substantial dark modules, got {dark_pixels}"
+        );
+
+        // Verify ISO-18004 finder pattern: top-left 7x7 finder box after 4-module quiet zone
+        let code = qrcode::QrCode::new(b"http://192.168.1.24:4310/phone").unwrap();
+        let total_mods = code.width() + 8; // 4-module quiet zone on both sides
+        let scale = (aw as usize) / total_mods;
+        assert!(scale >= 1, "expected integer module scale >= 1");
+        let is_dark = |mx: usize, my: usize| -> bool {
+            let px = mx * scale + scale / 2;
+            let py = my * scale + scale / 2;
+            let idx = (py * aw as usize + px) * 4;
+            a_rgba[idx] < 64
+        };
+        // Top-left finder corners (module 4..11) + white separator + dark center (6..9)
+        assert!(is_dark(4, 4), "finder outer border must be dark");
+        assert!(!is_dark(5, 5), "finder inner white ring must be light");
+        assert!(is_dark(6, 6), "finder 3x3 core must be dark");
+        // Top-right and bottom-left finder cores
+        let tr = 4 + code.width() - 7;
+        assert!(is_dark(tr + 2, 6), "top-right finder core must be dark");
+        assert!(is_dark(6, tr + 2), "bottom-left finder core must be dark");
     }
 }
