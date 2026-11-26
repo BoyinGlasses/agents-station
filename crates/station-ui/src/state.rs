@@ -637,8 +637,25 @@ impl UiState {
     }
 
     pub fn waiting_count(&self) -> usize {
-        self.sessions.iter().filter(|s| s.status == "wait").count()
-            + self.pending_perms.len()
+        let wait_sessions = self.sessions.iter().filter(|s| s.status == "wait").count();
+        let orphan_perms = self
+            .pending_perms
+            .iter()
+            .filter(|p| {
+                !self
+                    .sessions
+                    .iter()
+                    .any(|s| s.id == p.session_id && s.status == "wait")
+            })
+            .count();
+        wait_sessions + orphan_perms
+    }
+
+    pub fn attention_feed_count(&self) -> usize {
+        self.feed
+            .iter()
+            .filter(|e| e.attention || e.level == "err" || e.level == "warn")
+            .count()
     }
 
     pub fn resting_count(&self) -> usize {
@@ -731,10 +748,30 @@ mod tests {
         assert_eq!(st.waiting_count(), 1);
         assert_eq!(st.resting_count(), 1);
 
-        let demo = UiState::with_demo_seed(OfficeLayout::Pro, BackdropKind::City, false);
+        let mut demo = UiState::with_demo_seed(OfficeLayout::Pro, BackdropKind::City, false);
         assert_eq!(demo.working_count(), 2);
-        assert_eq!(demo.waiting_count(), 2);
+        assert_eq!(
+            demo.waiting_count(),
+            1,
+            "pending perm for an already-waiting session must not double-count"
+        );
         assert_eq!(demo.resting_count(), 1);
+        assert_eq!(
+            demo.working_count() + demo.waiting_count() + demo.resting_count(),
+            demo.sessions.len()
+        );
+        assert_eq!(demo.attention_feed_count(), 1);
+
+        // Orphaned pending perm (for a non-wait or unknown session) still increments waiting_count.
+        demo.pending_perms.push(PendingPermCard {
+            id: "perm-orphan".to_owned(),
+            session_id: "sess-claude-1".to_owned(),
+            agent: "claude".to_owned(),
+            tool: "Bash".to_owned(),
+            summary: "echo test".to_owned(),
+            kind: "permission".to_owned(),
+        });
+        assert_eq!(demo.waiting_count(), 2);
 
         assert_eq!(GpuPrefUi::from_pref_str("integrated"), GpuPrefUi::Integrated);
         assert_eq!(GpuPrefUi::Discrete.as_pref_str(), "discrete");

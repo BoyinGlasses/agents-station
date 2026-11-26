@@ -360,12 +360,7 @@ fn draw_feature_card(
 }
 
 fn draw_attention_segment(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
-    let att_count = state
-        .feed
-        .iter()
-        .filter(|e| e.attention || e.level == "err" || e.level == "warn")
-        .count()
-        + state.pending_perms.len();
+    let att_count = state.attention_feed_count();
 
     egui::Frame::NONE
         .fill(CARD)
