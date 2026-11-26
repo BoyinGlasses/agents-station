@@ -5447,9 +5447,12 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "chrono",
+ "image",
  "serde",
+ "serde_json",
  "station-canvas2d",
  "station-core",
+ "tempfile",
  "windows-sys 0.59.0",
 ]
 
