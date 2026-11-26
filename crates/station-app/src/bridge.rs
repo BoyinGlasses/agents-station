@@ -21,7 +21,7 @@ use station_ui::labels3d::{
     project_world_to_stage,
 };
 use station_ui::state::{
-    BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, PhotoSize,
+    BurnSnapshot, CacheWarmth, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, PhotoSize,
     PlaceCardAction, PlaceCardInfo, PlaceCardRow, ReplayRange, SessionCard, SysSnapshot, UiAction,
     normalize_feed_kind, normalize_status,
 };
@@ -425,13 +425,49 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
             } else {
                 0.0
             };
+            let dir = s
+                .get("cwd")
+                .or_else(|| s.get("dir"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let git_branch = s
+                .get("git")
+                .and_then(|g| g.get("branch"))
+                .and_then(Value::as_str)
+                .filter(|b| !b.is_empty())
+                .map(str::to_owned);
+            let git_dirty = s
+                .get("git")
+                .and_then(|g| g.get("dirty"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize;
+            let cache_warmth = s
+                .get("cache")
+                .and_then(|c| serde_json::from_value::<station_core::shared::cache_clock::CacheState>(c.clone()).ok())
+                .map(|c| {
+                    let view = station_core::shared::cache_clock::cache_clock(Some(&c), now_ms());
+                    match view.state {
+                        "warm" => CacheWarmth::Warm(((view.left as f64 / 60_000.0).round() as u32).max(1)),
+                        "cold" => CacheWarmth::Cold,
+                        _ => CacheWarmth::Unknown,
+                    }
+                })
+                .unwrap_or(CacheWarmth::Unknown);
             Some(SessionCard {
                 id,
                 agent,
                 project,
+                dir,
+                git_branch,
+                git_dirty,
+                cache_warmth,
+                todos_done: 0,
+                todos_total: 0,
                 status,
                 model,
                 last_prompt,
+                last_reply: String::new(),
                 tool,
                 tool_kind,
                 desk,
@@ -2139,13 +2175,37 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
                 } else {
                     0.0
                 };
+                let cache_warmth = match station_core::shared::cache_clock::cache_clock(
+                    s.cache.as_ref(),
+                    now_ms(),
+                ) {
+                    view if view.state == "warm" => {
+                        CacheWarmth::Warm(((view.left as f64 / 60_000.0).round() as u32).max(1))
+                    }
+                    view if view.state == "cold" => CacheWarmth::Cold,
+                    _ => CacheWarmth::Unknown,
+                };
+                let (git_branch, git_dirty) = match &s.git {
+                    Some(g) => (
+                        (!g.branch.is_empty()).then(|| g.branch.clone()),
+                        g.dirty,
+                    ),
+                    None => (None, 0),
+                };
                 SessionCard {
                     id: s.id.clone(),
                     agent: s.agent.clone(),
                     project: s.name.clone(),
+                    dir: s.cwd.clone(),
+                    git_branch,
+                    git_dirty,
+                    cache_warmth,
+                    todos_done: 0,
+                    todos_total: 0,
                     status: normalize_status(&s.status).to_owned(),
                     model: s.model.clone().unwrap_or_else(|| "default".to_owned()),
                     last_prompt: s.last_prompt.clone().unwrap_or_default(),
+                    last_reply: String::new(),
                     tool: s.last.as_ref().map(|t| t.label.clone()),
                     tool_kind: s.last.as_ref().map(|t| t.kind.clone()),
                     desk: s.desk,
@@ -2879,7 +2939,7 @@ fn process_ui_actions(
     mut commands: Commands,
     mut ui: ResMut<UiState>,
     mut i18n: ResMut<I18nStore>,
-    bridge: Res<LiveServerBridge>,
+    mut bridge: ResMut<LiveServerBridge>,
     mut world_params: WorldActionParams,
     mut tray_params: TrayActionParams,
     mut aux: AuxActionParams,
@@ -3012,9 +3072,21 @@ fn process_ui_actions(
             UiAction::SetViewMode(mode @ (ViewMode::Lite2D | ViewMode::PanelCompact)) => {
                 ui.view_mode = mode;
                 pending_op = PendingWorldOp::UnloadToLite;
+                for mut win in &mut tray_params.windows {
+                    if mode == ViewMode::PanelCompact {
+                        win.resolution.set(420.0, 640.0);
+                    } else if win.width() < 600.0 {
+                        win.resolution.set(1280.0, 720.0);
+                    }
+                }
             }
             UiAction::SetViewMode(ViewMode::Mode3D) => {
                 ui.view_mode = ViewMode::Mode3D;
+                for mut win in &mut tray_params.windows {
+                    if win.width() < 600.0 {
+                        win.resolution.set(1280.0, 720.0);
+                    }
+                }
                 pending_op = match pending_op {
                     PendingWorldOp::Rebuild3d => PendingWorldOp::Rebuild3d,
                     PendingWorldOp::SwapBackdrop(bk) if has_world => {
@@ -3698,6 +3770,16 @@ fn process_ui_actions(
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Rustle);
+                }
+            }
+            UiAction::RefreshTelemetry => {
+                bridge.sys_refresh_due = true;
+                let sync_dur = bridge.sync_timer.duration();
+                bridge.sync_timer.set_elapsed(sync_dur);
+                if let BridgeBackend::InProcess { harness_poller, .. }
+                | BridgeBackend::BindError { harness_poller, .. } = &bridge.backend
+                {
+                    harness_poller.trigger_refresh();
                 }
             }
         }
