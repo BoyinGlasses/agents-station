@@ -185,6 +185,12 @@ fn perm_verb_text(p: &PendingPermCard, i18n: &I18nStore) -> String {
     }
 }
 
+/// Returns `true` for rich non-simple prompt/alert kinds (`ask`, `plan`, `denied`, `stuck`, `ci`)
+/// that have dedicated interactive cards and must not be rendered or accepted via simple Allow/Deny.
+pub fn is_rich_perm_kind(kind: &str) -> bool {
+    matches!(kind, "ask" | "plan" | "denied" | "stuck" | "ci")
+}
+
 /// Renders rich non-simple prompt/alert cards (`ask`, `plan`, `denied`, `stuck`, `ci`) in static
 /// flow inside 2D Lite so they never float over the 2D header tabs or duplicate inline session
 /// approval buttons (matches Oracle `lite.css:23` `.v2-perms .perm-stack { position: static }`).
@@ -192,7 +198,7 @@ pub fn draw_rich_perm_cards_inline(ui: &mut egui::Ui, state: &mut UiState, i18n:
     let rich: Vec<PendingPermCard> = state
         .pending_perms
         .iter()
-        .filter(|p| matches!(p.kind.as_str(), "ask" | "plan" | "denied" | "stuck" | "ci"))
+        .filter(|p| is_rich_perm_kind(&p.kind))
         .cloned()
         .collect();
     for p in rich {

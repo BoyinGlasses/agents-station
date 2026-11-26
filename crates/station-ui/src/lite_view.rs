@@ -205,11 +205,18 @@ fn step_selection(ordered_ids: &[String], current: Option<&str>, delta: isize) -
 
 fn pick_target_perm_id(state: &UiState) -> Option<String> {
     if let Some(sel) = state.selected_session.as_deref()
-        && let Some(p) = state.pending_perms.iter().find(|p| p.session_id == sel)
+        && let Some(p) = state
+            .pending_perms
+            .iter()
+            .find(|p| p.session_id == sel && !crate::shell::stage_overlays::is_rich_perm_kind(&p.kind))
     {
         return Some(p.id.clone());
     }
-    state.pending_perms.first().map(|p| p.id.clone())
+    state
+        .pending_perms
+        .iter()
+        .find(|p| !crate::shell::stage_overlays::is_rich_perm_kind(&p.kind))
+        .map(|p| p.id.clone())
 }
 
 fn agent_accent(agent: &str) -> Color32 {
@@ -332,7 +339,7 @@ pub fn render_lite_stage_center(ui: &mut egui::Ui, state: &mut UiState, i18n: &I
             let orphan_perms: Vec<&PendingPermCard> = perms_snapshot
                 .iter()
                 .filter(|p| {
-                    !matches!(p.kind.as_str(), "ask" | "plan" | "denied" | "stuck" | "ci")
+                    !crate::shell::stage_overlays::is_rich_perm_kind(&p.kind)
                         && !sessions_snapshot.iter().any(|s| s.id == p.session_id)
                 })
                 .collect();
@@ -368,7 +375,10 @@ pub fn render_lite_stage_center(ui: &mut egui::Ui, state: &mut UiState, i18n: &I
                 ui.add_space(5.0);
 
                 for sess in rows {
-                    let matching_perm = perms_snapshot.iter().find(|p| p.session_id == sess.id);
+                    let matching_perm = perms_snapshot.iter().find(|p| {
+                        p.session_id == sess.id
+                            && !crate::shell::stage_overlays::is_rich_perm_kind(&p.kind)
+                    });
                     draw_lite_session_card(ui, sess, sec_key, matching_perm, state, i18n);
                     ui.add_space(7.0);
                 }
@@ -1560,5 +1570,100 @@ mod tests {
             ActiveDrawer::None,
             "Enter inside SessionRail search MUST NOT trigger Lite OpenSession on the same frame"
         );
+    }
+
+    #[test]
+    fn rich_perm_kinds_excluded_from_simple_inline_buttons_and_yn_shortcuts() {
+        use std::path::PathBuf;
+
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0));
+
+        // Every rich kind (ask/plan/denied/stuck/ci) must be excluded from Y/N target picking
+        // AND must not render duplicate inline `Allow (Y)` / `Deny (N)` buttons on the session card,
+        // while still rendering its rich card via `draw_rich_perm_cards_inline`.
+        for kind in ["ask", "plan", "denied", "stuck", "ci"] {
+            let mut state = UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            );
+            state.view_mode = ViewMode::Lite2D;
+            state.selected_session = Some("sess-codex-2".to_owned());
+            state.pending_perms = vec![PendingPermCard {
+                id: format!("rich-{kind}"),
+                session_id: "sess-codex-2".to_owned(),
+                agent: "codex".to_owned(),
+                tool: "AskUserQuestion".to_owned(),
+                summary: format!("Rich summary {kind}"),
+                kind: kind.to_owned(),
+                tool_input: Some(serde_json::json!({
+                    "questions": [{
+                        "header": "Mode",
+                        "question": "Which mode?",
+                        "options": [{ "label": "Fast", "description": "Quick run" }]
+                    }],
+                    "plan": "Step 1: Verify rich card",
+                    "ci": { "branch": "main", "workflow": "ci", "failed": ["test"] }
+                })),
+                ..Default::default()
+            }];
+
+            assert_eq!(
+                pick_target_perm_id(&state),
+                None,
+                "kind={kind} must be excluded from Y/N pick_target_perm_id"
+            );
+
+            let ctx = egui::Context::default();
+            crate::install_egui_fonts(&ctx, &bundle);
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let _ = ctx.run(raw.clone(), |_| {});
+            let out = ctx.run(raw, |ctx| {
+                let _ = crate::shell::draw_shell(ctx, &mut state, &i18n);
+            });
+            assert!(
+                find_text_center(&out.shapes, "Allow (Y)").is_none(),
+                "kind={kind} must NOT render duplicate inline Allow (Y) button in 2D Lite"
+            );
+            assert!(
+                find_text_center(&out.shapes, "Deny (N)").is_none(),
+                "kind={kind} must NOT render duplicate inline Deny (N) button in 2D Lite"
+            );
+            if kind == "ask" {
+                assert!(
+                    find_text_center(&out.shapes, "Which mode?").is_some(),
+                    "ask rich card must still render via draw_rich_perm_cards_inline"
+                );
+            }
+        }
+
+        // When both a rich card and a simple perm exist, Y/N picks the simple perm only.
+        let mut mixed = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        mixed.selected_session = Some("sess-codex-2".to_owned());
+        mixed.pending_perms.insert(
+            0,
+            PendingPermCard {
+                id: "rich-ask-first".to_owned(),
+                session_id: "sess-codex-2".to_owned(),
+                agent: "codex".to_owned(),
+                tool: "AskUserQuestion".to_owned(),
+                summary: "Question".to_owned(),
+                kind: "ask".to_owned(),
+                ..Default::default()
+            },
+        );
+        let picked = pick_target_perm_id(&mixed);
+        assert_ne!(picked.as_deref(), Some("rich-ask-first"));
+        assert!(picked.is_some(), "simple perm must still be picked");
     }
 }
