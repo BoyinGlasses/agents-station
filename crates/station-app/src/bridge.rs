@@ -58,6 +58,7 @@ enum RefreshKind {
     Live,
     Harnesses,
     Chat,
+    All,
 }
 
 struct RemoteActionCmd {
@@ -880,11 +881,13 @@ async fn fetch_remote_telemetry(
         }
     };
 
-    let sys_v = get_json("/api/sys").await;
-    let burn_today = get_json("/api/burn?range=today").await;
-    let burn_30d = get_json("/api/burn?range=30d").await;
-    let chat_v = get_json("/api/chat").await;
-    let vault_v = get_json("/api/vault?limit=30").await;
+    let (sys_v, burn_today, burn_30d, chat_v, vault_v) = tokio::join!(
+        get_json("/api/sys"),
+        get_json("/api/burn?range=today"),
+        get_json("/api/burn?range=30d"),
+        get_json("/api/chat"),
+        get_json("/api/vault?limit=30"),
+    );
 
     let mut snap = snap_lock.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(v) = sys_v {
@@ -941,49 +944,53 @@ fn spawn_attached_sse_client(
                                 let Some(cmd) = maybe_cmd else {
                                     break;
                                 };
-                                let resp = client_a
-                                    .post(format!("{base_a}{}", cmd.path))
-                                    .header("host", &host_a)
-                                    .timeout(Duration::from_secs(3))
-                                    .json(&cmd.body)
-                                    .send()
-                                    .await;
-                                let ok = match resp {
-                                    Ok(r) if r.status().is_success() => {
-                                        if let Some(label) = cmd.launch_toast_label.as_deref() {
-                                            match r.json::<Value>().await {
-                                                Ok(val) => {
-                                                    let (launch_ok, notice) =
-                                                        interpret_remote_launch_response(label, &val);
-                                                    let _ = toast_a.try_send(notice);
-                                                    launch_ok
+                                let ok = if cmd.path.is_empty() {
+                                    true
+                                } else {
+                                    let resp = client_a
+                                        .post(format!("{base_a}{}", cmd.path))
+                                        .header("host", &host_a)
+                                        .timeout(Duration::from_secs(3))
+                                        .json(&cmd.body)
+                                        .send()
+                                        .await;
+                                    match resp {
+                                        Ok(r) if r.status().is_success() => {
+                                            if let Some(label) = cmd.launch_toast_label.as_deref() {
+                                                match r.json::<Value>().await {
+                                                    Ok(val) => {
+                                                        let (launch_ok, notice) =
+                                                            interpret_remote_launch_response(label, &val);
+                                                        let _ = toast_a.try_send(notice);
+                                                        launch_ok
+                                                    }
+                                                    Err(err) => {
+                                                        let _ = toast_a.try_send(launch_error_toast(
+                                                            label,
+                                                            &err.to_string(),
+                                                        ));
+                                                        false
+                                                    }
                                                 }
-                                                Err(err) => {
-                                                    let _ = toast_a.try_send(launch_error_toast(
-                                                        label,
-                                                        &err.to_string(),
-                                                    ));
-                                                    false
-                                                }
+                                            } else {
+                                                true
                                             }
-                                        } else {
-                                            true
                                         }
-                                    }
-                                    Ok(r) => {
-                                        if let Some(label) = cmd.launch_toast_label.as_deref() {
-                                            let _ = toast_a.try_send(launch_error_toast(
-                                                label,
-                                                &format!("HTTP {}", r.status().as_u16()),
-                                            ));
+                                        Ok(r) => {
+                                            if let Some(label) = cmd.launch_toast_label.as_deref() {
+                                                let _ = toast_a.try_send(launch_error_toast(
+                                                    label,
+                                                    &format!("HTTP {}", r.status().as_u16()),
+                                                ));
+                                            }
+                                            false
                                         }
-                                        false
-                                    }
-                                    Err(err) => {
-                                        if let Some(label) = cmd.launch_toast_label.as_deref() {
-                                            let _ = toast_a.try_send(launch_error_toast(label, &err.to_string()));
+                                        Err(err) => {
+                                            if let Some(label) = cmd.launch_toast_label.as_deref() {
+                                                let _ = toast_a.try_send(launch_error_toast(label, &err.to_string()));
+                                            }
+                                            false
                                         }
-                                        false
                                     }
                                 };
                                 if ok {
@@ -996,6 +1003,11 @@ fn spawn_attached_sse_client(
                                         }
                                         RefreshKind::Chat => {
                                             fetch_remote_chat(&client_a, &base_a, &host_a, &snap_a).await;
+                                        }
+                                        RefreshKind::All => {
+                                            fetch_remote_live(&client_a, &base_a, &host_a, &snap_a).await;
+                                            fetch_remote_telemetry(&client_a, &base_a, &host_a, &snap_a).await;
+                                            fetch_remote_harnesses(&client_a, &base_a, &host_a, &snap_a).await;
                                         }
                                         RefreshKind::None => {}
                                     }
@@ -3776,10 +3788,19 @@ fn process_ui_actions(
                 bridge.sys_refresh_due = true;
                 let sync_dur = bridge.sync_timer.duration();
                 bridge.sync_timer.set_elapsed(sync_dur);
-                if let BridgeBackend::InProcess { harness_poller, .. }
-                | BridgeBackend::BindError { harness_poller, .. } = &bridge.backend
-                {
-                    harness_poller.trigger_refresh();
+                match &bridge.backend {
+                    BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let _ = action_tx.try_send(RemoteActionCmd {
+                            path: "",
+                            body: Value::Null,
+                            refresh: RefreshKind::All,
+                            launch_toast_label: None,
+                        });
+                    }
+                    BridgeBackend::InProcess { harness_poller, .. }
+                    | BridgeBackend::BindError { harness_poller, .. } => {
+                        harness_poller.trigger_refresh();
+                    }
                 }
             }
         }
@@ -5717,6 +5738,101 @@ mod tests {
         assert!(
             saw_chat,
             "AttachedHttp PostGroupChat must immediately refresh /api/chat into UiState.chat"
+        );
+
+        drop(app);
+        let _ = handle.shutdown.send(true);
+        drop(rt);
+    }
+
+    #[test]
+    fn attached_http_refresh_telemetry_immediately_fetches_live_and_telemetry_snapshot() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let tmp_srv = tempfile::tempdir().unwrap();
+        let srv_state = Arc::new(AppState::new(tmp_srv.path().to_path_buf(), None).unwrap());
+        let srv_ref = srv_state.clone();
+        let handle = rt
+            .block_on(start_http_server(srv_state, "127.0.0.1", 0))
+            .unwrap();
+        let port = handle.addr.port();
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let tmp_client = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp_client.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".to_owned(),
+            port,
+            true,
+            true,
+        );
+        assert_eq!(bridge.mode(), BridgeMode::AttachedHttp);
+
+        let mut app = App::new();
+        app.insert_resource(ClearColor::default())
+            .insert_resource(Time::<()>::default())
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(bridge)
+            .add_event::<AppExit>()
+            .add_systems(Update, (process_ui_actions, sync_live_state_to_ui).chain());
+
+        // Mutate daemon state directly (without broadcasting SSE) so only an explicit
+        // RefreshTelemetry fetch can pick it up immediately.
+        {
+            let mut office = srv_ref.office.lock().unwrap();
+            office.sessions.insert(
+                "sess-refresh-1".to_owned(),
+                station_core::state::sessions::SessionRecord {
+                    id: "sess-refresh-1".to_owned(),
+                    agent: "claude".to_owned(),
+                    name: "refresh-proj".to_owned(),
+                    cwd: "D:\\refresh".to_owned(),
+                    status: "work".to_owned(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::RefreshTelemetry);
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut saw_session = false;
+        let mut saw_sys = false;
+        while Instant::now() < deadline {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(600));
+            app.update();
+            let ui = app.world().resource::<UiState>();
+            if ui.sessions.iter().any(|s| s.id == "sess-refresh-1") {
+                saw_session = true;
+            }
+            if ui.sys.mem_total_gb > 0.0 {
+                saw_sys = true;
+            }
+            if saw_session && saw_sys {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            saw_session,
+            "AttachedHttp RefreshTelemetry must immediately pull updated /api/live sessions"
+        );
+        assert!(
+            saw_sys,
+            "AttachedHttp RefreshTelemetry must immediately pull /api/sys telemetry"
         );
 
         drop(app);
