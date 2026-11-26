@@ -20,11 +20,11 @@ const PRESETS: [(CameraPreset, IconKind, &str); 4] = [
 ];
 
 fn toolbar_bg() -> Color32 {
-    Color32::from_rgba_unmultiplied(0x0F, 0x14, 0x1C, 214)
+    Color32::from_rgba_unmultiplied(0x0F, 0x14, 0x1C, 238)
 }
 
 fn track_bg() -> Color32 {
-    Color32::from_rgba_unmultiplied(255, 255, 255, 12)
+    Color32::from_rgba_unmultiplied(255, 255, 255, 18)
 }
 
 fn hover_bg() -> Color32 {
@@ -62,6 +62,7 @@ pub fn draw_camera_toolbar(
 
     egui::Area::new(egui::Id::new("station_stage_camera_toolbar"))
         .order(egui::Order::Middle)
+        .fade_in(false)
         .pivot(egui::Align2::CENTER_BOTTOM)
         .fixed_pos(pos2(center_x, bottom_y))
         .show(ctx, |ui| {

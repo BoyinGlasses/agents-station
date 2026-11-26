@@ -74,6 +74,7 @@ pub fn draw_perm_stack(
 
     egui::Area::new(egui::Id::new("station_stage_perm_banners"))
         .order(egui::Order::Middle)
+        .fade_in(false)
         .fixed_pos(pos2(left_x, top_y))
         .show(ctx, |ui| {
             ui.set_width(card_w);
@@ -166,6 +167,7 @@ pub fn draw_first_person_hud(
     let help_max_w = (stage_rect.width() - 160.0).max(200.0);
     egui::Area::new(egui::Id::new("station_fp_help"))
         .order(egui::Order::Middle)
+        .fade_in(false)
         .pivot(egui::Align2::CENTER_TOP)
         .fixed_pos(pos2(stage_rect.center().x, stage_rect.top() + 14.0))
         .show(ctx, |ui| {
@@ -341,6 +343,7 @@ pub fn draw_replay_bar(
     let bar_w = 820.0_f32.min(stage_rect.width() - 24.0);
     egui::Area::new(egui::Id::new("station_stage_replay_bar"))
         .order(egui::Order::Middle)
+        .fade_in(false)
         .pivot(egui::Align2::CENTER_BOTTOM)
         .fixed_pos(pos2(stage_rect.center().x, stage_rect.bottom() - 84.0))
         .show(ctx, |ui| {
@@ -540,6 +543,7 @@ pub fn draw_photo_bar(
 
     egui::Area::new(egui::Id::new("station_stage_photo_bar"))
         .order(egui::Order::Foreground)
+        .fade_in(false)
         .pivot(egui::Align2::CENTER_BOTTOM)
         .fixed_pos(pos2(stage_rect.center().x, stage_rect.bottom() - 18.0))
         .show(ctx, |ui| {
@@ -774,6 +778,7 @@ pub fn draw_place_card(
 
     egui::Area::new(egui::Id::new("station_stage_place_card"))
         .order(egui::Order::Middle)
+        .fade_in(false)
         .fixed_pos(pos2(stage_rect.left() + 14.0, stage_rect.top() + 14.0))
         .show(ctx, |ui| {
             ui.set_width(card_w);

@@ -221,6 +221,93 @@ pub fn estimate_label_size(kind: ProjectedLabelKind, text: &str, subtitle: Optio
     }
 }
 
+fn measure_label_size(ctx: &egui::Context, label: &ProjectedLabel) -> Vec2 {
+    ctx.fonts(|f| match label.kind {
+        ProjectedLabelKind::ZoneChip => {
+            let title_w = f
+                .layout_no_wrap(
+                    label.text.to_uppercase(),
+                    FontId::new(9.5, FontFamily::Name(crate::theme::FONT_BOLD.into())),
+                    Color32::WHITE,
+                )
+                .size()
+                .x;
+            let live_w = label
+                .subtitle
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    5.0 + f
+                        .layout_no_wrap(
+                            format!("· {s}"),
+                            FontId::new(9.5, FontFamily::Proportional),
+                            GREEN,
+                        )
+                        .size()
+                        .x
+                })
+                .unwrap_or(0.0);
+            vec2((26.0 + title_w + live_w + 11.0).clamp(64.0, 260.0), 25.0)
+        }
+        ProjectedLabelKind::WorkerTag => {
+            let name_w = f
+                .layout_no_wrap(
+                    label.text.clone(),
+                    FontId::new(11.5, FontFamily::Name(crate::theme::FONT_BOLD.into())),
+                    INK,
+                )
+                .size()
+                .x;
+            let sub_w = label
+                .subtitle
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    6.0 + f
+                        .layout_no_wrap(s.to_owned(), FontId::new(9.5, FontFamily::Proportional), MUTED)
+                        .size()
+                        .x
+                })
+                .unwrap_or(0.0);
+            vec2((21.0 + name_w + sub_w + 11.0).clamp(72.0, 240.0), 26.0)
+        }
+        ProjectedLabelKind::SubagentTag => {
+            let name_w = f
+                .layout_no_wrap(
+                    label.text.clone(),
+                    FontId::new(10.5, FontFamily::Name(crate::theme::FONT_BOLD.into())),
+                    INK,
+                )
+                .size()
+                .x;
+            vec2((21.0 + name_w + 10.0).clamp(60.0, 200.0), 22.0)
+        }
+        ProjectedLabelKind::SpeechBubble => {
+            let g = f.layout(
+                label.text.clone(),
+                FontId::new(11.0, FontFamily::Proportional),
+                INK,
+                172.0,
+            );
+            vec2(
+                (32.0 + g.size().x + 12.0).clamp(90.0, 220.0),
+                (g.size().y + 12.0).clamp(30.0, 46.0),
+            )
+        }
+        ProjectedLabelKind::PermissionBadge => {
+            let w = f
+                .layout_no_wrap(
+                    label.text.clone(),
+                    FontId::new(11.0, FontFamily::Name(crate::theme::FONT_BOLD.into())),
+                    label.accent,
+                )
+                .size()
+                .x;
+            vec2((26.0 + w + 12.0).clamp(100.0, 250.0), 28.0)
+        }
+    })
+}
+
 /// Renders decluttered 3D projected labels strictly clipped inside `stage_rect` so pills NEVER
 /// spill over `SessionRail`, `TopBar`, or `ActivityPanel`.
 pub fn draw_projected_labels(
@@ -253,9 +340,13 @@ pub fn draw_projected_labels(
             }
         })
         .cloned()
+        .map(|mut l| {
+            l.size = measure_label_size(ctx, &l);
+            l
+        })
         .collect();
 
-    // Keep clear of the bottom camera toolbar band (64px) so labels don't collide with buttons.
+    // Keep clear of the bottom camera toolbar band (68px) so labels don't collide with buttons.
     let usable_bounds = Rect::from_min_max(
         pos2(stage_rect.left(), stage_rect.top() + 8.0),
         pos2(stage_rect.right(), (stage_rect.bottom() - 68.0).max(stage_rect.top() + 32.0)),
@@ -266,7 +357,8 @@ pub fn draw_projected_labels(
     }
 
     egui::Area::new(egui::Id::new("station_stage_labels3d"))
-        .order(egui::Order::Background)
+        .order(egui::Order::Middle)
+        .fade_in(false)
         .fixed_pos(stage_rect.min)
         .show(ctx, |ui| {
             ui.set_clip_rect(stage_rect);
@@ -322,14 +414,14 @@ fn paint_zone_chip(
     hovered: bool,
 ) {
     let bg = if hovered {
-        Color32::from_rgba_unmultiplied(0x14, 0x1B, 0x26, 240)
+        Color32::from_rgba_unmultiplied(0x14, 0x1B, 0x26, 248)
     } else {
-        Color32::from_rgba_unmultiplied(0x0E, 0x13, 0x1B, 178)
+        Color32::from_rgba_unmultiplied(0x0E, 0x13, 0x1B, 224)
     };
     let border = if hovered {
-        Color32::from_rgba_unmultiplied(0xEF, 0x8A, 0x5F, 180)
+        Color32::from_rgba_unmultiplied(0xEF, 0x8A, 0x5F, 210)
     } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 28)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 42)
     };
     let radius = CornerRadius::same((rect.height() * 0.5).round() as u8);
     painter.rect_filled(rect, radius, bg);
@@ -379,7 +471,7 @@ fn paint_worker_tag(
     hovered: bool,
     is_sub: bool,
 ) {
-    let bg = Color32::from_rgba_unmultiplied(0x0E, 0x13, 0x1B, 224);
+    let bg = Color32::from_rgba_unmultiplied(0x0E, 0x13, 0x1B, 242);
     let border = if hovered {
         INK
     } else if label.status.as_deref() == Some("wait") {
@@ -431,7 +523,7 @@ fn paint_speech_bubble(
     rect: Rect,
     label: &ProjectedLabel,
 ) {
-    let bg = Color32::from_rgba_unmultiplied(0x0E, 0x13, 0x1B, 236);
+    let bg = Color32::from_rgba_unmultiplied(0x0E, 0x13, 0x1B, 245);
     let border = label.accent;
     let cr = CornerRadius::same(10);
     painter.rect_filled(rect, cr, bg);
