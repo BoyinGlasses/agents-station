@@ -7,7 +7,7 @@ use crate::entrance::LIFT_FRONT;
 use crate::layout::LayoutSpec;
 use crate::nav::{NavGraph, StationKind};
 use crate::palette::{WorldPalette, spawn_box};
-use crate::people::{ChibiScale, NavWalker};
+use crate::people::{ChibiScale, LiveSessionWorker, NavWalker};
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -41,6 +41,7 @@ pub struct OfficeStaffNpc {
     pub home_pos: Vec3,
     pub home_yaw: f32,
     pub home_sit: bool,
+    pub home_desk: Option<usize>,
     pub round_step: usize,
     pub dwell_secs: f32,
     pub active_job: bool,
@@ -110,6 +111,7 @@ fn spawn_staff_npc(
     home_pos: Vec3,
     home_yaw: f32,
     home_sit: bool,
+    home_desk: Option<usize>,
     anim: WorkerAnim,
     phase: f32,
 ) -> Entity {
@@ -131,6 +133,7 @@ fn spawn_staff_npc(
             home_pos,
             home_yaw,
             home_sit,
+            home_desk,
             round_step: 0,
             dwell_secs: 0.0,
             active_job: false,
@@ -196,6 +199,7 @@ pub fn spawn_office_staff_cast(
             Vec3::new(-5.4, 0.0, -6.75),
             0.0,
             true,
+            None,
             WorkerAnim::Work,
             0.5,
         );
@@ -221,6 +225,7 @@ pub fn spawn_office_staff_cast(
             Vec3::new(6.05, 0.0, 7.3),
             -FRAC_PI_2,
             true,
+            None,
             WorkerAnim::Work,
             1.1,
         );
@@ -244,6 +249,7 @@ pub fn spawn_office_staff_cast(
             Vec3::new(6.11, 0.0, 6.15),
             -FRAC_PI_2,
             true,
+            None,
             WorkerAnim::Work,
             1.8,
         );
@@ -267,6 +273,7 @@ pub fn spawn_office_staff_cast(
             Vec3::new(-4.9, 0.0, 1.05),
             0.0,
             true,
+            None,
             WorkerAnim::Work,
             2.3,
         );
@@ -296,6 +303,7 @@ pub fn spawn_office_staff_cast(
         cleaner_home,
         -FRAC_PI_2,
         false,
+        None,
         WorkerAnim::Rest,
         2.9,
     );
@@ -324,6 +332,7 @@ pub fn spawn_office_staff_cast(
         courier_home,
         FRAC_PI_2,
         false,
+        None,
         WorkerAnim::Rest,
         3.4,
     );
@@ -352,6 +361,7 @@ pub fn spawn_office_staff_cast(
         guard_home,
         -FRAC_PI_2,
         false,
+        None,
         WorkerAnim::Rest,
         4.0,
     );
@@ -385,6 +395,7 @@ pub fn spawn_office_staff_cast(
         intern_pos,
         intern_yaw,
         true,
+        Some(intern_desk_idx),
         WorkerAnim::Work,
         4.6,
     );
@@ -424,6 +435,7 @@ pub fn spawn_office_staff_cast(
         fw_pos,
         fw_yaw,
         true,
+        Some(fw_desk_idx),
         WorkerAnim::Rest,
         5.2,
     );
@@ -456,11 +468,13 @@ pub fn step_staff_roles_system(
     chibi_cache: Option<Res<ChibiMeshCache>>,
     mut palette: Option<ResMut<WorldPalette>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    live_workers_q: Query<&LiveSessionWorker, Without<OfficeStaffNpc>>,
     mut staff_q: Query<(
         Entity,
         &mut OfficeStaffNpc,
         &mut ChibiWorker,
         &mut NavWalker,
+        &mut Visibility,
         Option<&mut InternTenure>,
         Option<&ActivePropEntity>,
     )>,
@@ -480,9 +494,25 @@ pub fn step_staff_roles_system(
     let pro = nav.layout().is_pro();
     state.guard_night_shift = !(390..1320).contains(&m);
 
-    for (ent, mut npc, chibi, mut walker, intern_tenure, active_prop) in &mut staff_q {
-        if npc.dwell_secs > 0.0 {
+    for (ent, mut npc, chibi, mut walker, mut vis, intern_tenure, active_prop) in &mut staff_q {
+        // Dwell only counts down after the NPC finishes walking to its destination.
+        if !walker.is_walking() && npc.dwell_secs > 0.0 {
             npc.dwell_secs = (npc.dwell_secs - dt).max(0.0);
+        }
+
+        // Prevent Intern / FarewellGuest from ever sharing a chair with an active LiveSessionWorker.
+        if let Some(desk_idx) = npc.home_desk {
+            let desk_taken = live_workers_q.iter().any(|w| w.desk_index == desk_idx);
+            let departed = npc.role == StaffRole::FarewellGuest
+                && state.farewell_stage == FarewellStage::Leaving
+                && npc.round_step == 2;
+            if desk_taken && !npc.active_job && !walker.is_walking() {
+                *vis = Visibility::Hidden;
+                sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
+                continue;
+            } else if !departed {
+                *vis = Visibility::Visible;
+            }
         }
 
         let mut desired_prop: Option<PropKind> = None;
@@ -566,6 +596,7 @@ pub fn step_staff_roles_system(
             }
 
             StaffRole::Hr => {
+                // round_step: 0 = idle, 1 = birthday cake, 2 = newcomer escort
                 if state.hr_birthday_active {
                     if !npc.active_job && !walker.is_walking() {
                         let meet = nav.station_spot_for(StationKind::Meeting, 1);
@@ -578,23 +609,28 @@ pub fn step_staff_roles_system(
                             WorkerAnim::Rest,
                         );
                         npc.active_job = true;
+                        npc.round_step = 1;
                     }
                     desired_prop = Some(PropKind::Cake);
-                } else if let Some(desk_idx) = state.hr_newcomer_desk.take() {
-                    if let Some(ds) = nav.desk_spot(desk_idx) {
-                        walker.set_destination(
-                            nav,
-                            chibi.base_pos,
-                            ds.pos,
-                            ds.face,
-                            false,
-                            WorkerAnim::Wait,
-                        );
-                        npc.active_job = true;
-                        npc.dwell_secs = 1.8;
-                        state.hr_clock_in_count += 1;
+                } else if !walker.is_walking() && !npc.active_job && npc.dwell_secs <= 0.0 {
+                    if let Some(desk_idx) = state.hr_newcomer_desk.take() {
+                        if let Some(ds) = nav.desk_spot(desk_idx) {
+                            walker.set_destination(
+                                nav,
+                                chibi.base_pos,
+                                ds.pos,
+                                ds.face,
+                                false,
+                                WorkerAnim::Wait,
+                            );
+                            npc.active_job = true;
+                            npc.round_step = 2;
+                            npc.dwell_secs = 1.8;
+                            state.hr_clock_in_count += 1;
+                        }
+                    } else {
+                        npc.round_step = 0;
                     }
-                    desired_prop = Some(PropKind::Folder);
                 } else if npc.active_job && !walker.is_walking() && npc.dwell_secs <= 0.0 {
                     walker.set_destination(
                         nav,
@@ -605,6 +641,10 @@ pub fn step_staff_roles_system(
                         WorkerAnim::Work,
                     );
                     npc.active_job = false;
+                }
+
+                if npc.round_step == 2 && (npc.active_job || walker.is_walking()) {
+                    desired_prop = Some(PropKind::Folder);
                 }
             }
 
@@ -814,8 +854,14 @@ pub fn step_staff_roles_system(
             }
 
             StaffRole::FarewellGuest => match state.farewell_stage {
-                FarewellStage::Idle => {}
+                FarewellStage::Idle => {
+                    if npc.round_step == 2 {
+                        npc.round_step = 0;
+                    }
+                }
                 FarewellStage::Packing => {
+                    npc.round_step = 0;
+                    *vis = Visibility::Visible;
                     desired_prop = Some(PropKind::HomeBox);
                     if !walker.is_walking() && !npc.active_job {
                         let meet = nav.station_spot_for(StationKind::Meeting, 2);
@@ -831,11 +877,13 @@ pub fn step_staff_roles_system(
                     }
                 }
                 FarewellStage::MeetingCard => {
+                    npc.round_step = 0;
+                    *vis = Visibility::Visible;
                     desired_prop = Some(PropKind::Cake);
                 }
                 FarewellStage::Leaving => {
-                    desired_prop = Some(PropKind::HomeBox);
-                    if !walker.is_walking() {
+                    // round_step: 0 = dispatch to door, 1 = walking to door, 2 = departed cleanly
+                    if npc.round_step == 0 {
                         let door = nav.door_in();
                         walker.set_destination(
                             nav,
@@ -845,9 +893,26 @@ pub fn step_staff_roles_system(
                             false,
                             WorkerAnim::Rest,
                         );
+                        npc.round_step = 1;
+                        npc.active_job = true;
+                        desired_prop = Some(PropKind::HomeBox);
+                    } else if npc.round_step == 1 {
+                        if walker.is_walking() {
+                            desired_prop = Some(PropKind::HomeBox);
+                        } else {
+                            npc.round_step = 2;
+                            npc.active_job = false;
+                            *vis = Visibility::Hidden;
+                            desired_prop = None;
+                        }
+                    } else {
+                        *vis = Visibility::Hidden;
+                        desired_prop = None;
                     }
                 }
                 FarewellStage::Unpacking => {
+                    npc.round_step = 0;
+                    *vis = Visibility::Visible;
                     desired_prop = Some(PropKind::HomeBox);
                     if !walker.is_walking() {
                         walker.set_destination(
@@ -884,7 +949,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    fn build_pro_world() -> World {
+    fn build_office_world(layout: OfficeLayout) -> World {
         let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
         let mut world = World::new();
         world.insert_resource(Assets::<Mesh>::default());
@@ -907,7 +972,7 @@ mod tests {
                             &mut imgs,
                             fonts,
                             &assets_dir,
-                            OfficeLayout::Pro,
+                            layout,
                             BackdropKind::City,
                             ChibiLook::Pixar,
                             false,
@@ -918,6 +983,18 @@ mod tests {
         });
         world.flush();
         world
+    }
+
+    fn build_pro_world() -> World {
+        build_office_world(OfficeLayout::Pro)
+    }
+
+    fn tick_staff(world: &mut World, sched: &mut Schedule, dt_ms: u64) {
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(dt_ms));
+        sched.run(world);
+        world.flush();
     }
 
     #[test]
@@ -1104,5 +1181,200 @@ mod tests {
         );
         let intern = world.query::<&InternTenure>().single(&world).unwrap();
         assert!(intern.permanent);
+    }
+
+    #[test]
+    fn dwell_holds_during_walk_and_hr_retains_folder_through_full_newcomer_escort() {
+        let mut world = build_pro_world();
+        let mut sched = Schedule::default();
+        sched.add_systems((step_staff_roles_system, step_nav_walkers_system).chain());
+
+        world.resource_mut::<StaffCastState>().hr_newcomer_desk = Some(0);
+        tick_staff(&mut world, &mut sched, 100);
+
+        // Frame 1..N while walking: HR must keep Folder AND dwell_secs must NOT decrement while walking.
+        let mut saw_walking_frame_2 = false;
+        let mut arrived = false;
+        for step in 0..200 {
+            tick_staff(&mut world, &mut sched, 100);
+            let (npc, walker, prop) = world
+                .query::<(&OfficeStaffNpc, &NavWalker, Option<&ActivePropEntity>)>()
+                .iter(&world)
+                .find(|(n, _, _)| n.role == StaffRole::Hr)
+                .expect("HR entity");
+            if walker.is_walking() {
+                if step >= 1 {
+                    saw_walking_frame_2 = true;
+                }
+                assert_eq!(
+                    prop.map(|p| p.kind),
+                    Some(PropKind::Folder),
+                    "HR must retain PropKind::Folder throughout newcomer escort walk (step {step})"
+                );
+                assert!(
+                    (npc.dwell_secs - 1.8).abs() < 1e-4,
+                    "dwell_secs must hold at 1.8 while walking, got {}",
+                    npc.dwell_secs
+                );
+            } else {
+                arrived = true;
+                assert!(
+                    npc.dwell_secs > 1.0,
+                    "after arrival HR should begin dwelling, got {}",
+                    npc.dwell_secs
+                );
+                assert_eq!(
+                    prop.map(|p| p.kind),
+                    Some(PropKind::Folder),
+                    "HR must retain PropKind::Folder during newcomer dwell"
+                );
+                break;
+            }
+        }
+        assert!(saw_walking_frame_2, "HR walk should span multiple frames");
+        assert!(arrived, "HR must reach newcomer desk");
+
+        // Advance past 1.8s dwell + return walk home -> HR must stow Folder once seated back home.
+        for _ in 0..220 {
+            tick_staff(&mut world, &mut sched, 100);
+        }
+        let (npc, walker, prop) = world
+            .query::<(&OfficeStaffNpc, &NavWalker, Option<&ActivePropEntity>)>()
+            .iter(&world)
+            .find(|(n, _, _)| n.role == StaffRole::Hr)
+            .expect("HR entity");
+        assert!(!walker.is_walking(), "HR must return home");
+        assert!(!npc.active_job, "HR job must complete");
+        assert_eq!(prop.map(|p| p.kind), None, "HR must stow Folder once back at desk");
+    }
+
+    #[test]
+    fn farewell_leaving_reaches_door_and_stops_without_repathing_in_pro_and_cozy() {
+        for layout in [OfficeLayout::Pro, OfficeLayout::Cozy] {
+            let mut world = build_office_world(layout);
+            let mut sched = Schedule::default();
+            sched.add_systems((step_staff_roles_system, step_nav_walkers_system).chain());
+
+            world.resource_mut::<StaffCastState>().farewell_stage = FarewellStage::Leaving;
+            tick_staff(&mut world, &mut sched, 100);
+
+            let mut departed = false;
+            for _ in 0..260 {
+                tick_staff(&mut world, &mut sched, 100);
+                let (npc, walker, vis, prop) = world
+                    .query::<(
+                        &OfficeStaffNpc,
+                        &NavWalker,
+                        &Visibility,
+                        Option<&ActivePropEntity>,
+                    )>()
+                    .iter(&world)
+                    .find(|(n, _, _, _)| n.role == StaffRole::FarewellGuest)
+                    .expect("FarewellGuest");
+                if npc.round_step == 2 {
+                    departed = true;
+                    assert!(!walker.is_walking());
+                    assert_eq!(*vis, Visibility::Hidden);
+                    assert_eq!(prop.map(|p| p.kind), None);
+                    break;
+                }
+            }
+            assert!(departed, "{layout:?}: FarewellGuest must arrive at door and depart");
+
+            // Step 10 more frames while stage remains Leaving: must NEVER re-path or pace.
+            let door_pos = world
+                .query::<(&OfficeStaffNpc, &ChibiWorker)>()
+                .iter(&world)
+                .find(|(n, _)| n.role == StaffRole::FarewellGuest)
+                .unwrap()
+                .1
+                .base_pos;
+            for _ in 0..10 {
+                tick_staff(&mut world, &mut sched, 100);
+                let (npc, chibi, walker, vis) = world
+                    .query::<(&OfficeStaffNpc, &ChibiWorker, &NavWalker, &Visibility)>()
+                    .iter(&world)
+                    .find(|(n, _, _, _)| n.role == StaffRole::FarewellGuest)
+                    .unwrap();
+                assert_eq!(npc.round_step, 2);
+                assert!(!walker.is_walking(), "{layout:?}: FarewellGuest must NOT repath after arriving");
+                assert_eq!(*vis, Visibility::Hidden);
+                assert!(
+                    chibi.base_pos.distance(door_pos) < 1e-4,
+                    "{layout:?}: FarewellGuest paced away from door"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn intern_and_farewell_yield_desks_with_zero_overlap_against_live_workers() {
+        use crate::people::{LiveWorkerSpec, sync_live_workers_in_world};
+
+        let mut world = build_pro_world();
+        let mut sched = Schedule::default();
+        sched.add_systems((step_staff_roles_system, step_nav_walkers_system).chain());
+
+        // Spawn live workers explicitly targeting desks 6 and 7 (Intern & FarewellGuest homes).
+        let specs = vec![
+            LiveWorkerSpec {
+                session_id: "sess-d6".to_owned(),
+                agent: "claude".to_owned(),
+                name: "d6".to_owned(),
+                status: "work".to_owned(),
+                desk_hint: 6,
+                tool_kind: None,
+                tool_label: None,
+                git_dirty: 0,
+                subagents: Vec::new(),
+            },
+            LiveWorkerSpec {
+                session_id: "sess-d7".to_owned(),
+                agent: "codex".to_owned(),
+                name: "d7".to_owned(),
+                status: "work".to_owned(),
+                desk_hint: 7,
+                tool_kind: None,
+                tool_label: None,
+                git_dirty: 0,
+                subagents: Vec::new(),
+            },
+        ];
+        sync_live_workers_in_world(&mut world, &specs, ChibiLook::Pixar);
+        tick_staff(&mut world, &mut sched, 50);
+
+        let occupied: Vec<usize> = world
+            .query::<&LiveSessionWorker>()
+            .iter(&world)
+            .map(|w| w.desk_index)
+            .collect();
+        assert!(occupied.contains(&6) && occupied.contains(&7));
+
+        for (npc, vis) in world.query::<(&OfficeStaffNpc, &Visibility)>().iter(&world) {
+            if let Some(d) = npc.home_desk
+                && occupied.contains(&d)
+            {
+                assert_eq!(
+                    *vis,
+                    Visibility::Hidden,
+                    "{:?} must yield desk {d} when occupied by a LiveSessionWorker",
+                    npc.role
+                );
+            }
+        }
+
+        // Clear live sessions -> Intern and FarewellGuest restore Visibility::Visible on their freed desks.
+        sync_live_workers_in_world(&mut world, &[], ChibiLook::Pixar);
+        tick_staff(&mut world, &mut sched, 50);
+        for (npc, vis) in world.query::<(&OfficeStaffNpc, &Visibility)>().iter(&world) {
+            if matches!(npc.role, StaffRole::Intern | StaffRole::FarewellGuest) {
+                assert_eq!(
+                    *vis,
+                    Visibility::Visible,
+                    "{:?} must become visible again once its desk is free",
+                    npc.role
+                );
+            }
+        }
     }
 }

@@ -4996,6 +4996,7 @@ struct LiveSync3dParams<'w, 's> {
     layout: Option<Res<'w, station_3d::OfficeLayout>>,
     scratch: bevy::prelude::Local<'s, station_3d::LiveSyncScratch>,
     specs_buf: bevy::prelude::Local<'s, Vec<station_3d::LiveWorkerSpec>>,
+    last_sync_sig: bevy::prelude::Local<'s, Option<(u64, station_3d::OfficeLayout, station_3d::ChibiLook)>>,
     preview_q: Query<'w, 's, Entity, With<station_3d::people::PreviewCastWorker>>,
     workers_q: Query<
         'w,
@@ -5039,6 +5040,44 @@ struct LiveSync3dParams<'w, 's> {
         ),
         Without<station_3d::chibi::StatusHalo>,
     >,
+}
+
+fn fingerprint_sessions_for_3d(sessions: &[SessionCard]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x100000001b3);
+    };
+    mix(&(sessions.len() as u64).to_le_bytes());
+    for s in sessions {
+        mix(s.id.as_bytes());
+        mix(s.agent.as_bytes());
+        mix(s.project.as_bytes());
+        mix(s.status.as_bytes());
+        mix(&(s.desk as u64).to_le_bytes());
+        if let Some(k) = s.tool_kind.as_deref() {
+            mix(k.as_bytes());
+        } else {
+            mix(&[]);
+        }
+        if let Some(t) = s.tool.as_deref() {
+            mix(t.as_bytes());
+        } else {
+            mix(&[]);
+        }
+        mix(&(s.git_dirty as u64).to_le_bytes());
+        mix(&(s.subagents.len() as u64).to_le_bytes());
+        for sub in &s.subagents {
+            mix(sub.id.as_bytes());
+            mix(sub.label.as_bytes());
+            mix(sub.doing.as_bytes());
+        }
+    }
+    h
 }
 
 fn sync_live_sessions_to_3d(
@@ -5096,6 +5135,13 @@ fn sync_live_sessions_to_3d(
         return;
     };
     let lay = sync3d.layout.map(|l| *l).unwrap_or(ui.layout);
+    let sig = (fingerprint_sessions_for_3d(&ui.sessions), lay, ui.chibi_look);
+    let world_fresh = chibi_cache.is_added() || !sync3d.preview_q.is_empty();
+    if !world_fresh && *sync3d.last_sync_sig == Some(sig) {
+        return;
+    }
+    *sync3d.last_sync_sig = Some(sig);
+
     let fallback_nav;
     let nav_ref: &station_3d::NavGraph = match sync3d.nav.as_deref() {
         Some(n) => n,

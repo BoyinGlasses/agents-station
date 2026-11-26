@@ -447,7 +447,7 @@ pub fn sync_live_workers_and_screens(
     materials: &mut Assets<StandardMaterial>,
     screen_mats: &ScreenMaterials,
     nav: &NavGraph,
-    layout: OfficeLayout,
+    _layout: OfficeLayout,
     look: ChibiLook,
     specs: &[LiveWorkerSpec],
     scratch: &mut LiveSyncScratch,
@@ -474,8 +474,7 @@ pub fn sync_live_workers_and_screens(
         commands.entity(ent).try_despawn();
     }
 
-    let layout_spec = LayoutSpec::for_layout(layout);
-    let desk_count = layout_spec.desks.len().max(1);
+    let desk_count = nav.desk_count().max(1);
 
     // 2. Assign each live session to a deterministic, non-colliding desk slot (reusing scratch buffers).
     scratch.assigned_desks.clear();
@@ -504,7 +503,10 @@ pub fn sync_live_workers_and_screens(
         let preferred = s.desk_hint % desk_count;
         let desk_idx = if scratch.assigned_desks.insert(preferred) {
             preferred
-        } else if let Some(free) = (0..desk_count).find(|d| !scratch.assigned_desks.contains(d)) {
+        } else if let Some(free) = (0..desk_count)
+            .find(|&d| d != 6 && d != 7 && !scratch.assigned_desks.contains(&d))
+            .or_else(|| (0..desk_count).find(|d| !scratch.assigned_desks.contains(d)))
+        {
             scratch.assigned_desks.insert(free);
             free
         } else {
@@ -612,11 +614,19 @@ pub fn sync_live_workers_and_screens(
             set_active_prop(commands, chibi_cache, palette, materials, ent, desired_prop);
         }
 
-        live.status = spec.status.clone();
-        live.tool_label = spec.tool_label.clone();
-        live.name = spec.name.clone();
+        if live.status != spec.status {
+            live.status.clone_from(&spec.status);
+        }
+        if live.tool_label != spec.tool_label {
+            live.tool_label.clone_from(&spec.tool_label);
+        }
+        if live.name != spec.name {
+            live.name.clone_from(&spec.name);
+        }
         live.git_dirty = spec.git_dirty;
-        chibi.name = spec.name.clone();
+        if chibi.name != spec.name {
+            chibi.name.clone_from(&spec.name);
+        }
 
         let desk_spot_pos = nav
             .desk_spot(target_desk)
@@ -708,8 +718,12 @@ pub fn sync_live_workers_and_screens(
             if let Some(&(spec_idx, _)) = scratch.desired_indices.get(parent_sid)
                 && let Some(sub_spec) = specs[spec_idx].subagents.get(sub_idx)
             {
-                sub.label = sub_spec.label.clone();
-                sub.doing = sub_spec.doing.clone();
+                if sub.label != sub_spec.label {
+                    sub.label.clone_from(&sub_spec.label);
+                }
+                if sub.doing != sub_spec.doing {
+                    sub.doing.clone_from(&sub_spec.doing);
+                }
             }
         } else {
             scratch.despawned_subs.insert(ent);
@@ -737,7 +751,7 @@ pub fn sync_live_workers_and_screens(
             continue;
         };
         for (sub_idx, sub_spec) in spec.subagents.iter().enumerate() {
-            if scratch.existing_sub_ids.contains(sub_spec.id.as_str()) {
+            if !scratch.existing_sub_ids.insert(sub_spec.id.clone()) {
                 continue;
             }
             let seed = stable_seed(&sub_spec.id);
@@ -1027,9 +1041,13 @@ pub fn animate_sleep_z_system(
     };
     let z_mat = pal.emissive(mats, "#DCE8FF", 1.15);
     for (ent, w) in &workers {
+        if active_count >= 16 {
+            break;
+        }
         if w.anim != WorkerAnim::Sleep {
             continue;
         }
+        active_count += 1;
         commands.spawn((
             WorldEntity,
             SleepZFloater {
@@ -1484,5 +1502,100 @@ mod tests {
             assert!(!nav.crosses_wall(prev, wp), "farewell path crossed a wall!");
             prev = wp;
         }
+    }
+
+    #[test]
+    fn duplicate_subagent_ids_dedupe_and_sleep_z_floaters_enforce_hard_cap() {
+        use crate::backdrops::BackdropKind;
+        use crate::{SharedFontEngine, spawn_full_office_world};
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+        world.insert_resource(Time::<()>::default());
+
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Hq,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        // 1. Duplicate subagent IDs in a single batch must spawn exactly 1 SubagentWorker.
+        let dup_spec = LiveWorkerSpec {
+            session_id: "sess-dup".to_owned(),
+            agent: "claude".to_owned(),
+            name: "dup".to_owned(),
+            status: "work".to_owned(),
+            desk_hint: 0,
+            tool_kind: None,
+            tool_label: None,
+            git_dirty: 0,
+            subagents: vec![
+                SubagentSpec {
+                    id: "sub-same".to_owned(),
+                    label: "A".to_owned(),
+                    doing: "x".to_owned(),
+                },
+                SubagentSpec {
+                    id: "sub-same".to_owned(),
+                    label: "B".to_owned(),
+                    doing: "y".to_owned(),
+                },
+            ],
+        };
+        sync_live_workers_in_world(&mut world, &[dup_spec], ChibiLook::Pixar);
+        assert_eq!(world.query::<&SubagentWorker>().iter(&world).count(), 1);
+        assert_eq!(world.query::<&TeamLineDash>().iter(&world).count(), TEAM_LINE_DASHES);
+
+        // 2. Even with 24 sleeping workers, animate_sleep_z_system must cap SleepZFloater at <= 16.
+        for i in 0..24 {
+            world.spawn((
+                WorldEntity,
+                ChibiWorker {
+                    name: format!("sleeper-{i}"),
+                    agent: "claude".to_owned(),
+                    anim: WorkerAnim::Sleep,
+                    base_pos: Vec3::new(i as f32 * 0.5, 0.0, 0.0),
+                    base_yaw: 0.0,
+                    phase: 0.0,
+                    patrol_target: None,
+                    sitting: true,
+                },
+            ));
+        }
+        let mut sched = Schedule::default();
+        sched.add_systems(animate_sleep_z_system);
+        for _ in 0..20 {
+            world
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(100));
+            sched.run(&mut world);
+            world.flush();
+        }
+        let z_count = world.query::<&SleepZFloater>().iter(&world).count();
+        assert!(z_count > 0 && z_count <= 16, "SleepZFloater count must stay in 1..=16, got {z_count}");
     }
 }
