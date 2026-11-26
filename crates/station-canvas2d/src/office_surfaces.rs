@@ -1153,6 +1153,66 @@ pub fn draw_blanket_plaid() -> RgbaSurface {
     c.into_surface()
 }
 
+/// Exact Oracle `billiards.js:18-34` numbered/striped billiards ball skin (`64×32`, 8 KB each).
+pub fn draw_billiards_ball(n: u8, fonts: &mut FontEngine) -> RgbaSurface {
+    const COLORS: [&str; 9] = [
+        "#F7F4EA", "#F2C230", "#2350A8", "#D2302A", "#5B2D8E", "#E9762B", "#1F7A45", "#7A1F2B",
+        "#15161A",
+    ];
+    let n = n.min(15);
+    let stripe = n > 8;
+    let c_hex = COLORS[if stripe { (n - 8) as usize } else { n as usize }];
+    let mut c = Canvas2d::new(64, 32);
+    c.fill(hex(if stripe { "#F7F4EA" } else { c_hex }));
+    if stripe {
+        c.fill_rect(0.0, 8.5, 64.0, 15.0, hex(c_hex));
+    }
+    if n == 0 {
+        for x in [16.0_f32, 48.0] {
+            c.fill_circle(x, 16.0, 2.0, hex("#C8302A"));
+        }
+        return c.into_surface();
+    }
+    let label = n.to_string();
+    for x in [16.0_f32, 48.0] {
+        c.fill_ellipse(x, 16.0, 6.0, 7.0, hex("#FBFAF4"));
+        let sz = if n > 9 { 8.0 } else { 9.5 };
+        fonts.draw_text(
+            &mut c,
+            &label,
+            x,
+            16.0 - sz * 0.55,
+            sz,
+            hex("#15161A"),
+            TextAlign::Center,
+            None,
+            true,
+            false,
+        );
+    }
+    c.into_surface()
+}
+
+/// Exact Oracle `billiards.js:36-40` green felt cloth (`128×256`) with fine grain + head/foot spots.
+pub fn draw_billiards_felt() -> RgbaSurface {
+    let mut c = Canvas2d::new(128, 256);
+    c.fill(hex("#2C7A4E"));
+    let mut s = 77_313u32;
+    for _ in 0..1400 {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let x = ((s >> 16) % 128) as f32;
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let y = ((s >> 16) % 256) as f32;
+        let light = (s & 1) == 0;
+        let col = if light { [255, 255, 255, 11] } else { [0, 0, 0, 11] };
+        c.fill_rect(x, y, 2.0, 2.0, col);
+    }
+    for y in [64.0_f32, 192.0] {
+        c.fill_circle(64.0, y, 2.0, [255, 255, 255, 190]);
+    }
+    c.into_surface()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,5 +1318,7 @@ mod tests {
         assert_eq!((draw_cozy_sun_poster(&mut f).width, draw_cozy_sun_poster(&mut f).height), (256, 320));
         assert_eq!((draw_globe_map().width, draw_globe_map().height), (256, 128));
         assert_eq!((draw_blanket_plaid().width, draw_blanket_plaid().height), (128, 128));
+        assert_eq!((draw_billiards_ball(0, &mut f).width, draw_billiards_ball(15, &mut f).height), (64, 32));
+        assert_eq!((draw_billiards_felt().width, draw_billiards_felt().height), (128, 256));
     }
 }
