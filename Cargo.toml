@@ -27,7 +27,7 @@ flate2 = "1.1"
 futures-util = "0.3"
 hkdf = "0.12"
 hmac = "0.12"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 rand = "0.9"
