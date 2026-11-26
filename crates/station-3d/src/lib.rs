@@ -38,6 +38,7 @@ pub use cast::{
 pub use chibi::{ChibiLook, ChibiRig, OutfitKind, solve_two_bone_ik};
 pub use chibi_meshes::{ChibiMeshCache, HairStyle};
 pub use chibi_props::{ActivePropEntity, HeldPropRoot, PropKind, set_active_prop};
+pub use demo::{DemoEmittedEvent, DemoSimState, LiveDemoSession, demo_battery};
 pub use desks::{DeskBedding, DeskKit, DeskMess, DeskScreen, LaptopLid};
 pub use entrance::{ElevatorDoors, Stairwell};
 pub use furniture::{DeployRocket, NeonSign, RocketLaunchQueue, ServerRackTelemetry, WallClock};
@@ -45,7 +46,15 @@ pub use hq_wing::{DeptSign, HqWing, SprintBoard};
 pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
+pub use life_systems::{
+    AltarState, DrillPhase, FireDrillState, IncidentState, LiftServicePhase, LiftServiceState,
+    MAX_PHOTOSTRIPS, MAX_TEST_ROWS, MAX_TROPHY_SLOTS, NapState, PhotostripSlot, PhotostripsState,
+    PostboxState, PostmanStage, QuotaBoardState, RAIN_POOL_CAP, TestRunStatus, TestsBoardState,
+    TrophiesShelfState, TrophyEntry, WeatherVisualState, WorkdayKind, YourTurnState,
+    sync_photostrips_from_shots_dir,
+};
 pub use lights::LightingSyncSet;
+pub use replay::{ReplayEvent, ReplaySessionSnap, ReplayState, ReplayWorldSnapshot, TimelineSpan};
 pub use nav::{NavGraph, NavSpot, StationKind};
 pub use palette::{WorldEntity, WorldPalette};
 pub use people::{
@@ -121,6 +130,7 @@ fn register_office_runtime(
         .insert_resource(backdrop)
         .insert_resource(lights::LightingState::new(night))
         .insert_resource(life::OfficeLifeState::default())
+        .insert_resource(demo::DemoSimState::default())
         .insert_resource(replay::ReplayState::default())
         .insert_resource(audio::SfxEngine::new(true))
         .insert_resource(interact::PlaceCardState::default())
@@ -138,6 +148,7 @@ fn register_office_runtime(
         .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
         .add_event::<interact::WorkerSelected>();
+    life_systems::register_life_resources(app);
     interact::register_picking_observers(app);
     app.add_systems(
             Update,
@@ -160,7 +171,16 @@ fn register_office_runtime(
                 people::update_team_lines_system.after(people::step_nav_walkers_system),
                 people::animate_sleep_z_system,
                 backdrops::animate_backdrop_traffic_system,
-                life::update_rain_system,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                life_systems::update_altar_system,
+                life_systems::update_drill_and_lift_system,
+                life_systems::update_seasons_and_weather_system,
+                life_systems::update_workflow_life_system,
+                life_systems::update_nap_system,
             ),
         )
         .add_systems(
@@ -286,6 +306,7 @@ pub fn unload_full_office_world(
     commands.insert_resource(cast::OfficeGamesState::default());
     commands.insert_resource(cast::MealsBreaksState::default());
     commands.insert_resource(cast::StreetOutingsState::default());
+    life_systems::reset_life_resources(commands);
 }
 
 pub struct OfficeWorldPlugin {
@@ -1096,5 +1117,98 @@ mod tests {
         assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
         assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
         assert_eq!(world.resource::<Assets<Image>>().len(), 0);
+    }
+
+    #[test]
+    fn full_world_with_all_life_systems_unloads_zero_leaks_across_cozy_pro_and_hq() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+
+        for layout in [OfficeLayout::Cozy, OfficeLayout::Pro, OfficeLayout::Hq] {
+            world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                    world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                        world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                            let fonts = shared_fonts.get_or_init();
+                            let mut cmds = world.commands();
+                            spawn_full_office_world(
+                                &mut cmds,
+                                &mut meshes,
+                                &mut mats,
+                                &mut imgs,
+                                fonts,
+                                &assets_dir,
+                                layout,
+                                BackdropKind::City,
+                                ChibiLook::Pixar,
+                                false,
+                            );
+                        });
+                    });
+                });
+            });
+            world.flush();
+
+            // Verify rain pool, postbox, tests board, and photostrips spawned safely for every layout
+            assert_eq!(
+                world.query::<&life::RainDrop>().iter(&world).count(),
+                life_systems::RAIN_POOL_CAP,
+                "layout {layout:?} must have capped raindrop pool"
+            );
+            assert!(
+                world.query::<&life_systems::workflow_life::TestLampLed>().iter(&world).count()
+                    == life_systems::MAX_TEST_ROWS
+            );
+            assert!(
+                world.query::<&life_systems::PhotostripSlot>().iter(&world).count()
+                    == life_systems::MAX_PHOTOSTRIPS
+            );
+
+            // Unload and verify 0 WorldEntity, 0 meshes, 0 materials, 0 images
+            let ents: Vec<Entity> = world
+                .query_filtered::<Entity, With<WorldEntity>>()
+                .iter(&world)
+                .collect();
+            world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                    world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                        let mut pal = world.remove_resource::<WorldPalette>();
+                        let mut ba = world.remove_resource::<BackdropAssets>();
+                        let ibl = world.remove_resource::<OfficeIbl>();
+                        let cm = world.remove_resource::<ChibiMeshCache>();
+                        let mut cmds = world.commands();
+                        unload_full_office_world(
+                            &mut cmds,
+                            ents,
+                            pal.as_mut(),
+                            ba.as_mut(),
+                            ibl.as_ref(),
+                            cm.as_ref(),
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                        );
+                    });
+                });
+            });
+            world.flush();
+
+            assert_eq!(
+                world.query_filtered::<Entity, With<WorldEntity>>().iter(&world).count(),
+                0,
+                "layout {layout:?} leaked WorldEntity"
+            );
+            assert_eq!(world.resource::<Assets<Mesh>>().len(), 0, "layout {layout:?} leaked Mesh");
+            assert_eq!(
+                world.resource::<Assets<StandardMaterial>>().len(),
+                0,
+                "layout {layout:?} leaked StandardMaterial"
+            );
+            assert_eq!(world.resource::<Assets<Image>>().len(), 0, "layout {layout:?} leaked Image");
+        }
     }
 }

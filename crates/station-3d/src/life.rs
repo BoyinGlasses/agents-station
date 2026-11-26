@@ -1,9 +1,8 @@
 use crate::layout::LayoutSpec;
-use crate::palette::{WorldPalette, spawn_box, spawn_cyl, spawn_quad, spawn_sphere};
+use crate::life_systems;
+use crate::palette::WorldPalette;
 use bevy::prelude::*;
-use station_canvas2d::boards_and_social::{PhotostripInput, StripPerson, draw_photostrip};
-use station_canvas2d::{FontEngine, hex};
-use std::f32::consts::PI;
+use station_canvas2d::FontEngine;
 
 pub const VN_WEATHER_CITIES: [(&str, &str, f64, f64); 8] = [
     ("hn", "Hà Nội", 21.03, 105.85),
@@ -170,7 +169,7 @@ pub struct RainDrop {
     pub speed: f32,
 }
 
-/// Spawns lobby Ông Địa altar, trophy shelf, whiteboard photostrip, and seasonal décor.
+/// Spawns all 15 `life/` world elements (delegates to `life_systems::spawn_all_life_systems`).
 pub fn spawn_life_elements(
     commands: &mut Commands,
     pal: &mut WorldPalette,
@@ -180,75 +179,7 @@ pub fn spawn_life_elements(
     spec: &LayoutSpec,
     life: &OfficeLifeState,
 ) {
-    // 1. Vietnamese Ông Địa / Thần Tài altar in lobby corner (Pro/HQ)
-    if spec.layout.is_pro() {
-        let wood = pal.mat(materials, "#6E2B1E", 0.45, 0.05);
-        let gold = pal.mat(materials, "#E2B04A", 0.3, 0.65);
-        let candle = pal.emissive(materials, "#FF5238", 1.8);
-        let ax = -7.35;
-        let az = 0.95;
-        spawn_box(commands, pal, wood.clone(), Vec3::new(ax, 0.36, az), Vec3::new(0.54, 0.72, 0.48));
-        spawn_box(commands, pal, gold, Vec3::new(ax, 0.76, az), Vec3::new(0.6, 0.08, 0.54));
-        spawn_sphere(commands, pal, candle.clone(), Vec3::new(ax - 0.16, 0.44, az + 0.18), Vec3::splat(0.06));
-        spawn_sphere(commands, pal, candle, Vec3::new(ax + 0.16, 0.44, az + 0.18), Vec3::splat(0.06));
-    }
-
-    // 2. Pinned Korean photostrip on lower right of whiteboard (photostrips.js)
-    {
-        let [bx, by, bz, bry] = spec.board;
-        let rot = Quat::from_rotation_y(bry);
-        let strip_surf = draw_photostrip(
-            &PhotostripInput {
-                tag: "v1.0.0".into(),
-                day: "25/11".into(),
-                seed: 2,
-                people: vec![
-                    StripPerson { hair: hex("#3B2618"), skin: hex("#F5D0B5"), shirt: hex("#D97757") },
-                    StripPerson { hair: hex("#1E1E24"), skin: hex("#EBC3A0"), shirt: hex("#5F8FD8") },
-                    StripPerson { hair: hex("#5A3A2A"), skin: hex("#F7DAC4"), shirt: hex("#3E9B74") },
-                ],
-            },
-            fonts,
-        );
-        let strip_m = pal.textured_lit(images, materials, strip_surf, 0.55);
-        spawn_quad(
-            commands,
-            pal,
-            strip_m,
-            Vec3::new(bx + 0.075, by - 0.55, bz - 0.85),
-            Vec2::new(0.16, 0.44),
-            rot * Quat::from_rotation_y(PI * 0.5),
-        );
-    }
-
-    // 3. Trophy shelf figurines (trophies.js)
-    {
-        let [sx, sz, _] = spec.shelf;
-        let gold = pal.mat(materials, "#F2C230", 0.28, 0.75);
-        let silver = pal.mat(materials, "#CFD6DF", 0.25, 0.8);
-        for i in 0..life.earned_trophies.min(5) {
-            let tm = if i % 2 == 0 { gold.clone() } else { silver.clone() };
-            spawn_cyl(commands, pal, tm, Vec3::new(sx - 0.7 + i as f32 * 0.34, 2.42, sz), 0.14, 0.22);
-        }
-    }
-
-    // 4. Seasonal accent decor
-    match life.season {
-        SeasonTheme::Halloween => {}
-        SeasonTheme::Tet => {
-            let blossom = pal.emissive(materials, "#FF85B3", 0.85);
-            spawn_sphere(commands, pal, blossom, Vec3::new(-4.4, 1.35, 3.3), Vec3::splat(0.65));
-        }
-        SeasonTheme::MidAutumn => {
-            let lantern = pal.emissive(materials, "#FF5E3A", 1.8);
-            spawn_sphere(commands, pal, lantern, Vec3::new(spec.center.x, 3.4, spec.center.y), Vec3::splat(0.36));
-        }
-        SeasonTheme::Christmas => {
-            let pine = pal.mat(materials, "#245C36", 0.75, 0.0);
-            spawn_cyl(commands, pal, pine, Vec3::new(-4.4, 1.0, 3.3), 0.75, 1.8);
-        }
-        SeasonTheme::Normal => {}
-    }
+    life_systems::spawn_all_life_systems(commands, pal, materials, images, fonts, spec, life);
 }
 
 pub fn update_rain_system(time: Res<Time>, mut q: Query<(&RainDrop, &mut Transform)>) {
