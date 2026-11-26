@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 214 verified `[x]` | 240 partial/stubbed `[~]` | 117 unported `[ ]` | 571 total
+Status: 205 verified `[x]` | 249 partial/stubbed `[~]` | 117 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -535,12 +535,12 @@ Status: 214 verified `[x]` | 240 partial/stubbed `[~]` | 117 unported `[ ]` | 57
 - [x] endpoint:POST /api/presence -> `crates/station-core/src/http/api.rs::post_presence`
 - [x] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
 - [x] endpoint:POST /api/pin -> `crates/station-core/src/http/api.rs::post_pin_update`
-- [x] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_lan`
+- [~] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_lan` (prefs-only toggle)
 - [x] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_phone`
 - [x] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
 - [x] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_tunnel_toggle`
-- [x] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_tunnel_domain`
-- [x] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_rc`
+- [~] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_tunnel_domain` (prefs-only hostname validation; no cloudflared DNS/login flow)
+- [~] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_rc` (prefs-only toggle; does not write Claude `settings.json`)
 - [x] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
 - [x] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_tasks_allow`
 - [x] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_tasks_bg`
@@ -551,7 +551,7 @@ Status: 214 verified `[x]` | 240 partial/stubbed `[~]` | 117 unported `[ ]` | 57
 - [x] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
 - [x] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
 - [x] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_panel_answer`
-- [x] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_panel_open`
+- [~] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_panel_open` (broadcasts SSE focus event; no OS window bring-to-front)
 - [x] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_open`
 - [x] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_stranded_open`
 - [x] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_stranded_remove`
@@ -567,18 +567,18 @@ Status: 214 verified `[x]` | 240 partial/stubbed `[~]` | 117 unported `[ ]` | 57
 - [x] endpoint:POST /api/todos -> `crates/station-core/src/http/api.rs::post_todos`
 - [x] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_macapprove`
 - [x] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts`
-- [x] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_action`
-- [x] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_action`
-- [x] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [~] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
+- [~] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
+- [~] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
 - [x] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_action`
-- [x] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_action`
+- [~] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
 - [x] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
 - [x] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai`
+- [~] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai` (partial OAuth cancel stub)
 - [x] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
 - [x] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
 - [x] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
