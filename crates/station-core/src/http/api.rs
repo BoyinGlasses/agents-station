@@ -208,7 +208,11 @@ pub async fn get_timeline(
     let to = q.get("to").and_then(|s| s.parse::<u64>().ok()).unwrap_or(now);
     let items = read_replay_range(&state.data_dir, from, to);
     let tl = build_timeline(&items, from, to, now);
-    Ok(Json(json!(tl)))
+    let mut val = json!(tl);
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("truncated".to_owned(), Value::Bool(false));
+    }
+    Ok(Json(val))
 }
 
 pub async fn get_wrapped(
@@ -340,6 +344,9 @@ pub async fn get_stranded(
         "repos": snap.repos,
         "items": snap.items,
         "local": local,
+        "partial": false,
+        "scanning": false,
+        "sizing": false,
     })))
 }
 
@@ -412,10 +419,35 @@ pub async fn post_pins(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let sid = body.get("sid").and_then(Value::as_str).unwrap_or("");
+    let sid = body
+        .get("id")
+        .or_else(|| body.get("sid"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let mut office = state.office.lock().unwrap_or_else(|e| e.into_inner());
+    let op = body.get("op").and_then(Value::as_str);
     if let Some(idx) = body.get("remove").and_then(Value::as_u64) {
         let ok = office.remove_pin(sid, idx as usize).unwrap_or(false);
+        return Ok(Json(json!({ "ok": ok, "pins": office.pins })));
+    }
+    if op == Some("del") {
+        let ok = if let Some(idx) = body.get("pin").and_then(Value::as_u64) {
+            office.remove_pin(sid, idx as usize).unwrap_or(false)
+        } else if let Some(pin_str) = body.get("pin").and_then(Value::as_str) {
+            if let Ok(idx) = pin_str.parse::<usize>() {
+                office.remove_pin(sid, idx).unwrap_or(false)
+            } else if let Some(pos) = office
+                .pins
+                .get(sid)
+                .and_then(|v| v.iter().position(|x| x == pin_str))
+            {
+                office.remove_pin(sid, pos).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         return Ok(Json(json!({ "ok": ok, "pins": office.pins })));
     }
     let text = body.get("text").and_then(Value::as_str).unwrap_or("");
@@ -677,9 +709,48 @@ pub async fn get_burn(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    let range = q.get("range").map(String::as_str).unwrap_or("today");
-    let summary = state.otel.lock().unwrap_or_else(|e| e.into_inner()).burn_summary(range, now_ms());
-    Ok(Json(json!(summary)))
+    let range = match q.get("range").map(String::as_str) {
+        Some("7d") => "7d",
+        Some("30d") => "30d",
+        _ => "today",
+    };
+    let (summary, info) = {
+        let otel = state.otel.lock().unwrap_or_else(|e| e.into_inner());
+        (otel.burn_summary(range, now_ms()), otel.info())
+    };
+    let mut val = json!(summary);
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("ok".to_owned(), Value::Bool(true));
+        obj.insert("range".to_owned(), Value::String(range.to_owned()));
+        obj.insert("days".to_owned(), info.get("days").cloned().unwrap_or(json!(0)));
+        obj.insert(
+            "lastLogsAt".to_owned(),
+            info.get("lastLogsAt").cloned().unwrap_or(json!(0)),
+        );
+        obj.insert(
+            "lastMetricsAt".to_owned(),
+            info.get("lastMetricsAt").cloned().unwrap_or(json!(0)),
+        );
+        obj.insert("rest".to_owned(), json!({ "n": 0, "usd": 0.0, "share": 0.0 }));
+        let settings_path = state.claude_dir.join("settings.json");
+        let setup = std::fs::read_to_string(&settings_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("env").and_then(Value::as_object).cloned())
+            .map(|env| {
+                if !crate::store::otel_setup::marked_keys(&env).is_empty() {
+                    "ours"
+                } else if env.get("CLAUDE_CODE_ENABLE_TELEMETRY").and_then(Value::as_str) == Some("1") {
+                    "other"
+                } else {
+                    "none"
+                }
+            })
+            .unwrap_or("none");
+        obj.insert("setup".to_owned(), Value::String(setup.to_owned()));
+        obj.insert("plan".to_owned(), Value::Null);
+    }
+    Ok(Json(val))
 }
 
 pub async fn get_sys(
@@ -690,7 +761,19 @@ pub async fn get_sys(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
-    Ok(Json(json!(state.sys.snapshot())))
+    let auto_hours = state
+        .prefs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .auto_close();
+    let mut val = json!(state.sys.snapshot());
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("auto".to_owned(), json!({ "hours": auto_hours, "last": Value::Null }));
+        obj.entry("ide".to_owned()).or_insert_with(|| json!([]));
+        obj.entry("open".to_owned()).or_insert_with(|| json!([]));
+        obj.entry("rules".to_owned()).or_insert_with(|| json!([]));
+    }
+    Ok(Json(val))
 }
 
 pub async fn post_sys_action(
@@ -2113,8 +2196,15 @@ pub async fn get_push(
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let endpoint = q.get("endpoint").map(String::as_str).unwrap_or("");
     let push = state.push.lock().unwrap_or_else(|e| e.into_inner());
-    Ok(Json(json!({ "ok": true, "publicKey": push.public_key, "count": push.count() })))
+    Ok(Json(json!({
+        "ok": true,
+        "key": push.public_key,
+        "publicKey": push.public_key,
+        "count": push.count(),
+        "on": push.has(endpoint),
+    })))
 }
 
 pub async fn post_push(
@@ -2644,7 +2734,7 @@ fn is_valid_tunnel_hostname(host: &str) -> bool {
 }
 
 fn tunnel_status_json(state: &AppState) -> Value {
-    let (on, domain) = {
+    let (on, domain, tasks, rc) = {
         let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
         let on = prefs
             .get("tunnel")
@@ -2655,18 +2745,38 @@ fn tunnel_status_json(state: &AppState) -> Value {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        (on, domain)
+        let tasks = prefs
+            .get("phoneTasks")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let rc = prefs
+            .get("rcAtStartup")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        (on, domain, tasks, rc)
     };
+    let bg = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .bg_probe()
+        .clone();
     let snap = state.tunnel.snapshot();
     json!({
         "ok": true,
         "on": on,
         "state": snap.state,
         "domain": domain,
+        "fixed": domain,
         "url": snap.url,
         "host": snap.host,
         "port": snap.port,
         "error": snap.error,
+        "pin": state.auth.current_pin(),
+        "awake": Value::Null,
+        "rc": rc,
+        "tasks": tasks,
+        "bg": bg,
     })
 }
 
@@ -4930,6 +5040,157 @@ mod tests {
                 StatusCode::FORBIDDEN,
                 "ViaTunnel must be 403 on {method} {uri}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn oracle_contract_shapes_and_pins_id_op_add_match_golden_oracle() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let claude_dir = dir.path().join("claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let state = Arc::new(
+            AppState::new_with_claude_dir(dir.path().to_path_buf(), claude_dir, None).unwrap(),
+        );
+        let app = build_router(state);
+
+        // 1. POST /api/pins with Oracle `{ id, op: "add", text }` succeeds and persists
+        let add_pin = Request::builder()
+            .method("POST")
+            .uri("/api/pins")
+            .header("host", "127.0.0.1:4310")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "id": "s-oracle", "op": "add", "text": "keep parity" }).to_string(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(add_pin).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let pin_body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 64 * 1024).await.unwrap()).unwrap();
+        assert_eq!(pin_body["ok"], true);
+        assert_eq!(pin_body["pins"]["s-oracle"][0], "keep parity");
+
+        // 2. GET /api/burn includes Oracle envelope fields
+        let burn_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/burn")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let burn: Value =
+            serde_json::from_slice(&to_bytes(burn_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        for key in [
+            "ok",
+            "range",
+            "days",
+            "lastLogsAt",
+            "lastMetricsAt",
+            "rest",
+            "setup",
+            "plan",
+        ] {
+            assert!(burn.get(key).is_some(), "/api/burn missing `{key}`");
+        }
+
+        // 3. GET /api/timeline includes `truncated`
+        let tl_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/timeline")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tl: Value =
+            serde_json::from_slice(&to_bytes(tl_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert!(tl.get("truncated").is_some(), "/api/timeline missing `truncated`");
+
+        // 4. GET /api/push includes `key` and `on` alongside `publicKey`
+        let push_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/push")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let push: Value =
+            serde_json::from_slice(&to_bytes(push_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert!(push.get("key").is_some(), "/api/push missing `key`");
+        assert!(push.get("on").is_some(), "/api/push missing `on`");
+
+        // 5. GET /api/stranded includes `partial`, `scanning`, `sizing`
+        let str_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/stranded")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let str_val: Value =
+            serde_json::from_slice(&to_bytes(str_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        for key in ["partial", "scanning", "sizing"] {
+            assert!(str_val.get(key).is_some(), "/api/stranded missing `{key}`");
+        }
+
+        // 6. GET /api/tunnel includes `awake`, `bg`, `fixed`, `pin`, `rc`, `tasks`
+        let tun_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tunnel")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let tun: Value =
+            serde_json::from_slice(&to_bytes(tun_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        for key in ["awake", "bg", "fixed", "pin", "rc", "tasks"] {
+            assert!(tun.get(key).is_some(), "/api/tunnel missing `{key}`");
+        }
+
+        // 7. GET /api/sys includes `auto`, `ide`, `open`, `rules`
+        let sys_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/sys")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let sys: Value =
+            serde_json::from_slice(&to_bytes(sys_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        for key in ["auto", "ide", "open", "rules"] {
+            assert!(sys.get(key).is_some(), "/api/sys missing `{key}`");
         }
     }
 }
