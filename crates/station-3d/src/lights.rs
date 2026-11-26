@@ -47,6 +47,11 @@ impl LightingState {
     }
 }
 
+/// System set for `sync_lighting_system` in `Update`, allowing UI action handlers
+/// (e.g. `process_ui_actions`) to order `.before(LightingSyncSet)` for zero-frame-latency sync.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LightingSyncSet;
+
 #[derive(Component)]
 pub struct SunLight;
 
@@ -116,7 +121,9 @@ pub fn sync_lighting_system(
         };
     }
 
-    if let Some(ref mut cc) = clear_color {
+    if !cam_q.is_empty()
+        && let Some(ref mut cc) = clear_color
+    {
         cc.0 = if night {
             srgb_hex("#121724")
         } else {
@@ -343,16 +350,32 @@ mod tests {
             .count();
         assert_eq!(bounce_count, 1, "upward ground-bounce directional light must exist");
 
-        let (msaa, tm, env, bloom) = app
+        let (msaa, tm, env, bloom, exp) = app
             .world_mut()
-            .query_filtered::<(&Msaa, &Tonemapping, &EnvironmentMapLight, &Bloom), With<MainOfficeCamera>>()
+            .query_filtered::<(
+                &Msaa,
+                &Tonemapping,
+                &EnvironmentMapLight,
+                &Bloom,
+                &Exposure,
+            ), With<MainOfficeCamera>>()
             .single(app.world())
-            .expect("MainOfficeCamera with Msaa, Tonemapping, EnvironmentMapLight, Bloom");
+            .expect("MainOfficeCamera with Msaa, Tonemapping, EnvironmentMapLight, Bloom, Exposure");
         assert_eq!(*msaa, Msaa::Sample4);
         assert_eq!(*tm, Tonemapping::AcesFitted);
         assert_eq!(env.diffuse_map, day_diff);
         assert_eq!(env.specular_map, day_spec);
         assert_eq!(bloom.intensity, 0.0, "Bloom must be off during day");
+        assert!((exp.ev100 - crate::camera::DAY_EV100).abs() < 1e-4);
+
+        let bounce_day = app
+            .world_mut()
+            .query_filtered::<&DirectionalLight, (With<BounceLight>, Without<SunLight>)>()
+            .single(app.world())
+            .unwrap();
+        assert!((bounce_day.illuminance - DAY_BOUNCE_LUX).abs() < 1.0);
+        assert!((app.world().resource::<AmbientLight>().brightness - DAY_AMBIENT_BRIGHTNESS).abs() < 1.0);
+        assert_eq!(app.world().resource::<ClearColor>().0, srgb_hex("#CFE0EC"));
 
         // Flip to night
         app.world_mut().resource_mut::<LightingState>().night = true;
@@ -369,6 +392,18 @@ mod tests {
             sun_night.illuminance
         );
 
+        let bounce_night = app
+            .world_mut()
+            .query_filtered::<&DirectionalLight, (With<BounceLight>, Without<SunLight>)>()
+            .single(app.world())
+            .unwrap();
+        assert!((bounce_night.illuminance - NIGHT_BOUNCE_LUX).abs() < 1.0);
+        assert!(
+            (app.world().resource::<AmbientLight>().brightness - NIGHT_AMBIENT_BRIGHTNESS).abs()
+                < 1.0
+        );
+        assert_eq!(app.world().resource::<ClearColor>().0, srgb_hex("#121724"));
+
         let lamps_night: Vec<f32> = app
             .world_mut()
             .query_filtered::<&PointLight, With<RoomLamp>>()
@@ -381,9 +416,9 @@ mod tests {
             "RoomLamps must boost at night, got {lamps_night:?}"
         );
 
-        let (env_night, bloom_night) = app
+        let (env_night, bloom_night, exp_night) = app
             .world_mut()
-            .query_filtered::<(&EnvironmentMapLight, &Bloom), With<MainOfficeCamera>>()
+            .query_filtered::<(&EnvironmentMapLight, &Bloom, &Exposure), With<MainOfficeCamera>>()
             .single(app.world())
             .unwrap();
         assert_eq!(env_night.diffuse_map, night_diff);
@@ -393,6 +428,7 @@ mod tests {
             "Night bloom must activate, got {}",
             bloom_night.intensity
         );
+        assert!((exp_night.ev100 - crate::camera::NIGHT_EV100).abs() < 1e-4);
 
         // Flip back to day
         app.world_mut().resource_mut::<LightingState>().night = false;
@@ -404,6 +440,14 @@ mod tests {
             .single(app.world())
             .unwrap();
         assert!((sun_restored.illuminance - DAY_SUN_LUX).abs() < 1.0);
+        let bounce_restored = app
+            .world_mut()
+            .query_filtered::<&DirectionalLight, (With<BounceLight>, Without<SunLight>)>()
+            .single(app.world())
+            .unwrap();
+        assert!((bounce_restored.illuminance - DAY_BOUNCE_LUX).abs() < 1.0);
+        assert!((app.world().resource::<AmbientLight>().brightness - DAY_AMBIENT_BRIGHTNESS).abs() < 1.0);
+        assert_eq!(app.world().resource::<ClearColor>().0, srgb_hex("#CFE0EC"));
 
         let lamps_day: Vec<f32> = app
             .world_mut()
@@ -413,14 +457,60 @@ mod tests {
             .collect();
         assert!(lamps_day.iter().all(|&i| i == 0.0));
 
-        let (env_day, bloom_day) = app
+        let (env_day, bloom_day, exp_day) = app
             .world_mut()
-            .query_filtered::<(&EnvironmentMapLight, &Bloom), With<MainOfficeCamera>>()
+            .query_filtered::<(&EnvironmentMapLight, &Bloom, &Exposure), With<MainOfficeCamera>>()
             .single(app.world())
             .unwrap();
         assert_eq!(env_day.diffuse_map, day_diff);
         assert_eq!(env_day.specular_map, day_spec);
         assert_eq!(bloom_day.intensity, 0.0);
+        assert!((exp_day.ev100 - crate::camera::DAY_EV100).abs() < 1e-4);
+
+        // photo_hour override forces night at 22:00 even when night=false, and day at 12:00 when night=true
+        app.world_mut().resource_mut::<LightingState>().photo_hour = Some(22.0);
+        app.update();
+        let sun_photo_night = app
+            .world_mut()
+            .query_filtered::<&DirectionalLight, (With<SunLight>, Without<BounceLight>)>()
+            .single(app.world())
+            .unwrap();
+        assert!((sun_photo_night.illuminance - NIGHT_SUN_LUX).abs() < 1.0);
+        assert_eq!(app.world().resource::<ClearColor>().0, srgb_hex("#121724"));
+
+        {
+            let mut st = app.world_mut().resource_mut::<LightingState>();
+            st.night = true;
+            st.photo_hour = Some(12.0);
+        }
+        app.update();
+        let sun_photo_day = app
+            .world_mut()
+            .query_filtered::<&DirectionalLight, (With<SunLight>, Without<BounceLight>)>()
+            .single(app.world())
+            .unwrap();
+        assert!((sun_photo_day.illuminance - DAY_SUN_LUX).abs() < 1.0);
+        assert_eq!(app.world().resource::<ClearColor>().0, srgb_hex("#CFE0EC"));
+    }
+
+    #[test]
+    fn sync_lighting_system_preserves_lite_2d_clear_color_without_main_camera() {
+        let lite_bg = Color::srgb(0.06, 0.075, 0.105);
+        let mut app = App::new();
+        app.insert_resource(ClearColor(lite_bg))
+            .insert_resource(LightingState::new(false))
+            .add_systems(Update, sync_lighting_system);
+
+        app.update();
+        assert_eq!(
+            app.world().resource::<ClearColor>().0,
+            lite_bg,
+            "Lite2D/PanelCompact ClearColor must not be overwritten when MainOfficeCamera is absent"
+        );
+
+        app.world_mut().resource_mut::<LightingState>().night = true;
+        app.update();
+        assert_eq!(app.world().resource::<ClearColor>().0, lite_bg);
     }
 
     #[test]

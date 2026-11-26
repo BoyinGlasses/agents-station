@@ -26,6 +26,7 @@ pub use desks::DeskScreen;
 pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
+pub use lights::LightingSyncSet;
 pub use palette::{WorldEntity, WorldPalette};
 pub use people::{LiveSessionWorker, LiveWorkerSpec};
 use station_canvas2d::{BrandRegistry, FontEngine};
@@ -103,7 +104,7 @@ fn register_office_runtime(
     app.add_systems(
             Update,
             (
-                lights::sync_lighting_system,
+                lights::sync_lighting_system.in_set(lights::LightingSyncSet),
                 props::animate_props_system,
                 people::animate_chibis_system,
                 backdrops::animate_backdrop_traffic_system,

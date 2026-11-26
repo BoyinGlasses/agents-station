@@ -37,10 +37,23 @@ impl OfficeIbl {
     }
 }
 
-/// Converts a finite non-negative `f32` to IEEE-754 binary16 bits (`Rgba16Float`).
+/// Converts a non-negative `f32` to IEEE-754 binary16 bits (`Rgba16Float`).
+/// Maps `NaN` and negative values (including `-Inf`) to `0`, and overflows / `+Inf` to `0x7bff` (`65_504.0`).
 fn f32_to_f16(val: f32) -> u16 {
-    let v = val.clamp(0.0, 65_504.0);
-    let bits = v.to_bits();
+    if !val.is_finite() {
+        return if val.is_sign_positive() && val.is_infinite() {
+            0x7bff
+        } else {
+            0
+        };
+    }
+    if val <= 0.0 {
+        return 0;
+    }
+    if val >= 65_504.0 {
+        return 0x7bff;
+    }
+    let bits = val.to_bits();
     let exp = ((bits >> 23) & 0xff) as i32;
     let mant = bits & 0x007f_ffff;
     if exp == 0 {
@@ -51,7 +64,7 @@ fn f32_to_f16(val: f32) -> u16 {
         if half_exp < -10 {
             return 0;
         }
-        let m = (mant | 0x0080_0000) >> (14 - half_exp);
+        let m = (mant | 0x0080_0000) >> (13 - half_exp);
         return ((m + 1) >> 1) as u16;
     }
     if half_exp >= 31 {
@@ -234,6 +247,32 @@ mod tests {
             sum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
         }
         (sum / px_count as f64) as f32
+    }
+
+    #[test]
+    fn f32_to_f16_encodes_zero_negatives_subnormals_normals_clamps_and_nan() {
+        // Zero, negative, -Inf, and NaN all clamp safely to 0
+        assert_eq!(f32_to_f16(0.0), 0x0000);
+        assert_eq!(f32_to_f16(-0.0), 0x0000);
+        assert_eq!(f32_to_f16(-1.5), 0x0000);
+        assert_eq!(f32_to_f16(f32::NEG_INFINITY), 0x0000);
+        assert_eq!(f32_to_f16(f32::NAN), 0x0000);
+
+        // Subnormals: 2^-15 = 0x0200, 2^-24 = 0x0001, 2^-25 rounds to 0x0001, 2^-26 underflows to 0
+        assert_eq!(f32_to_f16(2.0_f32.powi(-15)), 0x0200);
+        assert_eq!(f32_to_f16(2.0_f32.powi(-24)), 0x0001);
+        assert_eq!(f32_to_f16(2.0_f32.powi(-25)), 0x0001);
+        assert_eq!(f32_to_f16(2.0_f32.powi(-26)), 0x0000);
+
+        // Normals
+        assert_eq!(f32_to_f16(0.5), 0x3800);
+        assert_eq!(f32_to_f16(1.0), 0x3c00);
+        assert_eq!(f32_to_f16(1.5), 0x3e00);
+
+        // Max finite f16 and positive overflow / +Inf
+        assert_eq!(f32_to_f16(65_504.0), 0x7bff);
+        assert_eq!(f32_to_f16(100_000.0), 0x7bff);
+        assert_eq!(f32_to_f16(f32::INFINITY), 0x7bff);
     }
 
     #[test]

@@ -4267,7 +4267,8 @@ impl Plugin for LiveServerBridgePlugin {
                     handle_picking_events,
                     step_replay_system,
                 )
-                    .chain(),
+                    .chain()
+                    .before(station_3d::LightingSyncSet),
             );
     }
 }
@@ -5980,12 +5981,8 @@ fn process_ui_actions(
                 ui.night = night;
                 if let Some(l) = world_params.lighting.as_mut() {
                     l.night = night;
+                    l.photo_hour = None;
                 }
-                world_params.clear_color.0 = if night {
-                    Color::srgb(0.06, 0.08, 0.13)
-                } else {
-                    Color::srgb(0.75, 0.85, 0.94)
-                };
             }
             UiAction::SetLang(code) => {
                 i18n.set_lang(&code);
@@ -6923,12 +6920,8 @@ fn process_ui_actions(
                 ui.night = night;
                 if let Some(l) = world_params.lighting.as_mut() {
                     l.night = night;
+                    l.photo_hour = None;
                 }
-                world_params.clear_color.0 = if night {
-                    Color::srgb(0.06, 0.08, 0.13)
-                } else {
-                    Color::srgb(0.75, 0.85, 0.94)
-                };
             }
             UiAction::CapturePhoto {
                 size,
@@ -11099,10 +11092,14 @@ mod tests {
         let i18n = I18nStore::load_from_assets(&assets, "en");
         let expected_night = is_night_for_hour(Local::now().hour());
 
+        let lite_bg = Color::srgb(0.06, 0.075, 0.105);
         let mut app = App::new();
         app.insert_resource(Time::<()>::default())
-            .insert_resource(ClearColor::default())
-            .insert_resource(station_3d::lights::LightingState::new(!expected_night))
+            .insert_resource(ClearColor(lite_bg))
+            .insert_resource(station_3d::lights::LightingState {
+                night: !expected_night,
+                photo_hour: Some(22.0),
+            })
             .insert_resource(i18n)
             .insert_resource(UiState::with_demo_seed(
                 station_3d::OfficeLayout::Pro,
@@ -11112,6 +11109,10 @@ mod tests {
             .add_event::<station_3d::WorkerSelected>()
             .add_event::<station_3d::interact::PropActivated>()
             .add_event::<AppExit>()
+            .add_systems(
+                Update,
+                station_3d::lights::sync_lighting_system.in_set(station_3d::LightingSyncSet),
+            )
             .add_plugins(LiveServerBridgePlugin {
                 data_dir: dir.path().to_path_buf(),
                 assets_dir: assets,
@@ -11121,15 +11122,38 @@ mod tests {
             });
         app.world_mut().spawn((Window::default(), PrimaryWindow));
 
-        // 1. SetPhotoTimeAuto restores real clock-driven day/night state.
+        // 1. SetPhotoTimeAuto restores real clock-driven day/night state, clears photo_hour,
+        // and preserves Lite2D ClearColor when no MainOfficeCamera is present.
         app.world_mut()
             .resource_mut::<UiState>()
             .push_action(UiAction::SetPhotoTimeAuto);
         app.update();
         assert_eq!(app.world().resource::<UiState>().night, expected_night);
+        let lighting = app.world().resource::<station_3d::lights::LightingState>();
+        assert_eq!(lighting.night, expected_night);
+        assert_eq!(lighting.photo_hour, None);
         assert_eq!(
-            app.world().resource::<station_3d::lights::LightingState>().night,
-            expected_night
+            app.world().resource::<ClearColor>().0,
+            lite_bg,
+            "Lite2D ClearColor must remain untouched when MainOfficeCamera is absent"
+        );
+
+        // 1b. With MainOfficeCamera present, ToggleNight syncs ClearColor on the EXACT same frame
+        // via process_ui_actions.before(LightingSyncSet).
+        let spec = LayoutSpec::for_layout(station_3d::OfficeLayout::Pro);
+        let mut cmds = app.world_mut().commands();
+        station_3d::camera::spawn_office_camera(&mut cmds, &spec);
+        app.world_mut().flush();
+        app.world_mut().resource_mut::<station_3d::lights::LightingState>().photo_hour = Some(10.0);
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::ToggleNight(true));
+        app.update();
+        assert_eq!(app.world().resource::<station_3d::lights::LightingState>().photo_hour, None);
+        assert_eq!(
+            app.world().resource::<ClearColor>().0,
+            station_3d::palette::srgb_hex("#121724"),
+            "ToggleNight must sync 3D ClearColor on the same frame via LightingSyncSet ordering"
         );
 
         // 2. CapturePhoto hides PhotoBar first, then spawns Screenshot on the clean frame.
