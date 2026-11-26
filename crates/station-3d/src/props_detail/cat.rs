@@ -182,15 +182,15 @@ pub fn spawn_office_cat(
                 MeshMaterial3d(cream.clone()),
                 Transform::from_xyz(0.0, 0.17, 0.05).with_scale(Vec3::new(0.24, 0.18, 0.33)),
             ));
-            // 3-5. Three tabby back stripes (`cat.js:79`)
+            // 3-5. Three tabby back stripes (`cat.js:79`) — rotated upright in XY plane to arch over torso
             for i in 0..3 {
                 b.spawn((
                     WorldEntity,
                     Mesh3d(torus.clone()),
                     MeshMaterial3d(dark.clone()),
                     Transform::from_xyz(0.0, 0.22, -0.12 + i as f32 * 0.1)
-                        .with_rotation(Quat::from_rotation_y(FRAC_PI_2))
-                        .with_scale(Vec3::new(0.30, 0.28, 0.09)),
+                        .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
+                        .with_scale(Vec3::new(0.36, 0.10, 0.31)),
                 ));
             }
             // 6-7. Collar + gold bell
@@ -450,7 +450,8 @@ pub fn animate_cat_system(
 
         match c.mode {
             CatMode::Walk => {
-                let target = if c.waypoints.is_empty() {
+                let want_sofa = c.waypoint_idx % 4 == 3;
+                let target = if want_sofa || c.waypoints.is_empty() {
                     c.sofa_via
                 } else {
                     c.waypoints[c.waypoint_idx % c.waypoints.len()]
@@ -460,8 +461,8 @@ pub fn animate_cat_system(
                 let step = 0.85 * dt;
                 if dist <= step || dist < 1e-4 {
                     c.pos = target;
-                    if c.waypoint_idx % 4 == 3 {
-                        // Hop onto sofa coffee table to nap
+                    if want_sofa && c.pos.distance(c.sofa_via) < 0.25 {
+                        // Local ~0.85m jump from `sofa_via` onto the coffee table to nap
                         c.hop_t = 0.0;
                         c.hop_from = Vec3::new(c.pos.x, 0.0, c.pos.y);
                         c.hop_to = c.sofa_pos;

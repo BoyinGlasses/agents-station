@@ -137,7 +137,9 @@ pub fn spawn_lunchbox_child(
                 WorldEntity,
                 Mesh3d(palette.unit_torus.clone()),
                 MeshMaterial3d(handle),
-                Transform::from_xyz(0.0, 0.105, 0.0).with_scale(Vec3::new(0.06, 0.04, 0.015)),
+                Transform::from_xyz(0.0, 0.105, 0.0)
+                    .with_rotation(Quat::from_rotation_x(FRAC_PI_2))
+                    .with_scale(Vec3::new(0.075, 0.028, 0.068)),
             ));
             c.spawn((
                 WorldEntity,

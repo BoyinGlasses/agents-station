@@ -121,7 +121,7 @@ fn register_office_runtime(
                 lights::sync_lighting_system.in_set(lights::LightingSyncSet),
                 desks::animate_desks_system,
                 furniture::animate_furniture_system,
-                props::animate_props_system,
+                props::animate_props_system.before(lights::LightingSyncSet),
                 props_detail::cat::animate_cat_system,
                 props_detail::microwave::animate_microwaves_system,
                 props_detail::shredder_cups::animate_shredder_bins_and_cups_system,

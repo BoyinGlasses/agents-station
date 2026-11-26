@@ -6025,6 +6025,7 @@ fn process_ui_actions(
                 if let Some(l) = world_params.lighting.as_mut() {
                     l.night = night;
                     l.photo_hour = None;
+                    l.room_lights_off = false;
                 }
             }
             UiAction::SetLang(code) => {

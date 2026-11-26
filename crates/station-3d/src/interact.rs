@@ -110,7 +110,7 @@ fn resolve_pick_target(
     t_q: &Query<&Transform, Without<HoverRing>>,
 ) -> Option<(Entity, PickTarget)> {
     let mut cur = start;
-    for _ in 0..8 {
+    for _ in 0..12 {
         if let Ok(w) = workers_q.get(cur) {
             return Some((
                 cur,

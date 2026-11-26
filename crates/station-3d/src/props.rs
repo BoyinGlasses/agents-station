@@ -1544,7 +1544,8 @@ pub fn animate_props_system(
     let is_night = lighting.as_deref().is_some_and(LightingState::is_night);
     let season = life.as_deref().map(|l| l.season).unwrap_or(SeasonTheme::Normal);
 
-    // 1. Wall switches (`switches.js`): flip lever & toggle `LightingState.room_lights_off`
+    // 1. Wall switches (`switches.js`): flip lever & toggle `LightingState.room_lights_off`,
+    //    or reconcile lever state when `LightingState.room_lights_off` is reset externally (e.g. ToggleNight).
     if toggle_switch {
         let mut next_off = None;
         for mut sw in &mut dev.switches {
@@ -1556,6 +1557,15 @@ pub fn animate_props_system(
         }
         if let (Some(off), Some(ref mut lstate)) = (next_off, lighting.as_mut()) {
             lstate.room_lights_off = off;
+        }
+    } else if let Some(ref lstate) = lighting {
+        for mut sw in &mut dev.switches {
+            if sw.off != lstate.room_lights_off {
+                sw.off = lstate.room_lights_off;
+                if let Ok(mut ltf) = dev.levers.get_mut(sw.lever) {
+                    ltf.rotation = Quat::from_rotation_x(if sw.off { 0.45 } else { -0.45 });
+                }
+            }
         }
     }
 
@@ -1845,9 +1855,9 @@ mod tests {
     use crate::chibi::ChibiLook;
     use crate::interact::PropActivated;
     use crate::layout::OfficeLayout;
-    use crate::lights::{LightingState, RoomLamp, sync_lighting_system};
+    use crate::lights::{LightingState, LightingSyncSet, RoomLamp, sync_lighting_system};
     use crate::props_detail::cat::{
-        CatHeart, CatLeg, CatTailSeg, OfficeCat as ArticulatedCat, animate_cat_system,
+        CatHeart, CatLeg, CatMode, CatTailSeg, OfficeCat as ArticulatedCat, animate_cat_system,
     };
     use crate::props_detail::microwave::{
         ALL_LUNCHBOX_KINDS, MicrowaveDoorPivot, MicrowaveLunchbox, MicrowaveOven, MicrowavePlate,
@@ -1880,11 +1890,11 @@ mod tests {
             .add_systems(
                 Update,
                 (
-                    animate_props_system,
+                    animate_props_system.before(LightingSyncSet),
                     animate_cat_system,
                     animate_microwaves_system,
                     animate_shredder_bins_and_cups_system,
-                    sync_lighting_system,
+                    sync_lighting_system.in_set(LightingSyncSet),
                 ),
             );
 
@@ -2065,6 +2075,33 @@ mod tests {
             hearts_remaining, 0,
             "floating CatHeart entities must despawn automatically after life expires"
         );
+
+        // Verify sofa hop walks to `sofa_via` first and hops locally (<= 1.6m), never teleporting across rooms
+        {
+            let mut cat = app.world_mut().get_mut::<ArticulatedCat>(cat_ent).unwrap();
+            cat.mode = CatMode::Walk;
+            cat.waypoint_idx = 3;
+            cat.pos = Vec2::new(-5.6, 4.0);
+        }
+        let mut saw_hop = false;
+        for _ in 0..320 {
+            step_app(&mut app, 0.1);
+            let cat = app.world().get::<ArticulatedCat>(cat_ent).unwrap();
+            if cat.mode == CatMode::Hop {
+                let hop_dist = cat.hop_from.distance(cat.hop_to);
+                assert!(
+                    hop_dist <= 1.6,
+                    "OfficeCat sofa hop must be a local <= 1.6m jump, got {hop_dist:.2}m"
+                );
+                assert!(
+                    Vec2::new(cat.hop_from.x, cat.hop_from.z).distance(cat.sofa_via) < 0.25,
+                    "OfficeCat must reach sofa_via before hopping onto sofa_pos"
+                );
+                saw_hop = true;
+                break;
+            }
+        }
+        assert!(saw_hop, "OfficeCat must walk to sofa_via and enter CatMode::Hop");
     }
 
     #[test]
@@ -2299,14 +2336,13 @@ mod tests {
         }
         assert!(checked > 0);
 
-        // Toggle wall switch at night -> flips WallSwitch.off & dims RoomLamps
+        // Toggle wall switch at night -> flips WallSwitch.off & dims RoomLamps on the SAME tick
         assert!(!app.world().resource::<LightingState>().room_lights_off);
         app.world_mut().send_event(PropActivated {
             id: "switches",
             place: "office",
             label: "Light Switch",
         });
-        step_app(&mut app, 0.05);
         step_app(&mut app, 0.05);
         assert!(
             app.world().resource::<LightingState>().room_lights_off,
@@ -2319,7 +2355,39 @@ mod tests {
             .all(|l| l.intensity == 0.0);
         assert!(
             all_lamps_off,
-            "flipping wall switch off must extinguish RoomLamps"
+            "flipping wall switch off must extinguish RoomLamps on the same tick"
+        );
+        let (sw_off_after, lever_ent) = app
+            .world_mut()
+            .query::<&WallSwitch>()
+            .single(app.world())
+            .map(|sw| (sw.off, sw.lever))
+            .unwrap();
+        assert!(sw_off_after);
+        assert!(
+            (app.world().get::<Transform>(lever_ent).unwrap().rotation.to_euler(EulerRot::XYZ).0 - 0.45).abs() < 1e-3,
+            "SwitchLever must tilt to +0.45 rad when switched off"
+        );
+
+        // External day/night reset (`room_lights_off = false`) reconciles WallSwitch, lever, and restores RoomLamps
+        app.world_mut().resource_mut::<LightingState>().room_lights_off = false;
+        step_app(&mut app, 0.05);
+        assert!(
+            !app.world_mut().query::<&WallSwitch>().single(app.world()).unwrap().off,
+            "WallSwitch.off must reconcile with LightingState.room_lights_off"
+        );
+        assert!(
+            (app.world().get::<Transform>(lever_ent).unwrap().rotation.to_euler(EulerRot::XYZ).0 + 0.45).abs() < 1e-3,
+            "SwitchLever must return to -0.45 rad after external reset"
+        );
+        let all_lamps_restored = app
+            .world_mut()
+            .query_filtered::<&PointLight, With<RoomLamp>>()
+            .iter(app.world())
+            .all(|l| l.intensity > 0.0);
+        assert!(
+            all_lamps_restored,
+            "resetting room_lights_off at night must restore RoomLamps"
         );
     }
 }
