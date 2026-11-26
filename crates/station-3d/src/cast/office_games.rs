@@ -6,14 +6,15 @@
 
 use crate::cast::{
     ActiveRoutine, CastClock, CastEvents, RoutineCoordinator, RoutineKind, is_worker_recalled,
-    is_worker_resting, sync_lazy_prop,
+    is_worker_resting, return_arrive_anim, sync_home_lifecycle, sync_lazy_prop,
 };
 use crate::chibi::{ChibiWorker, WorkerAnim};
 use crate::chibi_meshes::ChibiMeshCache;
 use crate::chibi_props::{ActivePropEntity, PropKind};
+use crate::interact::PropActivated;
 use crate::nav::{NavGraph, face_to};
 use crate::palette::WorldPalette;
-use crate::people::{LiveSessionWorker, NavWalker, SubagentWorker};
+use crate::people::{LiveSessionWorker, NavWalker, SubagentWorker, WorkerLifecycle};
 use crate::props_detail::leisure::{BilliardsBall, BilliardsTable, KaraokeBooth};
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -161,26 +162,61 @@ pub enum KaraokeStage {
     Scored,
 }
 
-#[derive(Resource, Debug, Default, Clone)]
+#[derive(Resource, Debug, Clone)]
 pub struct OfficeGamesState {
     pub billiards_stage: BilliardsStage,
     pub billiards_score: [u8; 2],
     pub billiards_shots: u32,
     pub billiards_turn: u8,
     pub billiards_shot_timer: f32,
+    pub billiards_next_sim: f32,
     pub foosball_active: bool,
     pub foosball_score: [u8; 2],
     pub foosball_rally_ticks: u32,
     pub foosball_goal_timer: f32,
+    pub foosball_next_sim: f32,
     pub gaming_active: bool,
     pub gaming_title_index: usize,
     pub gaming_score: [u8; 2],
     pub gaming_timer: f32,
+    pub gaming_next_sim: f32,
     pub karaoke_stage: KaraokeStage,
     pub karaoke_song_index: usize,
     pub karaoke_last_score: Option<u8>,
     pub karaoke_songs_sung: u32,
     pub karaoke_elapsed: f32,
+    pub karaoke_day: Option<u32>,
+    pub karaoke_next_sim: f32,
+}
+
+impl Default for OfficeGamesState {
+    fn default() -> Self {
+        Self {
+            billiards_stage: BilliardsStage::Idle,
+            billiards_score: [0, 0],
+            billiards_shots: 0,
+            billiards_turn: 0,
+            billiards_shot_timer: 0.0,
+            billiards_next_sim: 180.0,
+            foosball_active: false,
+            foosball_score: [0, 0],
+            foosball_rally_ticks: 0,
+            foosball_goal_timer: 0.0,
+            foosball_next_sim: 120.0,
+            gaming_active: false,
+            gaming_title_index: 0,
+            gaming_score: [0, 0],
+            gaming_timer: 0.0,
+            gaming_next_sim: 150.0,
+            karaoke_stage: KaraokeStage::Idle,
+            karaoke_song_index: 0,
+            karaoke_last_score: None,
+            karaoke_songs_sung: 0,
+            karaoke_elapsed: 0.0,
+            karaoke_day: None,
+            karaoke_next_sim: 240.0,
+        }
+    }
 }
 
 const BIL_X: f32 = 12.85;
@@ -197,18 +233,17 @@ const FOOS_TARGET: u8 = 5;
 
 fn send_home(
     nav: &NavGraph,
+    live: &LiveSessionWorker,
     chibi: &ChibiWorker,
     walker: &mut NavWalker,
+    lifecycle: Option<Mut<'_, WorkerLifecycle>>,
     routine: &mut ActiveRoutine,
     recalled: bool,
 ) {
     routine.returning = true;
     routine.desired_prop = None;
-    let arrive_anim = if recalled {
-        WorkerAnim::Work
-    } else {
-        WorkerAnim::Sleep
-    };
+    let arrive_anim = return_arrive_anim(live, recalled);
+    sync_home_lifecycle(lifecycle, arrive_anim);
     walker.set_destination(
         nav,
         chibi.base_pos,
@@ -233,12 +268,14 @@ pub fn step_office_games_system(
     chibi_cache: Option<Res<ChibiMeshCache>>,
     mut palette: Option<ResMut<WorldPalette>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut prop_ev: EventReader<PropActivated>,
     mut workers_q: Query<
         (
             Entity,
             &LiveSessionWorker,
             &mut ChibiWorker,
             &mut NavWalker,
+            Option<&mut WorkerLifecycle>,
             Option<&mut ActiveRoutine>,
             Option<&ActivePropEntity>,
         ),
@@ -248,7 +285,16 @@ pub fn step_office_games_system(
     mut bil_balls_q: Query<&mut BilliardsBall>,
     mut ktv_q: Query<&mut KaraokeBooth>,
 ) {
-    let (Some(nav), Some(clock), Some(events), Some(coord), Some(state), Some(cache), Some(pal), Some(mats)) = (
+    let (
+        Some(nav),
+        Some(clock),
+        Some(events),
+        Some(coord),
+        Some(state),
+        Some(cache),
+        Some(pal),
+        Some(mats),
+    ) = (
         nav.as_deref(),
         clock.as_deref(),
         events.as_deref_mut(),
@@ -257,12 +303,53 @@ pub fn step_office_games_system(
         chibi_cache.as_deref(),
         palette.as_deref_mut(),
         materials.as_deref_mut(),
-    ) else {
+    )
+    else {
         return;
     };
 
+    // Pro/HQ-only leisure props: if switched to Cozy, reset active state and release any lingering
+    // game routines cleanly back to valid Cozy desks with stowed props.
     if !nav.layout().is_pro() {
+        for _ in prop_ev.read() {}
+        state.billiards_stage = BilliardsStage::Idle;
+        state.foosball_active = false;
+        state.gaming_active = false;
+        state.karaoke_stage = KaraokeStage::Idle;
+        state.karaoke_elapsed = 0.0;
+        for (ent, live, chibi, mut walker, lifecycle, routine_opt, active_prop) in &mut workers_q {
+            let Some(routine) = routine_opt else {
+                continue;
+            };
+            if matches!(
+                routine.kind,
+                RoutineKind::Billiards
+                    | RoutineKind::Foosball
+                    | RoutineKind::Gaming
+                    | RoutineKind::Karaoke
+            ) {
+                let arrive_anim = return_arrive_anim(live, is_worker_recalled(live));
+                sync_home_lifecycle(lifecycle, arrive_anim);
+                if let Some(ds) = nav.desk_spot(live.desk_index) {
+                    walker.set_destination(nav, chibi.base_pos, ds.pos, ds.face, ds.sit, arrive_anim);
+                }
+                sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
+                commands.entity(ent).remove::<ActiveRoutine>();
+            }
+        }
         return;
+    }
+
+    let mut prop_billiards = false;
+    let mut prop_gaming = false;
+    let mut prop_karaoke = false;
+    for ev in prop_ev.read() {
+        match ev.id {
+            "billiards" => prop_billiards = true,
+            "game-tv" | "game_tv" => prop_gaming = true,
+            "karaoke" => prop_karaoke = true,
+            _ => {}
+        }
     }
 
     let dt = time.delta_secs().clamp(0.0, 0.1);
@@ -270,6 +357,7 @@ pub fn step_office_games_system(
 
     // Pass 1: Step existing office-game participants & collect per-game readiness on stack.
     let mut bil_total = 0u8;
+    let mut bil_returning = 0u8;
     let mut bil_arrived = 0u8;
     let mut bil_recalled = false;
     let mut bil_done = false;
@@ -287,10 +375,11 @@ pub fn step_office_games_system(
     let mut ktv_total = 0u8;
     let mut ktv_arrived = 0u8;
     let mut ktv_walking = false;
+    let mut ktv_returning_walking = false;
     let mut ktv_recalled = false;
     let mut ktv_done = false;
 
-    for (ent, live, mut chibi, walker, routine_opt, active_prop) in &mut workers_q {
+    for (ent, live, mut chibi, walker, _lifecycle, routine_opt, active_prop) in &mut workers_q {
         let Some(mut routine) = routine_opt else {
             continue;
         };
@@ -306,7 +395,13 @@ pub fn step_office_games_system(
 
         if routine.returning {
             sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
-            if !walker.is_walking() {
+            if walker.is_walking() {
+                if routine.kind == RoutineKind::Billiards {
+                    bil_returning += 1;
+                } else if routine.kind == RoutineKind::Karaoke {
+                    ktv_returning_walking = true;
+                }
+            } else {
                 commands.entity(ent).remove::<ActiveRoutine>();
             }
             continue;
@@ -386,10 +481,12 @@ pub fn step_office_games_system(
         );
     }
 
-    // Advance Billiards match state
+    // Advance Billiards match state (keep `Over` alive while players walk back to desks)
     let mut end_bil = false;
     if bil_total == 0 {
-        state.billiards_stage = BilliardsStage::Idle;
+        if bil_returning == 0 {
+            state.billiards_stage = BilliardsStage::Idle;
+        }
     } else if bil_recalled || bil_done || bil_total < 2 {
         end_bil = true;
         state.billiards_stage = BilliardsStage::Over;
@@ -462,7 +559,7 @@ pub fn step_office_games_system(
         }
     }
 
-    // Advance Karaoke Booth state + glass door
+    // Advance Karaoke Booth state + glass door (only touch door when singers are active/moving)
     let mut end_ktv = false;
     if ktv_total == 0 {
         state.karaoke_stage = KaraokeStage::Idle;
@@ -492,13 +589,16 @@ pub fn step_office_games_system(
             state.karaoke_stage = KaraokeStage::Idle;
         }
     }
-    for mut booth in &mut ktv_q {
-        booth.target_open = if ktv_walking || end_ktv { 1.15 } else { 0.0 };
+    if ktv_total > 0 || ktv_returning_walking || end_ktv {
+        let want_open = ktv_walking || ktv_returning_walking || end_ktv;
+        for mut booth in &mut ktv_q {
+            booth.target_open = if want_open { 1.15 } else { 0.0 };
+        }
     }
 
     // Pass 2: Send finished / recalled participants back to their desks.
     if end_bil || end_foos || end_game || end_ktv {
-        for (ent, live, chibi, mut walker, routine_opt, active_prop) in &mut workers_q {
+        for (ent, live, chibi, mut walker, lifecycle, routine_opt, active_prop) in &mut workers_q {
             let Some(mut routine) = routine_opt else {
                 continue;
             };
@@ -513,7 +613,15 @@ pub fn step_office_games_system(
                 _ => false,
             };
             if should_end {
-                send_home(nav, &chibi, &mut walker, &mut routine, is_worker_recalled(live));
+                send_home(
+                    nav,
+                    live,
+                    &chibi,
+                    &mut walker,
+                    lifecycle,
+                    &mut routine,
+                    is_worker_recalled(live),
+                );
                 sync_lazy_prop(&mut commands, cache, pal, mats, ent, active_prop, None);
             }
         }
@@ -522,7 +630,7 @@ pub fn step_office_games_system(
     // Pass 3: Collect free resting workers into a fixed stack buffer (zero heap allocations).
     let mut free_buf: [Option<(Entity, Vec3, f32, bool)>; 16] = [None; 16];
     let mut free_len = 0usize;
-    for (ent, live, chibi, walker, routine_opt, _) in &workers_q {
+    for (ent, live, chibi, walker, _, routine_opt, _) in &workers_q {
         if free_len >= free_buf.len() {
             break;
         }
@@ -541,8 +649,9 @@ pub fn step_office_games_system(
     }
     let mut next_free = 0usize;
 
-    // 1. Start Billiards (2 players with lazy PropKind::Cue)
-    let want_bil = events.force_billiards;
+    // 1. Start Billiards (10:00–22:00 auto with cooldown, prop click, or force)
+    let auto_bil = (600..1320).contains(&m) && clock.sim_secs >= state.billiards_next_sim;
+    let want_bil = events.force_billiards || prop_billiards || auto_bil;
     if state.billiards_stage == BilliardsStage::Idle
         && want_bil
         && free_len.saturating_sub(next_free) >= 2
@@ -553,6 +662,7 @@ pub fn step_office_games_system(
         state.billiards_shots = 0;
         state.billiards_turn = 0;
         state.billiards_shot_timer = 0.0;
+        state.billiards_next_sim = clock.sim_secs + 300.0;
         for slot in 0..2 {
             let Some((ent, home_pos, home_yaw, home_sit)) = free_buf[next_free] else {
                 break;
@@ -564,7 +674,7 @@ pub fn step_office_games_system(
             let [tx, tz] = BIL_SPOTS[slot];
             let target = Vec3::new(tx, 0.0, tz);
             let face = face_to(tx, tz, BIL_X, BIL_Z);
-            if let Ok((_, _, chibi, mut walker, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(nav, chibi.base_pos, target, face, false, WorkerAnim::Rest);
                 commands.entity(ent).insert(ActiveRoutine::new(
                     RoutineKind::Billiards,
@@ -588,14 +698,16 @@ pub fn step_office_games_system(
         }
     }
 
-    // 2. Start Foosball (2 players on opposite table sides)
-    let want_foos = events.force_foosball;
+    // 2. Start Foosball (09:00–21:00 auto with cooldown, or force)
+    let auto_foos = (540..1260).contains(&m) && clock.sim_secs >= state.foosball_next_sim;
+    let want_foos = events.force_foosball || auto_foos;
     if !state.foosball_active && want_foos && free_len.saturating_sub(next_free) >= 2 {
         events.force_foosball = false;
         state.foosball_active = true;
         state.foosball_score = [0, 0];
         state.foosball_rally_ticks = 0;
         state.foosball_goal_timer = 0.0;
+        state.foosball_next_sim = clock.sim_secs + 240.0;
         for slot in 0..2 {
             let Some((ent, home_pos, home_yaw, home_sit)) = free_buf[next_free] else {
                 break;
@@ -605,7 +717,7 @@ pub fn step_office_games_system(
                 continue;
             }
             let (target, face) = FOOS_SPOTS[slot];
-            if let Ok((_, _, chibi, mut walker, _, _)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, _)) = workers_q.get_mut(ent) {
                 walker.set_destination(nav, chibi.base_pos, target, face, false, WorkerAnim::Work);
                 commands.entity(ent).insert(ActiveRoutine::new(
                     RoutineKind::Foosball,
@@ -620,13 +732,15 @@ pub fn step_office_games_system(
         }
     }
 
-    // 3. Start Sofa Console Gaming (1–2 players holding lazy PropKind::Gamepad)
-    let want_game = events.force_gaming;
+    // 3. Start Sofa Console Gaming (09:00–22:00 auto with cooldown, prop click, or force)
+    let auto_game = (540..1320).contains(&m) && clock.sim_secs >= state.gaming_next_sim;
+    let want_game = events.force_gaming || prop_gaming || auto_game;
     if !state.gaming_active && want_game && free_len.saturating_sub(next_free) >= 1 {
         events.force_gaming = false;
         state.gaming_active = true;
         state.gaming_score = [0, 0];
         state.gaming_timer = 0.0;
+        state.gaming_next_sim = clock.sim_secs + 300.0;
         state.gaming_title_index = (state.gaming_title_index + 1) % 3;
         let seats = free_len.saturating_sub(next_free).min(2);
         for slot in 0..seats {
@@ -638,7 +752,7 @@ pub fn step_office_games_system(
                 continue;
             }
             let target = SOFA_SPOTS[slot];
-            if let Ok((_, _, chibi, mut walker, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(nav, chibi.base_pos, target, PI, true, WorkerAnim::Rest);
                 commands.entity(ent).insert(ActiveRoutine::new(
                     RoutineKind::Gaming,
@@ -662,16 +776,24 @@ pub fn step_office_games_system(
         }
     }
 
-    // 4. Start Karaoke Booth (1–2 singers holding lazy PropKind::Mic + authentic track list)
-    let friday_karaoke = clock.is_friday() && m >= 16 * 60 + 30 && m < 21 * 60 && state.karaoke_songs_sung == 0;
-    let want_ktv = events.force_karaoke || friday_karaoke;
+    // 4. Start Karaoke Booth (Friday afternoon per-day guard, 11:00–22:00 cooldown, prop click, or force)
+    let friday_karaoke = clock.is_friday()
+        && clock.is_workday
+        && (16 * 60 + 30..21 * 60).contains(&m)
+        && state.karaoke_day != Some(clock.day_index);
+    let auto_ktv = (660..1320).contains(&m) && clock.sim_secs >= state.karaoke_next_sim;
+    let want_ktv = events.force_karaoke || prop_karaoke || friday_karaoke || auto_ktv;
     if state.karaoke_stage == KaraokeStage::Idle
         && want_ktv
         && free_len.saturating_sub(next_free) >= 1
     {
         events.force_karaoke = false;
+        if friday_karaoke {
+            state.karaoke_day = Some(clock.day_index);
+        }
         state.karaoke_stage = KaraokeStage::WalkIn;
         state.karaoke_elapsed = 0.0;
+        state.karaoke_next_sim = clock.sim_secs + 360.0;
         state.karaoke_song_index = if clock.is_friday() {
             2 // "Chiều thứ Sáu"
         } else if clock.is_monday() {
@@ -689,7 +811,7 @@ pub fn step_office_games_system(
                 continue;
             }
             let target = KTV_SPOTS[slot];
-            if let Ok((_, _, chibi, mut walker, _, active_prop)) = workers_q.get_mut(ent) {
+            if let Ok((_, _, chibi, mut walker, _, _, active_prop)) = workers_q.get_mut(ent) {
                 walker.set_destination(
                     nav,
                     chibi.base_pos,
@@ -750,6 +872,7 @@ mod tests {
         world.insert_resource(CastEvents::default());
         world.insert_resource(RoutineCoordinator::default());
         world.insert_resource(OfficeGamesState::default());
+        world.init_resource::<Events<PropActivated>>();
 
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
@@ -962,5 +1085,89 @@ mod tests {
         assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
         assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
         assert_eq!(world.resource::<Assets<Image>>().len(), 0);
+    }
+
+    #[test]
+    fn pro_to_cozy_layout_switch_resets_office_games_with_zero_trapped_routines() {
+        let mut world = build_pro_world_with_resting_workers(4);
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                begin_cast_tick_system,
+                step_office_games_system,
+                step_nav_walkers_system,
+            )
+                .chain(),
+        );
+
+        world.resource_mut::<CastEvents>().force_billiards = true;
+        world.resource_mut::<CastEvents>().force_karaoke = true;
+        tick(&mut world, &mut sched, 1, 50);
+        assert_eq!(
+            world.resource::<OfficeGamesState>().billiards_stage,
+            BilliardsStage::Gather
+        );
+        assert!(world.query::<&ActiveRoutine>().iter(&world).count() >= 3);
+
+        // Switch NavGraph to Cozy layout mid-routine -> must clear OfficeGamesState & trapped ActiveRoutines
+        world.insert_resource(NavGraph::for_layout(OfficeLayout::Cozy));
+        tick(&mut world, &mut sched, 1, 50);
+
+        let st = world.resource::<OfficeGamesState>();
+        assert_eq!(st.billiards_stage, BilliardsStage::Idle);
+        assert!(!st.foosball_active);
+        assert!(!st.gaming_active);
+        assert_eq!(st.karaoke_stage, KaraokeStage::Idle);
+        assert_eq!(
+            world.query::<&ActiveRoutine>().iter(&world).count(),
+            0,
+            "Pro -> Cozy switch must remove all trapped office-game ActiveRoutine markers"
+        );
+        assert_eq!(
+            world
+                .query_filtered::<&ActivePropEntity, With<LiveSessionWorker>>()
+                .iter(&world)
+                .count(),
+            0,
+            "Pro -> Cozy switch must stow all game props"
+        );
+    }
+
+    #[test]
+    fn idle_karaoke_preserves_manual_door_toggle_and_prop_click_starts_games() {
+        let mut world = build_pro_world_with_resting_workers(4);
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                begin_cast_tick_system,
+                step_office_games_system,
+                step_nav_walkers_system,
+            )
+                .chain(),
+        );
+
+        // Manually open karaoke door while idle -> step_office_games_system must NOT slam it shut!
+        for mut booth in world.query::<&mut KaraokeBooth>().iter_mut(&mut world) {
+            booth.target_open = 1.15;
+        }
+        tick(&mut world, &mut sched, 3, 50);
+        for booth in world.query::<&KaraokeBooth>().iter(&world) {
+            assert!(
+                (booth.target_open - 1.15).abs() < 1e-4,
+                "Idle karaoke system must not overwrite manual door open state"
+            );
+        }
+
+        // Sending PropActivated("billiards") starts a 2-player Billiards game
+        world.resource_mut::<Events<PropActivated>>().send(PropActivated {
+            id: "billiards",
+            place: "lounge",
+            label: "Pool Table",
+        });
+        tick(&mut world, &mut sched, 1, 50);
+        assert_eq!(
+            world.resource::<OfficeGamesState>().billiards_stage,
+            BilliardsStage::Gather
+        );
     }
 }

@@ -3,10 +3,11 @@ pub mod office_games;
 pub mod staff_roles;
 pub mod street_outings;
 
+use crate::chibi::WorkerAnim;
 use crate::chibi_meshes::ChibiMeshCache;
 use crate::chibi_props::{ActivePropEntity, PropKind, set_active_prop};
 use crate::palette::WorldPalette;
-use crate::people::LiveSessionWorker;
+use crate::people::{LiveSessionWorker, WorkerLifecycle};
 use bevy::prelude::*;
 
 pub use meals_breaks::{
@@ -304,6 +305,29 @@ pub(crate) fn is_worker_recalled(live: &LiveSessionWorker) -> bool {
     !is_worker_resting(live)
 }
 
+#[inline]
+pub(crate) fn return_arrive_anim(live: &LiveSessionWorker, recalled: bool) -> WorkerAnim {
+    if recalled {
+        crate::people::anim_for_status(&live.status)
+    } else {
+        WorkerAnim::Sleep
+    }
+}
+
+#[inline]
+pub(crate) fn sync_home_lifecycle(
+    lifecycle: Option<Mut<'_, WorkerLifecycle>>,
+    arrive_anim: WorkerAnim,
+) {
+    if let Some(mut lc) = lifecycle {
+        *lc = if arrive_anim == WorkerAnim::Sleep {
+            WorkerLifecycle::Resting
+        } else {
+            WorkerLifecycle::Seated
+        };
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn sync_lazy_prop(
     commands: &mut Commands,
@@ -504,6 +528,305 @@ mod tests {
                 .count(),
             0,
             "Recalled workers must stow all lazy props upon return"
+        );
+    }
+
+    #[test]
+    fn live_sync_mid_routine_preserves_prop_anim_and_unload_resets_routine_resources() {
+        use crate::palette::WorldEntity;
+        use crate::{BackdropAssets, OfficeIbl, unload_full_office_world};
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(CastClock::default());
+        world.insert_resource(CastEvents::default());
+        world.insert_resource(RoutineCoordinator::default());
+        world.insert_resource(OfficeGamesState::default());
+        world.insert_resource(MealsBreaksState::default());
+        world.insert_resource(StreetOutingsState::default());
+        world.init_resource::<Events<PropActivated>>();
+
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Pro,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        let mut specs = vec![LiveWorkerSpec {
+            session_id: "singer-0".to_owned(),
+            agent: "claude".to_owned(),
+            name: "Singer".to_owned(),
+            status: "rest".to_owned(),
+            desk_hint: 0,
+            tool_kind: None,
+            tool_label: None,
+            git_dirty: 0,
+            subagents: Vec::new(),
+        }];
+        sync_live_workers_in_world(&mut world, &specs, ChibiLook::Pixar);
+        let nav = world.resource::<NavGraph>().clone();
+        for (live, mut chibi, mut walker) in world
+            .query::<(&LiveSessionWorker, &mut ChibiWorker, &mut NavWalker)>()
+            .iter_mut(&mut world)
+        {
+            if let Some(ds) = nav.desk_spot(live.desk_index) {
+                chibi.base_pos = ds.pos;
+                chibi.base_yaw = ds.face;
+                chibi.sitting = true;
+                chibi.anim = WorkerAnim::Sleep;
+                walker.waypoints.clear();
+                walker.cursor = 0;
+            }
+        }
+
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                begin_cast_tick_system,
+                step_office_games_system,
+                step_meals_breaks_system,
+                step_street_outings_system,
+                step_nav_walkers_system,
+            )
+                .chain(),
+        );
+
+        world.resource_mut::<CastEvents>().force_karaoke = true;
+        // Advance until singer arrives in KaraokeBooth and starts singing
+        for _ in 0..160 {
+            world
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(100));
+            sched.run(&mut world);
+            world.flush();
+            if world.resource::<OfficeGamesState>().karaoke_stage == KaraokeStage::Singing {
+                break;
+            }
+        }
+        assert_eq!(
+            world.resource::<OfficeGamesState>().karaoke_stage,
+            KaraokeStage::Singing
+        );
+
+        // Run sync_live_workers_in_world mid-Karaoke with updated metadata: must NOT strip Mic or clobber Sing!
+        specs[0].name = "Singer Updated".to_owned();
+        specs[0].git_dirty = 3;
+        sync_live_workers_in_world(&mut world, &specs, ChibiLook::Pixar);
+
+        let (live, chibi, prop) = world
+            .query::<(&LiveSessionWorker, &ChibiWorker, Option<&ActivePropEntity>)>()
+            .single(&world)
+            .expect("single live worker");
+        assert_eq!(live.name, "Singer Updated");
+        assert_eq!(live.git_dirty, 3);
+        assert_eq!(
+            chibi.anim,
+            WorkerAnim::Sing,
+            "sync_live_workers_in_world must not clobber ActiveRoutine animation"
+        );
+        assert_eq!(
+            prop.map(|p| p.kind),
+            Some(crate::chibi_props::PropKind::Mic),
+            "sync_live_workers_in_world must not strip ActiveRoutine prop"
+        );
+
+        // Unload full office world -> must reset OfficeGamesState, MealsBreaksState, StreetOutingsState & Coordinator!
+        world.resource_mut::<MealsBreaksState>().teatime_active = true;
+        world.resource_mut::<StreetOutingsState>().evswap_active = true;
+        let world_ents: Vec<Entity> = world
+            .query_filtered::<Entity, With<WorldEntity>>()
+            .iter(&world)
+            .collect();
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = world.remove_resource::<WorldPalette>();
+                    let mut ba = world.remove_resource::<BackdropAssets>();
+                    let ibl = world.remove_resource::<OfficeIbl>();
+                    let cm = world.remove_resource::<ChibiMeshCache>();
+                    let mut cmds = world.commands();
+                    unload_full_office_world(
+                        &mut cmds,
+                        world_ents,
+                        pal.as_mut(),
+                        ba.as_mut(),
+                        ibl.as_ref(),
+                        cm.as_ref(),
+                        &mut meshes,
+                        &mut mats,
+                        &mut imgs,
+                    );
+                });
+            });
+        });
+        world.flush();
+
+        assert_eq!(
+            world.resource::<OfficeGamesState>().karaoke_stage,
+            KaraokeStage::Idle
+        );
+        assert!(!world.resource::<MealsBreaksState>().teatime_active);
+        assert!(!world.resource::<StreetOutingsState>().evswap_active);
+        assert_eq!(world.resource::<RoutineCoordinator>().claimed_count(), 0);
+    }
+
+    #[test]
+    fn cozy_layout_runs_meals_breaks_and_street_outings_and_aborts_on_backdrop_switch() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(SharedFontEngine::new(assets_dir.clone()));
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(CastClock::default());
+        world.insert_resource(CastEvents::default());
+        world.insert_resource(RoutineCoordinator::default());
+        world.insert_resource(OfficeGamesState::default());
+        world.insert_resource(MealsBreaksState::default());
+        world.insert_resource(StreetOutingsState::default());
+        world.init_resource::<Events<PropActivated>>();
+
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut shared_fonts: Mut<SharedFontEngine>| {
+                        let fonts = shared_fonts.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Cozy,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        world.flush();
+
+        let specs: Vec<LiveWorkerSpec> = (0..4)
+            .map(|i| LiveWorkerSpec {
+                session_id: format!("cozy-{i}"),
+                agent: "claude".to_owned(),
+                name: format!("Cozy {i}"),
+                status: "rest".to_owned(),
+                desk_hint: i,
+                tool_kind: None,
+                tool_label: None,
+                git_dirty: 0,
+                subagents: Vec::new(),
+            })
+            .collect();
+        sync_live_workers_in_world(&mut world, &specs, ChibiLook::Pixar);
+        let nav = world.resource::<NavGraph>().clone();
+        for (live, mut chibi, mut walker) in world
+            .query::<(&LiveSessionWorker, &mut ChibiWorker, &mut NavWalker)>()
+            .iter_mut(&mut world)
+        {
+            if let Some(ds) = nav.desk_spot(live.desk_index) {
+                chibi.base_pos = ds.pos;
+                chibi.base_yaw = ds.face;
+                chibi.sitting = true;
+                chibi.anim = WorkerAnim::Sleep;
+                walker.waypoints.clear();
+                walker.cursor = 0;
+            }
+        }
+
+        let mut sched = Schedule::default();
+        sched.add_systems(
+            (
+                begin_cast_tick_system,
+                step_office_games_system,
+                step_meals_breaks_system,
+                step_street_outings_system,
+                step_nav_walkers_system,
+            )
+                .chain(),
+        );
+
+        {
+            let mut clk = world.resource_mut::<CastClock>();
+            clk.minutes = 12 * 60;
+            clk.weekday = 2;
+        }
+        {
+            let mut ev = world.resource_mut::<CastEvents>();
+            ev.force_comnha = true;
+            ev.battery_pct = 10;
+        }
+        for _ in 0..80 {
+            world
+                .resource_mut::<Time>()
+                .advance_by(Duration::from_millis(100));
+            sched.run(&mut world);
+            world.flush();
+            for (chibi, walker) in world.query::<(&ChibiWorker, &NavWalker)>().iter(&world) {
+                if walker.is_walking() {
+                    let mut prev = chibi.base_pos;
+                    for &wp in &walker.waypoints[walker.cursor..] {
+                        assert!(!nav.crosses_wall(prev, wp));
+                        prev = wp;
+                    }
+                }
+            }
+        }
+        assert!(
+            world.resource::<MealsBreaksState>().comnha_active_count > 0
+                || world.resource::<MealsBreaksState>().comnha_served > 0,
+            "Cozy layout must run ComNha cleanly"
+        );
+        assert!(
+            world.resource::<StreetOutingsState>().evswap_active
+                || world.resource::<StreetOutingsState>().evswap_completed > 0,
+            "Cozy layout must run EvSwap cleanly"
+        );
+
+        // Switch backdrop away from City -> any active street outing aborts and restores Visibility::Visible!
+        world.resource_mut::<CastEvents>().city_street_available = false;
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(100));
+        sched.run(&mut world);
+        world.flush();
+
+        assert!(!world.resource::<StreetOutingsState>().evswap_active);
+        assert!(
+            world
+                .query_filtered::<&Visibility, With<LiveSessionWorker>>()
+                .iter(&world)
+                .all(|v| *v == Visibility::Visible),
+            "Switching backdrop away from City must restore Visibility::Visible on all street workers"
         );
     }
 }
