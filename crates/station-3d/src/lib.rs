@@ -29,9 +29,10 @@ pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
 pub use cast::{
-    ActiveRoutine, BilliardsStage, CastClock, CastEvents, FarewellStage, InternTenure,
-    KARAOKE_SONGS, KaraokeSong, KaraokeStage, OfficeGamesState, OfficeStaffNpc, OutingShopKind,
-    RoutineCoordinator, RoutineKind, SongMood, StaffCastState, StaffRole, karaoke_score,
+    ActiveRoutine, BilliardsStage, CastClock, CastEvents, DutyChore, ErrandKind, FarewellStage,
+    InternTenure, KARAOKE_SONGS, KaraokeSong, KaraokeStage, MealsBreaksState, OfficeGamesState,
+    OfficeStaffNpc, OutingShopKind, RoutineCoordinator, RoutineKind, SongMood, StaffCastState,
+    StaffRole, karaoke_score,
 };
 pub use chibi::{ChibiLook, ChibiRig, OutfitKind, solve_two_bone_ik};
 pub use chibi_meshes::{ChibiMeshCache, HairStyle};
@@ -130,6 +131,7 @@ fn register_office_runtime(
         .insert_resource(cast::CastEvents::default())
         .insert_resource(cast::RoutineCoordinator::default())
         .insert_resource(cast::OfficeGamesState::default())
+        .insert_resource(cast::MealsBreaksState::default())
         .insert_resource(SharedFontEngine::new(assets_dir))
         .init_resource::<UiInputCapture>()
         .add_event::<interact::PropActivated>()
@@ -148,7 +150,8 @@ fn register_office_runtime(
                 props_detail::shredder_cups::animate_shredder_bins_and_cups_system,
                 cast::step_staff_roles_system.before(people::step_nav_walkers_system),
                 cast::begin_cast_tick_system.before(cast::step_office_games_system),
-                cast::step_office_games_system.before(people::step_nav_walkers_system),
+                cast::step_office_games_system.before(cast::step_meals_breaks_system),
+                cast::step_meals_breaks_system.before(people::step_nav_walkers_system),
                 people::step_nav_walkers_system.before(people::animate_chibis_system),
                 people::animate_chibis_system,
                 people::update_team_lines_system.after(people::step_nav_walkers_system),

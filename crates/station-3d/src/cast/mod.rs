@@ -1,3 +1,4 @@
+pub mod meals_breaks;
 pub mod office_games;
 pub mod staff_roles;
 
@@ -7,6 +8,11 @@ use crate::palette::WorldPalette;
 use crate::people::LiveSessionWorker;
 use bevy::prelude::*;
 
+pub use meals_breaks::{
+    BREAK_COFFEE_DIALOGUE, COM_NHA_WAIT_SPOTS, COM_TRUA_FRIDAY_DIALOGUE,
+    COM_TRUA_WEEKDAY_DIALOGUE, DutyChore, ErrandKind, MealsBreaksState, TEATIME_DIALOGUE,
+    step_meals_breaks_system,
+};
 pub use office_games::{
     BilliardsStage, KARAOKE_SONGS, KaraokeSong, KaraokeStage, OfficeGamesState, SongMood,
     karaoke_score, step_office_games_system,
