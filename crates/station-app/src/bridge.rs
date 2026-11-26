@@ -507,51 +507,105 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
 }
 
 fn parse_perms_from_json(val: &Value) -> Vec<PendingPermCard> {
-    let Some(arr) = val.get("perms").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    arr.iter()
-        .filter_map(|p| {
-            let id = p.get("id").and_then(Value::as_str)?.to_owned();
-            Some(PendingPermCard {
+    let mut out: Vec<PendingPermCard> = val
+        .get("perms")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let id = p.get("id").and_then(Value::as_str)?.to_owned();
+                    Some(PendingPermCard {
+                        id,
+                        session_id: p
+                            .get("sess")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        agent: p
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        // `PendingPerm::tool_type` serializes as `"type"` via `#[serde(rename = "type")]`.
+                        tool: p
+                            .get("type")
+                            .or_else(|| p.get("tool_type"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        summary: p
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                        kind: p
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or("permission")
+                            .to_owned(),
+                        danger: p
+                            .get("danger")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned),
+                        tool_input: p.get("tool_input").cloned(),
+                        meta: p.get("meta").cloned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(stuck_arr) = val.get("stuck").and_then(Value::as_array) {
+        for st in stuck_arr {
+            let sess = st
+                .get("sess")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if sess.is_empty() {
+                continue;
+            }
+            let id = st
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("stuck:{sess}"));
+            if out.iter().any(|p| p.id == id) {
+                continue;
+            }
+            let n = st.get("n").and_then(Value::as_u64).unwrap_or(0);
+            let mins = st.get("mins").and_then(Value::as_u64).unwrap_or(0);
+            let kind = st.get("kind").and_then(Value::as_str).unwrap_or("loop");
+            out.push(PendingPermCard {
                 id,
-                session_id: p
-                    .get("sess")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                agent: p
+                session_id: sess,
+                agent: st
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                // `PendingPerm::tool_type` serializes as `"type"` via `#[serde(rename = "type")]`.
-                tool: p
-                    .get("type")
-                    .or_else(|| p.get("tool_type"))
+                tool: "loop".to_owned(),
+                summary: st
+                    .get("label")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                summary: p
-                    .get("detail")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                kind: p
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("permission")
-                    .to_owned(),
-                danger: p
-                    .get("danger")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned),
-                tool_input: p.get("tool_input").cloned(),
-                meta: p.get("meta").cloned(),
-            })
-        })
-        .collect()
+                kind: "stuck".to_owned(),
+                danger: None,
+                tool_input: None,
+                meta: Some(json!({
+                    "stuck_kind": kind,
+                    "stuck_n": n,
+                    "stuck_next": n + 1,
+                    "stuck_mins": mins,
+                    "stuck_usd": st.get("usd").cloned().unwrap_or(Value::Null),
+                })),
+            });
+        }
+    }
+    out
 }
 
 fn parse_ci_alerts_from_chat_json(val: &Value) -> Vec<PendingPermCard> {
@@ -613,38 +667,62 @@ fn parse_accounts_from_view(val: &Value) -> Vec<AccountOption> {
     let active_slug = val.get("active").and_then(Value::as_str).unwrap_or("");
     let labels = val.get("labels").and_then(Value::as_object);
     let mut out = Vec::new();
-    let main_lbl = labels
-        .and_then(|m| m.get("_main").or_else(|| m.get("")))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Main")
-        .to_owned();
-    out.push(AccountOption {
-        slug: String::new(),
-        label: main_lbl,
-        active: active_slug.is_empty(),
-        pct: None,
-    });
+    let mut has_main = false;
+
     if let Some(arr) = val.get("accounts").and_then(Value::as_array) {
         for a in arr {
-            let Some(name) = a.get("name").and_then(Value::as_str).filter(|s| !s.is_empty())
-            else {
+            let Some(name) = a.get("name").and_then(Value::as_str) else {
                 continue;
             };
+            if name.is_empty() {
+                has_main = true;
+            }
+            let fallback = if name.is_empty() { "Main" } else { name };
             let lbl = a
                 .get("label")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-                .or_else(|| labels.and_then(|m| m.get(name)).and_then(Value::as_str))
-                .unwrap_or(name)
+                .or_else(|| {
+                    if name.is_empty() {
+                        labels
+                            .and_then(|m| m.get("_main").or_else(|| m.get("")))
+                            .and_then(Value::as_str)
+                    } else {
+                        labels.and_then(|m| m.get(name)).and_then(Value::as_str)
+                    }
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or(fallback)
                 .to_owned();
+            let active = a
+                .get("active")
+                .and_then(Value::as_bool)
+                .unwrap_or(active_slug == name);
             out.push(AccountOption {
                 slug: name.to_owned(),
                 label: lbl,
-                active: active_slug == name,
+                active,
                 pct: None,
             });
         }
+    }
+
+    if !has_main {
+        let main_lbl = labels
+            .and_then(|m| m.get("_main").or_else(|| m.get("")))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Main")
+            .to_owned();
+        out.insert(
+            0,
+            AccountOption {
+                slug: String::new(),
+                label: main_lbl,
+                active: active_slug.is_empty(),
+                pct: None,
+            },
+        );
     }
     out
 }
@@ -1245,9 +1323,10 @@ fn spawn_attached_sse_client(
                                 let Some(q) = maybe_q else { break; };
                                 match q {
                                     RemoteQueryCmd::FetchLog { session_id } => {
-                                        let url = format!("{base_q}/api/log?id={session_id}");
+                                        let url = format!("{base_q}/api/log");
                                         let items = match client_q
                                             .get(url)
+                                            .query(&[("id", session_id.as_str())])
                                             .header("host", &host_q)
                                             .timeout(Duration::from_secs(3))
                                             .send()
@@ -1265,9 +1344,10 @@ fn spawn_attached_sse_client(
                                             .try_send(BridgeAsyncResult::SessionLog { session_id, items });
                                     }
                                     RemoteQueryCmd::FetchUndo { session_id } => {
-                                        let url = format!("{base_q}/api/undo?id={session_id}");
+                                        let url = format!("{base_q}/api/undo");
                                         let view = match client_q
                                             .get(url)
+                                            .query(&[("id", session_id.as_str())])
                                             .header("host", &host_q)
                                             .timeout(Duration::from_secs(3))
                                             .send()
@@ -2704,7 +2784,12 @@ fn sync_office_core_to_ui(
             .values()
             .map(|p| {
                 let meta = if p.kind == "denied" {
-                    office.chat.by_id(&p.id).and_then(|m| m.deny.clone())
+                    office.chat.by_id(&p.id).and_then(|m| m.deny.as_ref()).map(|v| {
+                        station_core::redact::redact_and_clip_json_value(
+                            v,
+                            station_core::redact::TOOL_INPUT_WIRE_MAX_STR_CHARS,
+                        )
+                    })
                 } else {
                     None
                 };
@@ -2716,7 +2801,12 @@ fn sync_office_core_to_ui(
                     summary: p.detail.clone(),
                     kind: p.kind.clone(),
                     danger: p.danger.clone(),
-                    tool_input: office.hold_tool_input(&p.id).cloned(),
+                    tool_input: office.hold_tool_input(&p.id).map(|v| {
+                        station_core::redact::redact_and_clip_json_value(
+                            v,
+                            station_core::redact::TOOL_INPUT_WIRE_MAX_STR_CHARS,
+                        )
+                    }),
                     meta,
                 }
             })
@@ -2908,6 +2998,7 @@ fn sync_live_state_to_ui(
     time: Res<Time>,
     mut bridge: ResMut<LiveServerBridge>,
     mut ui: ResMut<UiState>,
+    i18n: Option<Res<I18nStore>>,
     windows: Query<&Window>,
     mut tray: Option<ResMut<TrayState>>,
 ) {
@@ -2934,16 +3025,28 @@ fn sync_live_state_to_ui(
             }
             BridgeAsyncResult::RewriteResult(res) => {
                 ui.compose_rewriting = false;
+                let title = i18n
+                    .as_deref()
+                    .map(|t| t.tr("chat.coach.label"))
+                    .unwrap_or_else(|| "chat.coach.label".to_owned());
                 match res {
                     Ok(rewritten) if !rewritten.trim().is_empty() => {
                         ui.compose_draft = rewritten;
-                        ui.push_toast("Prompt", "Rewritten");
+                        let body = i18n
+                            .as_deref()
+                            .map(|t| t.tr("chat.coach.rewritten"))
+                            .unwrap_or_else(|| "chat.coach.rewritten".to_owned());
+                        ui.push_toast(title, body);
                     }
                     Ok(_) => {
-                        ui.push_toast("Prompt", "Rewrite returned empty text");
+                        let body = i18n
+                            .as_deref()
+                            .map(|t| t.tr("chat.coach.why.empty"))
+                            .unwrap_or_else(|| "chat.coach.why.empty".to_owned());
+                        ui.push_toast(title, body);
                     }
                     Err(err) => {
-                        ui.push_toast("Prompt", err);
+                        ui.push_toast(title, err);
                     }
                 }
             }
@@ -3728,6 +3831,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast("Permission", "Server offline — cannot send decision");
+                        continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
@@ -3756,6 +3860,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
+                        continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
@@ -3794,6 +3899,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
+                        continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
@@ -3823,6 +3929,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.unreachable"));
+                        continue;
                     }
                 }
                 ui.push_toast(i18n.tr("station.approval"), i18n.tr("perm.done.skip"));
@@ -3850,6 +3957,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("chat.deny.title"), i18n.tr("perm.unreachable"));
+                        continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
@@ -3879,6 +3987,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("chat.loop.stopping"));
@@ -3904,6 +4013,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 ui.push_toast(i18n.tr("chat.loop.title"), i18n.tr("chat.loop.hintSent"));
@@ -4004,6 +4114,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("chat.ci.title"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 ui.push_toast(i18n.tr("chat.ci.title"), i18n.tr("chat.ci.sent"));
@@ -4145,6 +4256,19 @@ fn process_ui_actions(
                 }
                 BridgeBackend::InProcess { app_state, .. } => {
                     if let Ok(mut office) = app_state.office.lock() {
+                        if office
+                            .sessions
+                            .get(&session_id)
+                            .is_some_and(|s| s.status != "rest")
+                        {
+                            ui.session_undo = Some(SessionUndoView {
+                                session_id,
+                                loading: false,
+                                error: Some("busy".to_owned()),
+                                ..Default::default()
+                            });
+                            continue;
+                        }
                         let res =
                             office
                                 .undo
@@ -4177,22 +4301,52 @@ fn process_ui_actions(
                             launch_toast_label: None,
                         });
                     }
-                    BridgeBackend::InProcess { app_state, .. } => {
+                    BridgeBackend::InProcess {
+                        app_state,
+                        runtime_handle,
+                        ..
+                    } => {
                         let ts = now_ms();
                         let note = format!("Heads up: reverted files from your last turn: {joined}");
-                        let (cwd, agent, name) = app_state
+                        let (is_busy, cwd, agent, name) = app_state
                             .office
                             .lock()
                             .ok()
                             .and_then(|o| {
-                                o.sessions
-                                    .get(&session_id)
-                                    .map(|s| (s.cwd.clone(), s.agent.clone(), s.name.clone()))
+                                o.sessions.get(&session_id).map(|s| {
+                                    (
+                                        s.status != "rest",
+                                        s.cwd.clone(),
+                                        s.agent.clone(),
+                                        s.name.clone(),
+                                    )
+                                })
                             })
                             .unwrap_or_else(|| {
-                                (String::new(), "claude".to_owned(), session_id.clone())
+                                (false, String::new(), "claude".to_owned(), session_id.clone())
                             });
-                        if let Ok(mut q) = app_state.steer_queue.lock() {
+                        if !is_busy
+                            && !cwd.is_empty()
+                            && let Some(rt) = runtime_handle
+                        {
+                            let tasks = app_state.tasks.clone();
+                            let req = station_core::state::tasks::TaskStartRequest {
+                                dir: cwd,
+                                text: note,
+                                agent: if agent.is_empty() {
+                                    "claude".to_owned()
+                                } else {
+                                    agent
+                                },
+                                model: String::new(),
+                                fork: false,
+                            };
+                            rt.spawn(async move {
+                                let _ = station_core::state::tasks::start_and_spawn(
+                                    tasks, req, ts, None,
+                                );
+                            });
+                        } else if let Ok(mut q) = app_state.steer_queue.lock() {
                             q.enqueue(
                                 station_core::state::steer::QueuedSteer {
                                     key: session_id.clone(),
@@ -4209,6 +4363,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("drawer.undo.btn"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 ui.push_toast(i18n.tr("drawer.undo.btn"), i18n.tr("drawer.undo.told"));
@@ -4260,33 +4415,68 @@ fn process_ui_actions(
                             launch_toast_label: None,
                         });
                     }
-                    BridgeBackend::InProcess { app_state, .. } => {
+                    BridgeBackend::InProcess {
+                        app_state,
+                        runtime_handle,
+                        ..
+                    } => {
                         let ts = now_ms();
-                        let (cwd, agent, name) = app_state
+                        let (cwd, agent, name, inbox) = app_state
                             .office
                             .lock()
                             .ok()
                             .and_then(|o| {
-                                o.sessions
-                                    .get(&session_id)
-                                    .map(|s| (s.cwd.clone(), s.agent.clone(), s.name.clone()))
+                                o.sessions.get(&session_id).map(|s| {
+                                    (
+                                        s.cwd.clone(),
+                                        s.agent.clone(),
+                                        s.name.clone(),
+                                        s.inbox.clone(),
+                                    )
+                                })
                             })
                             .unwrap_or_else(|| {
-                                (String::new(), "claude".to_owned(), session_id.clone())
+                                (
+                                    String::new(),
+                                    "claude".to_owned(),
+                                    session_id.clone(),
+                                    None,
+                                )
                             });
-                        if let Ok(mut q) = app_state.steer_queue.lock() {
-                            q.enqueue(
-                                station_core::state::steer::QueuedSteer {
-                                    key: session_id.clone(),
-                                    sid: Some(session_id),
-                                    dir: (!cwd.is_empty()).then_some(cwd),
-                                    agent,
-                                    text: clean,
-                                    name: name.clone(),
-                                    at: ts,
-                                },
-                                ts,
+                        let can_deliver_now = if agent == "claude"
+                            && let Some(ib) = inbox.as_deref()
+                        {
+                            let inbound = station_core::state::steer::inbound_from(
+                                Some(app_state.claude_dir.as_path()),
+                                (!cwd.is_empty()).then(|| std::path::Path::new(cwd.as_str())),
                             );
+                            let sock_ok = station_core::state::steer::is_socket_path(ib);
+                            station_core::state::steer::steerable(Some(ib), "", inbound, sock_ok).ok
+                        } else {
+                            false
+                        };
+                        let queued = station_core::state::steer::QueuedSteer {
+                            key: session_id.clone(),
+                            sid: Some(session_id),
+                            dir: (!cwd.is_empty()).then_some(cwd),
+                            agent,
+                            text: clean.clone(),
+                            name: name.clone(),
+                            at: ts,
+                        };
+                        if can_deliver_now
+                            && let (Some(ib), Some(rt)) = (inbox, runtime_handle)
+                        {
+                            let state_arc = Arc::clone(app_state);
+                            rt.spawn(async move {
+                                if !station_core::state::steer::deliver(&ib, &clean, 3000).await
+                                    && let Ok(mut q) = state_arc.steer_queue.lock()
+                                {
+                                    q.enqueue(queued, ts);
+                                }
+                            });
+                        } else if let Ok(mut q) = app_state.steer_queue.lock() {
+                            q.enqueue(queued, ts);
                         }
                         ui.push_toast(
                             i18n.tr("chat.steer.btn"),
@@ -4295,6 +4485,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("chat.steer.btn"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
@@ -4331,6 +4522,7 @@ fn process_ui_actions(
                     }
                     BridgeBackend::BindError { .. } => {
                         ui.push_toast(i18n.tr("chat.loop.stop"), i18n.tr("drawer.unreachable"));
+                        continue;
                     }
                 }
                 ui.push_toast(i18n.tr("chat.loop.stop"), i18n.tr("chat.task.stopped"));
@@ -7664,5 +7856,251 @@ mod tests {
             });
         app.update();
         assert!(!app_state.office.lock().unwrap().pins.contains_key("s1"));
+    }
+
+    #[test]
+    fn in_process_sync_redacts_and_clips_tool_input_and_rejects_busy_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            "127.0.0.1".to_owned(),
+            0,
+            false,
+            false,
+        );
+        let app_state = match &bridge.backend {
+            BridgeBackend::InProcess { app_state, .. } => app_state.clone(),
+            _ => panic!("expected InProcess, got {:?}", bridge.mode()),
+        };
+
+        let target_file = dir.path().join("kept.txt");
+        std::fs::write(&target_file, "v1").unwrap();
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        {
+            let mut office = app_state.office.lock().unwrap();
+            office.ingest_raw_event(json!({
+                "session_id": "s-busy",
+                "hook_event_name": "SessionStart",
+                "cwd": dir.path().to_string_lossy()
+            }));
+            office.ingest_raw_event(json!({
+                "session_id": "s-busy",
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "edit kept.txt"
+            }));
+            office.ingest_raw_event(json!({
+                "session_id": "s-busy",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Edit",
+                "tool_input": { "file_path": target_file.to_string_lossy() }
+            }));
+            std::fs::write(&target_file, "v2").unwrap();
+
+            let huge = "plan step line\n".repeat(1500);
+            office.register_hold_with_input(
+                station_core::state::sessions::PendingPerm {
+                    id: "plan-secret".to_owned(),
+                    sess: "s-busy".to_owned(),
+                    name: "claude".to_owned(),
+                    kind: "plan".to_owned(),
+                    tool_type: "plan".to_owned(),
+                    label: "Plan".to_owned(),
+                    detail: "Plan".to_owned(),
+                    danger: None,
+                    created_at: now_ms(),
+                },
+                tx,
+                Some(json!({
+                    "plan": format!("Use sk-secret-12345678901234567890 and {huge}")
+                })),
+            );
+        }
+
+        let mut ui = UiState::new_live(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        sync_office_core_to_ui(&app_state, &HashSet::new(), &mut ui);
+        let card = ui
+            .pending_perms
+            .iter()
+            .find(|p| p.id == "plan-secret")
+            .expect("plan card synced");
+        let plan_text = card
+            .tool_input
+            .as_ref()
+            .and_then(|v| v.get("plan"))
+            .and_then(Value::as_str)
+            .expect("plan string");
+        assert!(!plan_text.contains("sk-secret-12345678901234567890"));
+        assert!(plan_text.ends_with('…'));
+        assert!(
+            plan_text.chars().count() <= station_core::redact::TOOL_INPUT_WIRE_MAX_STR_CHARS
+        );
+
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(bridge)
+            .insert_resource(ui)
+            .insert_resource(I18nStore::load_from_assets(&assets, "en"))
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        app.world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::ApplySessionUndo {
+                session_id: "s-busy".to_owned(),
+                files: vec![target_file.to_string_lossy().into_owned()],
+            });
+        app.update();
+
+        let undo = app
+            .world()
+            .resource::<UiState>()
+            .session_undo
+            .as_ref()
+            .expect("undo state populated");
+        assert_eq!(undo.error.as_deref(), Some("busy"));
+        assert_eq!(std::fs::read_to_string(&target_file).unwrap(), "v2");
+    }
+
+    #[test]
+    fn remote_snapshot_parses_stuck_entries_and_accounts_preserves_renamed_main() {
+        let snap_lock = Arc::new(Mutex::new(RemoteSnapshot::default()));
+        apply_snapshot_to_remote(
+            &snap_lock,
+            &json!({
+                "sessions": [],
+                "perms": [{
+                    "id": "den-remote",
+                    "sess": "s1",
+                    "name": "claude",
+                    "kind": "denied",
+                    "type": "bash",
+                    "detail": "git push",
+                    "meta": { "reason": "blocked by policy" }
+                }],
+                "stuck": [{
+                    "id": "stuck:s1",
+                    "sess": "s1",
+                    "name": "claude",
+                    "kind": "repeat",
+                    "label": "cargo test",
+                    "n": 4,
+                    "mins": 3,
+                    "usd": 0.42
+                }],
+                "feed": []
+            }),
+        );
+        let snap = snap_lock.lock().unwrap();
+        let den = snap
+            .pending_perms
+            .iter()
+            .find(|p| p.id == "den-remote")
+            .expect("denied card parsed");
+        assert_eq!(
+            den.meta.as_ref().and_then(|m| m["reason"].as_str()),
+            Some("blocked by policy")
+        );
+        let stuck = snap
+            .pending_perms
+            .iter()
+            .find(|p| p.id == "stuck:s1")
+            .expect("stuck card parsed");
+        assert_eq!(stuck.kind, "stuck");
+        assert_eq!(stuck.summary, "cargo test");
+        assert_eq!(
+            stuck.meta.as_ref().and_then(|m| m["stuck_n"].as_u64()),
+            Some(4)
+        );
+
+        let accts = parse_accounts_from_view(&json!({
+            "active": "",
+            "accounts": [
+                { "name": "", "label": "Work Personal", "active": true },
+                { "name": "client-b", "label": "Client B", "active": false }
+            ]
+        }));
+        assert_eq!(accts.len(), 2);
+        assert_eq!(accts[0].slug, "");
+        assert_eq!(accts[0].label, "Work Personal");
+        assert!(accts[0].active);
+        assert_eq!(accts[1].slug, "client-b");
+        assert_eq!(accts[1].label, "Client B");
+    }
+
+    #[test]
+    fn bind_error_actions_emit_single_offline_toast_without_success_toast() {
+        let dir = tempfile::tempdir().unwrap();
+        let harnesses = Arc::new(HarnessService::new_win32(
+            dir.path().to_path_buf(),
+            PathBuf::from("agents-station.exe"),
+            4310,
+        ));
+        let harness_poller = HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
+        let (toast_tx, toast_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let (async_tx, async_rx) = mpsc::channel(TOAST_QUEUE_CAP);
+        let bridge = LiveServerBridge {
+            backend: BridgeBackend::BindError {
+                message: "offline".to_owned(),
+                harnesses,
+                harness_poller,
+            },
+            data_dir: dir.path().to_path_buf(),
+            assets_dir: dir.path().to_path_buf(),
+            port: 4310,
+            sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+            sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+            sys_refresh_due: false,
+            banner_pushed: true,
+            seen_perm_ids: HashSet::new(),
+            dismissed_ci_ids: HashSet::new(),
+            last_window_focused: None,
+            toast_tx,
+            toast_rx,
+            async_tx,
+            async_rx,
+        };
+
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(bridge)
+            .insert_resource(UiState::new_live(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(I18nStore::load_from_assets(&assets, "en"))
+            .add_event::<AppExit>()
+            .add_systems(Update, process_ui_actions);
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::DecidePlan {
+                id: "p1".to_owned(),
+                approve: true,
+                feedback: String::new(),
+            });
+            ui.push_action(UiAction::StopSessionTask {
+                session_id: "s1".to_owned(),
+            });
+        }
+        app.update();
+
+        let ui = app.world().resource::<UiState>();
+        assert_eq!(
+            ui.toasts.len(),
+            2,
+            "each offline action must emit exactly 1 offline toast, got {:?}",
+            ui.toasts
+        );
     }
 }
