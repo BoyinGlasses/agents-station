@@ -17,7 +17,7 @@ use station_launcher::focus_launch::{Win32WindowLauncher, WindowLauncher};
 use station_launcher::{HarnessService, HarnessStatus, LaunchOutcome};
 use station_ui::state::{
     BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, SessionCard,
-    SysSnapshot, UiAction, normalize_status,
+    SysSnapshot, UiAction, normalize_feed_kind, normalize_status,
 };
 use station_ui::{ActiveDrawer, I18nStore, StageViewportRect, UiState, ViewMode};
 use std::collections::HashSet;
@@ -411,6 +411,13 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
             } else {
                 tool_calls * 420
             };
+            let ctx_tokens = s.get("ctx_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let ctx_max = s.get("ctx_max").and_then(Value::as_u64).unwrap_or(0);
+            let ctx_pct = if ctx_max > 0 {
+                (ctx_tokens as f32 / ctx_max as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             Some(SessionCard {
                 id,
                 agent,
@@ -424,6 +431,9 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
                 cost_usd,
                 tokens,
                 pinned: false,
+                age_label: String::new(),
+                ctx_pct,
+                subagents: Vec::new(),
             })
         })
         .collect()
@@ -485,14 +495,18 @@ fn parse_feed_from_json(val: &Value) -> Vec<FeedEntry> {
                 .and_then(Value::as_str)
                 .unwrap_or("info");
             Some(FeedEntry {
-                ts_label: format!("{}", (ts / 1000) % 86400),
+                ts_label: format_hhmm_ms(ts),
                 agent: f.get("name").and_then(Value::as_str)?.to_owned(),
                 message: f.get("label").and_then(Value::as_str)?.to_owned(),
-                level: if kind == "error" {
+                level: if kind == "error" || kind == "fail" {
                     "err".to_owned()
+                } else if kind == "wait" {
+                    "warn".to_owned()
                 } else {
                     "info".to_owned()
                 },
+                kind: normalize_feed_kind(kind).to_owned(),
+                attention: matches!(kind, "error" | "fail" | "wait"),
             })
         })
         .collect()
@@ -1558,6 +1572,11 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
             .values()
             .map(|s| {
                 let tok = s.input_tokens.saturating_add(s.output_tokens);
+                let ctx_pct = if s.ctx_max > 0 {
+                    (s.ctx_tokens as f32 / s.ctx_max as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 SessionCard {
                     id: s.id.clone(),
                     agent: s.agent.clone(),
@@ -1571,6 +1590,9 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
                     cost_usd: s.cost_usd,
                     tokens: if tok > 0 { tok } else { s.tool_calls * 420 },
                     pinned: office.pins.contains_key(&s.id),
+                    age_label: String::new(),
+                    ctx_pct,
+                    subagents: Vec::new(),
                 }
             })
             .collect();
@@ -1599,7 +1621,7 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
             .feed
             .iter()
             .rev()
-            .take(12)
+            .take(30)
             .map(|f| FeedEntry {
                 ts_label: format_hhmm_ms(f.ts),
                 agent: f.name.clone(),
@@ -1611,8 +1633,22 @@ fn sync_office_core_to_ui(app_state: &AppState, ui: &mut UiState) {
                 } else {
                     "info".to_owned()
                 },
+                kind: normalize_feed_kind(&f.kind).to_owned(),
+                attention: matches!(f.kind.as_str(), "error" | "fail" | "wait"),
             })
             .collect();
+        ui.kpi_tasks = office.sessions.values().map(|s| s.tool_calls).sum();
+        ui.kpi_edits = office.sessions.values().map(|s| s.edits).sum();
+        ui.kpi_cmds = office
+            .feed
+            .iter()
+            .filter(|f| normalize_feed_kind(&f.kind) == "cmd")
+            .count() as u64;
+        ui.kpi_reads = office
+            .feed
+            .iter()
+            .filter(|f| normalize_feed_kind(&f.kind) == "read")
+            .count() as u64;
 
         sync_office_chat_to_ui(&office, ui);
     }
@@ -2948,6 +2984,7 @@ mod tests {
                 cost_usd: 0.0,
                 tokens: 0,
                 pinned: false,
+                ..Default::default()
             }],
             pending_perms: vec![PendingPermCard {
                 id: "p-1".to_owned(),
@@ -4531,6 +4568,7 @@ mod tests {
                 cost_usd: 0.0,
                 tokens: 0,
                 pinned: false,
+                ..Default::default()
             },
             SessionCard {
                 id: "att-rest".to_owned(),
@@ -4545,6 +4583,7 @@ mod tests {
                 cost_usd: 0.0,
                 tokens: 0,
                 pinned: false,
+                ..Default::default()
             },
         ];
         ui.push_action(UiAction::SendPrompt {

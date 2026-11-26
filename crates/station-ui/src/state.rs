@@ -75,7 +75,33 @@ pub fn normalize_status(raw: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopBarPopover {
+    Apps,
+    Plan,
+    Settings,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentItem {
+    pub id: String,
+    pub label: String,
+    pub doing: String,
+}
+
+/// Normalizes feed item kinds to canonical `"cmd" | "edit" | "read" | "web" | "agent" | "info"`.
+pub fn normalize_feed_kind(raw: &str) -> &'static str {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cmd" | "bash" | "shell" | "run" | "test" | "command" => "cmd",
+        "edit" | "write" | "patch" => "edit",
+        "read" | "grep" | "glob" | "search" => "read",
+        "web" | "fetch" | "browse" => "web",
+        "agent" | "subagent" | "task" => "agent",
+        _ => "info",
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SessionCard {
     pub id: String,
     pub agent: String,
@@ -89,6 +115,9 @@ pub struct SessionCard {
     pub cost_usd: f64,
     pub tokens: u64,
     pub pinned: bool,
+    pub age_label: String,
+    pub ctx_pct: f32,
+    pub subagents: Vec<SubagentItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -130,12 +159,14 @@ pub struct BurnSnapshot {
     pub per_model: Vec<(String, f64)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FeedEntry {
     pub ts_label: String,
     pub agent: String,
     pub message: String,
     pub level: String, // "ok" | "warn" | "err" | "info"
+    pub kind: String,  // "cmd" | "edit" | "read" | "web" | "agent" | "info"
+    pub attention: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +261,22 @@ pub struct UiState {
     pub new_harness_id: String,
     pub new_harness_label: String,
     pub new_harness_path: String,
+    pub fullscreen_stage: bool,
+    pub photo_mode: bool,
+    pub session_filter_status: Option<String>,
+    pub session_search: String,
+    pub activity_attention_only: bool,
+    pub activity_type_filter: Option<String>,
+    pub activity_sheet_open: bool,
+    pub open_popover: Option<TopBarPopover>,
+    pub settings_tab: u8,
+    pub plan_tab: u8,
+    pub unread_chat: usize,
+    pub connected: bool,
+    pub kpi_tasks: u64,
+    pub kpi_reads: u64,
+    pub kpi_edits: u64,
+    pub kpi_cmds: u64,
     pub pending_actions: Vec<UiAction>,
     next_toast_id: u64,
 }
@@ -282,6 +329,22 @@ impl UiState {
             new_harness_id: String::new(),
             new_harness_label: String::new(),
             new_harness_path: String::new(),
+            fullscreen_stage: false,
+            photo_mode: false,
+            session_filter_status: None,
+            session_search: String::new(),
+            activity_attention_only: false,
+            activity_type_filter: None,
+            activity_sheet_open: false,
+            open_popover: None,
+            settings_tab: 0,
+            plan_tab: 0,
+            unread_chat: 0,
+            connected: true,
+            kpi_tasks: 0,
+            kpi_reads: 0,
+            kpi_edits: 0,
+            kpi_cmds: 0,
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
@@ -305,7 +368,7 @@ impl UiState {
             weather_desc: "Sunny".to_owned(),
             clock_label: "16:45".to_owned(),
             first_person: false,
-            demo_running: false,
+            demo_running: true,
             replay_playing: false,
             server_port: 4310,
             server_banner: None,
@@ -318,13 +381,20 @@ impl UiState {
                     project: "agents-station".to_owned(),
                     status: "work".to_owned(),
                     model: "claude-opus-4-6".to_owned(),
-                    last_prompt: "Build native Rust HUD & Harness Dock".to_owned(),
-                    tool: Some("Edit crates/station-ui/src/hud.rs".to_owned()),
+                    last_prompt: "Build native Rust 3-column control-room shell".to_owned(),
+                    tool: Some("Edit crates/station-ui/src/shell/topbar.rs".to_owned()),
                     tool_kind: Some("edit".to_owned()),
                     desk: 0,
                     cost_usd: 1.42,
                     tokens: 84_200,
                     pinned: true,
+                    age_label: "2m".to_owned(),
+                    ctx_pct: 0.42,
+                    subagents: vec![SubagentItem {
+                        id: "sub-ui-1".to_owned(),
+                        label: "shell-inspector".to_owned(),
+                        doing: "cargo test -p station-ui".to_owned(),
+                    }],
                 },
                 SessionCard {
                     id: "sess-codex-2".to_owned(),
@@ -339,6 +409,9 @@ impl UiState {
                     cost_usd: 0.68,
                     tokens: 41_900,
                     pinned: false,
+                    age_label: "1m".to_owned(),
+                    ctx_pct: 0.66,
+                    subagents: Vec::new(),
                 },
                 SessionCard {
                     id: "sess-agy-3".to_owned(),
@@ -353,6 +426,9 @@ impl UiState {
                     cost_usd: 0.34,
                     tokens: 52_100,
                     pinned: false,
+                    age_label: "4m".to_owned(),
+                    ctx_pct: 0.28,
+                    subagents: Vec::new(),
                 },
                 SessionCard {
                     id: "sess-oc-4".to_owned(),
@@ -367,6 +443,9 @@ impl UiState {
                     cost_usd: 0.19,
                     tokens: 18_400,
                     pinned: false,
+                    age_label: "9m".to_owned(),
+                    ctx_pct: 0.14,
+                    subagents: Vec::new(),
                 },
             ],
             pending_perms: vec![PendingPermCard {
@@ -439,20 +518,34 @@ impl UiState {
                 FeedEntry {
                     ts_label: "16:44".to_owned(),
                     agent: "claude".to_owned(),
-                    message: "Compiled station-ui i18n bundles (en/vi/th)".to_owned(),
+                    message: "Edit crates/station-ui/src/shell/topbar.rs".to_owned(),
                     level: "ok".to_owned(),
+                    kind: "edit".to_owned(),
+                    attention: false,
                 },
                 FeedEntry {
                     ts_label: "16:43".to_owned(),
                     agent: "codex".to_owned(),
-                    message: "Awaiting permission: cargo test -p station-core".to_owned(),
+                    message: "cargo test -p station-core --no-fail-fast".to_owned(),
                     level: "warn".to_owned(),
+                    kind: "cmd".to_owned(),
+                    attention: true,
+                },
+                FeedEntry {
+                    ts_label: "16:42".to_owned(),
+                    agent: "claude".to_owned(),
+                    message: "shell-inspector · cargo test -p station-ui".to_owned(),
+                    level: "info".to_owned(),
+                    kind: "agent".to_owned(),
+                    attention: false,
                 },
                 FeedEntry {
                     ts_label: "16:41".to_owned(),
                     agent: "antigravity".to_owned(),
-                    message: "HQ 44-desk RAM verified: 148.5 MB Private".to_owned(),
+                    message: "Read crates/station-3d/src/palette.rs".to_owned(),
                     level: "info".to_owned(),
+                    kind: "read".to_owned(),
+                    attention: false,
                 },
             ],
             chat: vec![
@@ -481,6 +574,22 @@ impl UiState {
             new_harness_id: String::new(),
             new_harness_label: String::new(),
             new_harness_path: String::new(),
+            fullscreen_stage: false,
+            photo_mode: false,
+            session_filter_status: None,
+            session_search: String::new(),
+            activity_attention_only: false,
+            activity_type_filter: None,
+            activity_sheet_open: false,
+            open_popover: None,
+            settings_tab: 0,
+            plan_tab: 0,
+            unread_chat: 1,
+            connected: true,
+            kpi_tasks: 24,
+            kpi_reads: 42,
+            kpi_edits: 18,
+            kpi_cmds: 11,
             pending_actions: Vec::new(),
             next_toast_id: 1,
         }
@@ -585,6 +694,7 @@ mod tests {
                 cost_usd: 0.1,
                 tokens: 100,
                 pinned: false,
+                ..Default::default()
             },
             SessionCard {
                 id: "s-wait".to_owned(),
@@ -599,6 +709,7 @@ mod tests {
                 cost_usd: 0.0,
                 tokens: 50,
                 pinned: false,
+                ..Default::default()
             },
             SessionCard {
                 id: "s-rest".to_owned(),
@@ -613,6 +724,7 @@ mod tests {
                 cost_usd: 0.0,
                 tokens: 20,
                 pinned: false,
+                ..Default::default()
             },
         ];
         assert_eq!(st.working_count(), 1);
