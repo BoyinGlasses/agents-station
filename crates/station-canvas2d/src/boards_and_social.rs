@@ -230,14 +230,16 @@ pub fn draw_duty_board(input: &DutyBoardInput, fonts: &mut FontEngine) -> RgbaSu
             "plants" => hex("#2E9E4A"),
             _ => hex("#C2577A"),
         };
-        c.round_rect(28.0, y + 2.0, 18.0, 18.0, 4.0, icon_col);
+        c.round_rect(28.0, y + 3.5, 18.0, 18.0, 4.0, icon_col);
         fonts.draw_text(&mut c, &r.chore_label, 58.0, y, 24.0, hex("#1E232B"), TextAlign::Left, Some(190.0), true, false);
         let pcol = if r.done_at.is_some() { hex("#7A8494") } else { hex("#1F4E9E") };
         let pname = if r.person.is_empty() { "—" } else { &r.person };
         fonts.draw_text(&mut c, pname, 260.0, y, 24.0, pcol, TextAlign::Left, Some(140.0), true, false);
         if let Some(at) = &r.done_at {
-            fonts.draw_text(&mut c, &format!("✓ {at}"), W as f32 - 20.0, y, 24.0, hex("#2E9E4A"), TextAlign::Right, None, true, false);
-            c.stroke_line(58.0, y + 14.0, 406.0, y + 14.0, 2.0, [46, 158, 74, 140]);
+            let done_w = fonts.draw_text(&mut c, &format!("✓ {at}"), W as f32 - 20.0, y, 24.0, hex("#2E9E4A"), TextAlign::Right, None, true, false);
+            let strike_y = y + 13.0;
+            let strike_end = (W as f32 - 20.0 - done_w - 14.0).clamp(260.0, 396.0);
+            c.stroke_line(58.0, strike_y, strike_end, strike_y, 2.0, [46, 158, 74, 140]);
         } else if r.busy {
             fonts.draw_text(&mut c, "Đang làm", W as f32 - 20.0, y + 3.0, 19.0, hex("#E8742A"), TextAlign::Right, None, true, false);
         }
@@ -460,5 +462,102 @@ mod tests {
 
         assert_eq!(draw_chat_avatar_initials("Minh Anh", "p1", 96, &mut f).width, 96);
         assert_eq!(draw_chat_avatar_initials("Claude", "__claude", 96, &mut f).width, 96);
+    }
+
+    #[test]
+    fn duty_board_strikethrough_centers_vertically_and_clears_checkmark() {
+        let mut f = fonts();
+        let mut make_board = |done_at: Option<&str>| {
+            draw_duty_board(
+                &DutyBoardInput {
+                    title: "TRỰC NHẬT".to_owned(),
+                    date: "25/11".to_owned(),
+                    off_label: None,
+                    rows: vec![DutyRowInput {
+                        chore_key: "cups".into(),
+                        chore_label: "Rửa ly".into(),
+                        person: "Mai".into(),
+                        done_at: done_at.map(str::to_owned),
+                        busy: false,
+                    }],
+                    owed_footer: None,
+                },
+                &mut f,
+            )
+        };
+
+        let open = make_board(None);
+        let done = make_board(Some("11:30"));
+
+        let pixel = |surf: &RgbaSurface, x: u32, y: u32| -> [u8; 4] {
+            let i = ((y * surf.width + x) * 4) as usize;
+            [surf.rgba[i], surf.rgba[i + 1], surf.rgba[i + 2], surf.rgba[i + 3]]
+        };
+
+        let is_green_ink = |p: [u8; 4], min_delta: i32| -> bool {
+            let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+            g - r > min_delta && g - b > min_delta.min(10)
+        };
+
+        // Measure actual vertical ink bounds of "Mai" (blue text on white board) in row 0.
+        let mut text_min_y = u32::MAX;
+        let mut text_max_y = 0u32;
+        for y in 80..120 {
+            for x in 260..340 {
+                let p = pixel(&open, x, y);
+                // Blue text `#1F4E9E` has low red channel compared to `#FBFBF8` background.
+                if (p[0] as i32) < 180 && (p[2] as i32) - (p[0] as i32) > 20 {
+                    text_min_y = text_min_y.min(y);
+                    text_max_y = text_max_y.max(y);
+                }
+            }
+        }
+        assert!(text_min_y < text_max_y, "expected visible person name ink in row 0");
+        let text_mid_y = (text_min_y as f32 + text_max_y as f32) * 0.5;
+
+        // Measure actual vertical center of the green strikethrough line in the gap x=180..240.
+        let mut strike_ys = Vec::new();
+        for y in 80..120 {
+            let green_hits = (180..240)
+                .filter(|&x| is_green_ink(pixel(&done, x, y), 15))
+                .count();
+            if green_hits >= 40 {
+                strike_ys.push(y as f32);
+            }
+        }
+        assert!(!strike_ys.is_empty(), "expected visible green strikethrough in row 0");
+        let strike_mid_y = strike_ys.iter().sum::<f32>() / strike_ys.len() as f32;
+
+        // Measure leftmost x of the `✓ 11:30` checkmark (outside the strikethrough y-band).
+        let mut check_min_x = u32::MAX;
+        for y in 80..120 {
+            if (y as f32 - strike_mid_y).abs() <= 2.5 {
+                continue;
+            }
+            for x in 360..495 {
+                if is_green_ink(pixel(&done, x, y), 20) {
+                    check_min_x = check_min_x.min(x);
+                }
+            }
+        }
+        assert!(check_min_x < 495, "expected visible green ✓ 11:30 badge");
+
+        // Measure rightmost x of the strikethrough line before the checkmark.
+        let sy = strike_mid_y.round() as u32;
+        let mut strike_max_x = 0u32;
+        for x in 260..check_min_x {
+            if is_green_ink(pixel(&done, x, sy), 15) {
+                strike_max_x = x;
+            }
+        }
+
+        assert!(
+            (strike_mid_y - text_mid_y).abs() <= 1.25,
+            "strikethrough y ({strike_mid_y:.2}) must center on text ink [{text_min_y}..{text_max_y}] (mid={text_mid_y:.2})"
+        );
+        assert!(
+            strike_max_x + 6 <= check_min_x,
+            "strikethrough end x ({strike_max_x}) must leave >= 6px gap before checkmark x ({check_min_x})"
+        );
     }
 }
