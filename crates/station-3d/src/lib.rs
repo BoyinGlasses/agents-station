@@ -14,6 +14,7 @@ pub mod interact;
 pub mod layout;
 pub mod life;
 pub mod lights;
+pub mod nav;
 pub mod palette;
 pub mod people;
 pub mod pro_floor;
@@ -37,6 +38,7 @@ pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use lights::LightingSyncSet;
+pub use nav::{NavGraph, NavSpot, StationKind};
 pub use palette::{WorldEntity, WorldPalette};
 pub use people::{LiveSessionWorker, LiveWorkerSpec};
 pub use pro_floor::{
@@ -205,6 +207,7 @@ pub fn spawn_full_office_world(
     interact::spawn_hover_ring(commands, &mut pal, materials);
 
     commands.insert_resource(layout);
+    commands.insert_resource(NavGraph::for_layout(layout));
     commands.insert_resource(backdrop);
     commands.insert_resource(lights::LightingState::new(night));
     commands.insert_resource(ibl);
@@ -249,6 +252,7 @@ pub fn unload_full_office_world(
     commands.remove_resource::<BackdropAssets>();
     commands.remove_resource::<OfficeIbl>();
     commands.remove_resource::<ChibiMeshCache>();
+    commands.remove_resource::<NavGraph>();
     commands.remove_resource::<desks::ScreenMaterials>();
     commands.remove_resource::<camera::CameraRig>();
 }
