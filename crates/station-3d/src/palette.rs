@@ -39,6 +39,7 @@ struct MaterialKey {
     metal_q: u8,
     emissive: bool,
     unlit: bool,
+    double_sided: bool,
 }
 
 pub fn parse_hex_rgb(hex: &str) -> (u8, u8, u8) {
@@ -102,6 +103,30 @@ impl WorldPalette {
         metallic: f32,
     ) -> Handle<StandardMaterial> {
         let (r, g, b) = parse_hex_rgb(hex);
+        self.mat_rgb(assets, r, g, b, roughness, metallic, false)
+    }
+
+    pub fn mat_double_sided(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+        roughness: f32,
+        metallic: f32,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        self.mat_rgb(assets, r, g, b, roughness, metallic, true)
+    }
+
+    pub fn mat_rgb(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        r: u8,
+        g: u8,
+        b: u8,
+        roughness: f32,
+        metallic: f32,
+        double_sided: bool,
+    ) -> Handle<StandardMaterial> {
         let key = MaterialKey {
             r,
             g,
@@ -111,6 +136,7 @@ impl WorldPalette {
             metal_q: (metallic.clamp(0.0, 1.0) * 100.0).round() as u8,
             emissive: false,
             unlit: false,
+            double_sided,
         };
         if let Some(h) = self.materials.get(&key) {
             return h.clone();
@@ -119,6 +145,71 @@ impl WorldPalette {
             base_color: Color::srgb_u8(r, g, b),
             perceptual_roughness: roughness.clamp(0.05, 1.0),
             metallic: metallic.clamp(0.0, 1.0),
+            cull_mode: if double_sided { None } else { Some(bevy::render::render_resource::Face::Back) },
+            double_sided,
+            ..default()
+        });
+        self.materials.insert(key, h.clone());
+        h
+    }
+
+    pub fn mat_unlit(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        let key = MaterialKey {
+            r,
+            g,
+            b,
+            a: 255,
+            rough_q: 0,
+            metal_q: 0,
+            emissive: false,
+            unlit: true,
+            double_sided: false,
+        };
+        if let Some(h) = self.materials.get(&key) {
+            return h.clone();
+        }
+        let h = assets.add(StandardMaterial {
+            base_color: Color::srgb_u8(r, g, b),
+            unlit: true,
+            ..default()
+        });
+        self.materials.insert(key, h.clone());
+        h
+    }
+
+    pub fn mat_blend(
+        &mut self,
+        assets: &mut Assets<StandardMaterial>,
+        hex: &str,
+        alpha: f32,
+        unlit: bool,
+    ) -> Handle<StandardMaterial> {
+        let (r, g, b) = parse_hex_rgb(hex);
+        let a = (alpha.clamp(0.02, 0.98) * 255.0).round() as u8;
+        let key = MaterialKey {
+            r,
+            g,
+            b,
+            a,
+            rough_q: 50,
+            metal_q: 0,
+            emissive: false,
+            unlit,
+            double_sided: false,
+        };
+        if let Some(h) = self.materials.get(&key) {
+            return h.clone();
+        }
+        let h = assets.add(StandardMaterial {
+            base_color: Color::srgba_u8(r, g, b, a),
+            alpha_mode: AlphaMode::Blend,
+            unlit,
+            perceptual_roughness: 0.5,
             ..default()
         });
         self.materials.insert(key, h.clone());
@@ -150,6 +241,7 @@ impl WorldPalette {
             metal_q: 25,
             emissive: false,
             unlit: false,
+            double_sided: false,
         };
         if let Some(h) = self.materials.get(&key) {
             return h.clone();
@@ -181,6 +273,7 @@ impl WorldPalette {
             metal_q: 0,
             emissive: true,
             unlit: false,
+            double_sided: false,
         };
         if let Some(h) = self.materials.get(&key) {
             return h.clone();
