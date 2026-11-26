@@ -11,6 +11,7 @@ use bevy_egui::egui::{
 
 const DRAWER_WIDTH: f32 = 420.0;
 const TOPBAR_HEIGHT: f32 = 56.0;
+const MAX_DATA_URL_LEN: usize = 500_000;
 
 pub const REACTIONS: [&str; 6] = ["❤️", "👍", "😆", "😮", "😭", "😡"];
 pub const STICKER_EMOJI: [&str; 8] = ["👌", "🙏", "👀", "🔥", "💪", "🤭", "🎉", "🥺"];
@@ -31,6 +32,24 @@ const INITIAL_BG: [Color32; 8] = [
 ];
 
 const AGENT_TAGS: [&str; 5] = ["claude", "codex", "opencode", "antigravity", "zcode"];
+
+#[derive(Clone)]
+struct CachedPreviewTexture {
+    id: String,
+    handle: egui::TextureHandle,
+}
+
+fn preview_cache_id() -> egui::Id {
+    egui::Id::new("station_group_chat_preview_tex")
+}
+
+/// Drops both the CPU preview buffer in `UiState` and the cached GPU `TextureHandle`.
+pub fn clear_preview_cache(ctx: &egui::Context, state: &mut UiState) {
+    state.chat_preview_image = None;
+    ctx.data_mut(|d| {
+        d.remove::<CachedPreviewTexture>(preview_cache_id());
+    });
+}
 
 fn is_agent_answer(tag: Option<&str>) -> bool {
     tag.is_some_and(|t| AGENT_TAGS.contains(&t))
@@ -70,8 +89,7 @@ fn initials(from: &str, name: &str) -> String {
 fn paint_avatar_badge(ui: &mut egui::Ui, from: &str, name: &str, size: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(size, size), egui::Sense::hover());
     let bg = avatar_color(from, name);
-    ui.painter()
-        .circle_filled(rect.center(), size * 0.5, bg);
+    ui.painter().circle_filled(rect.center(), size * 0.5, bg);
     ui.painter().circle_stroke(
         rect.center(),
         size * 0.5,
@@ -115,6 +133,16 @@ fn extract_image_id(photo: &str) -> Option<String> {
     let id = q.split('&').next().unwrap_or("");
     (!id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
         .then(|| id.to_owned())
+}
+
+pub fn is_previewable_data_url(photo: &str) -> bool {
+    if photo.len() >= MAX_DATA_URL_LEN {
+        return false;
+    }
+    photo
+        .strip_prefix("data:image/jpeg;base64,")
+        .or_else(|| photo.strip_prefix("data:image/png;base64,"))
+        .is_some_and(|rest| !rest.is_empty())
 }
 
 fn short_preview(s: &str, max_chars: usize) -> String {
@@ -304,6 +332,32 @@ pub fn emit_remind_rsvp(state: &mut UiState, msg_id: &str, yes: bool) -> bool {
     true
 }
 
+pub fn emit_preview_photo(state: &mut UiState, msg_id: &str, photo: &str) -> bool {
+    if let Some(img_id) = extract_image_id(photo) {
+        state.push_action(UiAction::FetchChatImage { id: img_id });
+        return true;
+    }
+    if is_previewable_data_url(photo) {
+        state.push_action(UiAction::PreviewChatDataUrl {
+            id: msg_id.to_owned(),
+            data_url: photo.to_owned(),
+        });
+        return true;
+    }
+    false
+}
+
+enum ChatRowIntent {
+    React { id: String, emoji: String },
+    Reply(usize),
+    Pin(String),
+    Recall(String),
+    Vote { id: String, option_index: usize },
+    TogglePollVoters(String),
+    Rsvp { id: String, yes: bool },
+    PreviewPhoto { id: String, photo: String },
+}
+
 fn render_mentions_text(ui: &mut egui::Ui, text: &str) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0;
@@ -317,7 +371,13 @@ fn render_mentions_text(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn render_poll_card(ui: &mut egui::Ui, msg: &ChatMessage, state: &mut UiState, i18n: &I18nStore) {
+fn render_poll_card(
+    ui: &mut egui::Ui,
+    msg: &ChatMessage,
+    state: &UiState,
+    i18n: &I18nStore,
+    intents: &mut Vec<ChatRowIntent>,
+) {
     let Some(poll) = msg.poll.as_ref() else {
         return;
     };
@@ -385,7 +445,10 @@ fn render_poll_card(ui: &mut egui::Ui, msg: &ChatMessage, state: &mut UiState, i
                         .interact(btn.response.rect, ui.id().with("vote"), egui::Sense::click())
                         .clicked()
                     {
-                        emit_poll_vote(state, &msg.id, idx);
+                        intents.push(ChatRowIntent::Vote {
+                            id: msg.id.clone(),
+                            option_index: idx,
+                        });
                     }
                     if show_voters && !opt.by.is_empty() {
                         let names: Vec<String> = opt
@@ -428,11 +491,7 @@ fn render_poll_card(ui: &mut egui::Ui, msg: &ChatMessage, state: &mut UiState, i
                         "chat.pollVote"
                     };
                     if ui.small_button(i18n.tr(lbl_key)).clicked() {
-                        if show_voters {
-                            state.chat_poll_show_voters.remove(&msg.id);
-                        } else {
-                            state.chat_poll_show_voters.insert(msg.id.clone());
-                        }
+                        intents.push(ChatRowIntent::TogglePollVoters(msg.id.clone()));
                     }
                 });
             });
@@ -442,8 +501,8 @@ fn render_poll_card(ui: &mut egui::Ui, msg: &ChatMessage, state: &mut UiState, i
 fn render_remind_card(
     ui: &mut egui::Ui,
     msg: &ChatMessage,
-    state: &mut UiState,
     i18n: &I18nStore,
+    intents: &mut Vec<ChatRowIntent>,
 ) {
     let Some(rem) = msg.remind.as_ref() else {
         return;
@@ -485,7 +544,10 @@ fn render_remind_card(
                 .fill(if yes_on { GREEN } else { CARD_3 })
                 .corner_radius(CornerRadius::same(7));
                 if ui.add_enabled(!rem.done, yes_btn).clicked() {
-                    emit_remind_rsvp(state, &msg.id, true);
+                    intents.push(ChatRowIntent::Rsvp {
+                        id: msg.id.clone(),
+                        yes: true,
+                    });
                 }
 
                 let no_btn = egui::Button::new(
@@ -496,7 +558,10 @@ fn render_remind_card(
                 .fill(if no_on { RED } else { CARD_3 })
                 .corner_radius(CornerRadius::same(7));
                 if ui.add_enabled(!rem.done, no_btn).clicked() {
-                    emit_remind_rsvp(state, &msg.id, false);
+                    intents.push(ChatRowIntent::Rsvp {
+                        id: msg.id.clone(),
+                        yes: false,
+                    });
                 }
             });
         });
@@ -504,9 +569,11 @@ fn render_remind_card(
 
 fn render_message_row(
     ui: &mut egui::Ui,
+    msg_idx: usize,
     msg: &ChatMessage,
-    state: &mut UiState,
+    state: &UiState,
     i18n: &I18nStore,
+    intents: &mut Vec<ChatRowIntent>,
 ) {
     if msg.role == "sys" {
         ui.vertical_centered(|ui| {
@@ -522,12 +589,12 @@ fn render_message_row(
     }
 
     if msg.role == "poll" && msg.poll.is_some() {
-        render_poll_card(ui, msg, state, i18n);
+        render_poll_card(ui, msg, state, i18n, intents);
         return;
     }
 
     if msg.role == "remind" && msg.remind.is_some() {
-        render_remind_card(ui, msg, state, i18n);
+        render_remind_card(ui, msg, i18n, intents);
         return;
     }
 
@@ -618,9 +685,12 @@ fn render_message_row(
                 } else if let Some(photo) = msg.photo.as_deref().filter(|p| !p.is_empty()) {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(i18n.tr("chat.photo")).size(11.5).color(BLUE));
-                        if let Some(img_id) = extract_image_id(photo) {
+                        if extract_image_id(photo).is_some() || is_previewable_data_url(photo) {
                             if ui.small_button(i18n.tr("chat.readMore")).clicked() {
-                                state.push_action(UiAction::FetchChatImage { id: img_id });
+                                intents.push(ChatRowIntent::PreviewPhoto {
+                                    id: msg.id.clone(),
+                                    photo: photo.to_owned(),
+                                });
                             }
                         }
                     });
@@ -645,24 +715,29 @@ fn render_message_row(
                                 if who.is_empty() {
                                     continue;
                                 }
-                                let is_mine = who.iter().any(|x| x == "me");
-                                let pill_txt = if who.len() > 1 {
-                                    format!("{emoji} {}", who.len())
-                                } else {
-                                    emoji.clone()
-                                };
-                                let pill = egui::Button::new(
-                                    RichText::new(pill_txt).size(10.5).color(INK),
-                                )
-                                .fill(if is_mine {
-                                    Color32::from_rgba_unmultiplied(0x6A, 0xAE, 0xFF, 52)
-                                } else {
-                                    CARD_3
-                                })
-                                .corner_radius(CornerRadius::same(10));
-                                if ui.add(pill).clicked() {
-                                    emit_reaction(state, &msg.id, emoji);
-                                }
+                                ui.push_id(emoji, |ui| {
+                                    let is_mine = who.iter().any(|x| x == "me");
+                                    let pill_txt = if who.len() > 1 {
+                                        format!("{emoji} {}", who.len())
+                                    } else {
+                                        emoji.clone()
+                                    };
+                                    let pill = egui::Button::new(
+                                        RichText::new(pill_txt).size(10.5).color(INK),
+                                    )
+                                    .fill(if is_mine {
+                                        Color32::from_rgba_unmultiplied(0x6A, 0xAE, 0xFF, 52)
+                                    } else {
+                                        CARD_3
+                                    })
+                                    .corner_radius(CornerRadius::same(10));
+                                    if ui.add(pill).clicked() {
+                                        intents.push(ChatRowIntent::React {
+                                            id: msg.id.clone(),
+                                            emoji: emoji.clone(),
+                                        });
+                                    }
+                                });
                             }
                         });
                     }
@@ -681,33 +756,27 @@ fn render_message_row(
                                     .on_hover_text(i18n.tr("chat.react"))
                                     .clicked()
                                 {
-                                    emit_reaction(state, &msg.id, emoji);
+                                    intents.push(ChatRowIntent::React {
+                                        id: msg.id.clone(),
+                                        emoji: (*emoji).to_owned(),
+                                    });
                                 }
                             });
                         }
 
                         let reply_hint = i18n.tr_vars("chat.replyTo", &[("name", &msg.sender)]);
-                        if ui
-                            .small_button("↩")
-                            .on_hover_text(reply_hint)
-                            .clicked()
-                        {
-                            set_reply_target(state, msg, i18n);
+                        if ui.small_button("↩").on_hover_text(reply_hint).clicked() {
+                            intents.push(ChatRowIntent::Reply(msg_idx));
                         }
                         if ui
                             .small_button("📌")
                             .on_hover_text(i18n.tr("chat.pinned"))
                             .clicked()
                         {
-                            state.chat_pinned_id = Some(msg.id.clone());
-                            state.push_action(UiAction::PinGroupChat { id: msg.id.clone() });
+                            intents.push(ChatRowIntent::Pin(msg.id.clone()));
                         }
-                        if mine
-                            && ui
-                                .small_button(i18n.tr("chat.recall"))
-                                .clicked()
-                        {
-                            emit_recall_message(state, &msg.id);
+                        if mine && ui.small_button(i18n.tr("chat.recall")).clicked() {
+                            intents.push(ChatRowIntent::Recall(msg.id.clone()));
                         }
                     });
                 }
@@ -720,6 +789,7 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
     state.unread_chat = 0;
 
     if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        clear_preview_cache(ctx, state);
         state.active_drawer = ActiveDrawer::None;
         return;
     }
@@ -732,6 +802,8 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
         0.0
     };
     let drawer_h = (screen.height() - top_y).max(240.0);
+    let mut close_drawer = false;
+    let mut clear_preview = false;
 
     egui::Area::new(egui::Id::new("station_group_chat_drawer"))
         .order(egui::Order::Foreground)
@@ -766,19 +838,16 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                                 .on_hover_text(i18n.tr("chat.close"))
                                 .clicked()
                             {
-                                state.active_drawer = ActiveDrawer::None;
+                                close_drawer = true;
                             }
                         });
                     });
                     ui.add_space(6.0);
 
                     // 2. Pinned message banner
-                    if let Some(pin_id) = state.chat_pinned_id.clone()
-                        && let Some(pinned) = state
-                            .chat
-                            .iter()
-                            .find(|m| m.id == pin_id && !m.recalled)
-                            .cloned()
+                    if let Some(pin_id) = state.chat_pinned_id.as_deref()
+                        && let Some(pinned) =
+                            state.chat.iter().find(|m| m.id == pin_id && !m.recalled)
                     {
                         egui::Frame::NONE
                             .fill(CARD_2)
@@ -808,8 +877,41 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                         ui.add_space(6.0);
                     }
 
-                    // 3. Active /api/image preview strip (dropped immediately on close)
-                    if let Some(prev) = state.chat_preview_image.clone() {
+                    // 3. Cached /api/image or data-URL preview strip (single GPU upload per preview id)
+                    if let Some(prev) = state.chat_preview_image.as_ref() {
+                        let cached_tex: Option<egui::TextureHandle> =
+                            ctx.data(|d| d.get_temp::<CachedPreviewTexture>(preview_cache_id()))
+                                .filter(|c| c.id == prev.id)
+                                .map(|c| c.handle);
+                        let tex_handle = if let Some(h) = cached_tex {
+                            Some(h)
+                        } else if prev.width > 0
+                            && prev.height > 0
+                            && prev.rgba.len() == prev.width * prev.height * 4
+                        {
+                            let img = egui::ColorImage::from_rgba_unmultiplied(
+                                [prev.width, prev.height],
+                                &prev.rgba,
+                            );
+                            let handle = ctx.load_texture(
+                                format!("chat_img_preview_{}", prev.id),
+                                img,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            ctx.data_mut(|d| {
+                                d.insert_temp(
+                                    preview_cache_id(),
+                                    CachedPreviewTexture {
+                                        id: prev.id.clone(),
+                                        handle: handle.clone(),
+                                    },
+                                );
+                            });
+                            Some(handle)
+                        } else {
+                            None
+                        };
+
                         egui::Frame::NONE
                             .fill(CARD_2)
                             .corner_radius(CornerRadius::same(8))
@@ -828,24 +930,12 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             if ui.small_button("×").clicked() {
-                                                state.chat_preview_image = None;
+                                                clear_preview = true;
                                             }
                                         },
                                     );
                                 });
-                                if prev.width > 0
-                                    && prev.height > 0
-                                    && prev.rgba.len() == prev.width * prev.height * 4
-                                {
-                                    let img = egui::ColorImage::from_rgba_unmultiplied(
-                                        [prev.width, prev.height],
-                                        &prev.rgba,
-                                    );
-                                    let tex = ctx.load_texture(
-                                        format!("chat_img_preview_{}", prev.id),
-                                        img,
-                                        egui::TextureOptions::LINEAR,
-                                    );
+                                if let Some(tex) = tex_handle {
                                     let max_w = (drawer_w - 48.0).min(prev.width as f32);
                                     let aspect = prev.height as f32 / prev.width as f32;
                                     ui.image((tex.id(), vec2(max_w, (max_w * aspect).min(180.0))));
@@ -854,7 +944,7 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                         ui.add_space(6.0);
                     }
 
-                    // 4. Scrollable thread
+                    // 4. Scrollable thread (borrows &state.chat with zero per-frame Vec clone)
                     let reserve_bottom = 128.0
                         + if state.chat_poll_open { 145.0 } else { 0.0 }
                         + if state.chat_sticker_open { 115.0 } else { 0.0 }
@@ -862,24 +952,60 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                         + if state.chat_reply_to.is_some() { 38.0 } else { 0.0 };
                     let scroll_h = (ui.available_height() - reserve_bottom).max(120.0);
 
+                    let mut intents = Vec::new();
                     egui::ScrollArea::vertical()
                         .id_salt("group_chat_messages_scroll")
                         .max_height(scroll_h)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            let msgs = state.chat.clone();
-                            for (idx, msg) in msgs.iter().enumerate() {
-                                let row_id = if msg.id.is_empty() {
-                                    format!("row-{idx}")
+                            for (idx, msg) in state.chat.iter().enumerate() {
+                                if msg.id.is_empty() {
+                                    ui.push_id(idx, |ui| {
+                                        render_message_row(ui, idx, msg, state, i18n, &mut intents);
+                                        ui.add_space(6.0);
+                                    });
                                 } else {
-                                    msg.id.clone()
-                                };
-                                ui.push_id(row_id, |ui| {
-                                    render_message_row(ui, msg, state, i18n);
-                                    ui.add_space(6.0);
-                                });
+                                    ui.push_id(&msg.id, |ui| {
+                                        render_message_row(ui, idx, msg, state, i18n, &mut intents);
+                                        ui.add_space(6.0);
+                                    });
+                                }
                             }
                         });
+
+                    for intent in intents {
+                        match intent {
+                            ChatRowIntent::React { id, emoji } => {
+                                emit_reaction(state, &id, &emoji);
+                            }
+                            ChatRowIntent::Reply(idx) => {
+                                if let Some(msg) = state.chat.get(idx).cloned() {
+                                    set_reply_target(state, &msg, i18n);
+                                }
+                            }
+                            ChatRowIntent::Pin(id) => {
+                                state.chat_pinned_id = Some(id.clone());
+                                state.push_action(UiAction::PinGroupChat { id });
+                            }
+                            ChatRowIntent::Recall(id) => {
+                                emit_recall_message(state, &id);
+                            }
+                            ChatRowIntent::Vote { id, option_index } => {
+                                emit_poll_vote(state, &id, option_index);
+                            }
+                            ChatRowIntent::TogglePollVoters(id) => {
+                                if !state.chat_poll_show_voters.remove(&id) {
+                                    state.chat_poll_show_voters.insert(id);
+                                }
+                            }
+                            ChatRowIntent::Rsvp { id, yes } => {
+                                emit_remind_rsvp(state, &id, yes);
+                            }
+                            ChatRowIntent::PreviewPhoto { id, photo } => {
+                                emit_preview_photo(state, &id, &photo);
+                            }
+                        }
+                    }
 
                     // 5. Typing indicator
                     if !state.chat_typing.is_empty() {
@@ -964,10 +1090,7 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                                         for (i, emo) in STICKER_EMOJI.iter().enumerate() {
                                             ui.push_id(i, |ui| {
                                                 let cap = i18n.tr_pick("chat.stickers", i);
-                                                if ui
-                                                    .button(format!("{emo} {cap}"))
-                                                    .clicked()
-                                                {
+                                                if ui.button(format!("{emo} {cap}")).clicked() {
                                                     emit_send_message(state, "", Some(i as u32));
                                                     state.chat_sticker_open = false;
                                                 }
@@ -1004,20 +1127,19 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                                         state.chat_draft.push(' ');
                                         state.chat_mention_open = false;
                                     }
-                                    let names: Vec<String> = state
-                                        .sessions
-                                        .iter()
-                                        .map(|s| s.project.clone())
-                                        .collect();
-                                    for (idx, name) in names.iter().enumerate() {
+                                    let mut picked = None;
+                                    for (idx, sess) in state.sessions.iter().enumerate() {
                                         ui.push_id(idx, |ui| {
-                                            let tag = format!("@{name}");
+                                            let tag = format!("@{}", sess.project);
                                             if ui.small_button(&tag).clicked() {
-                                                state.chat_draft.push_str(&tag);
-                                                state.chat_draft.push(' ');
-                                                state.chat_mention_open = false;
+                                                picked = Some(tag);
                                             }
                                         });
+                                    }
+                                    if let Some(tag) = picked {
+                                        state.chat_draft.push_str(&tag);
+                                        state.chat_draft.push(' ');
+                                        state.chat_mention_open = false;
                                     }
                                 });
                             });
@@ -1166,12 +1288,19 @@ pub fn draw_group_chat_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I
                     });
                 });
         });
+
+    if clear_preview || close_drawer {
+        clear_preview_cache(ctx, state);
+    }
+    if close_drawer {
+        state.active_drawer = ActiveDrawer::None;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ChatPollOptUi, ChatPollUi, ChatRemindUi};
+    use crate::state::{ChatImagePreview, ChatPollOptUi, ChatPollUi, ChatRemindUi};
     use std::path::PathBuf;
 
     fn i18n(lang: &str) -> I18nStore {
@@ -1179,6 +1308,21 @@ mod tests {
             &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets"),
             lang,
         )
+    }
+
+    fn setup_ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        let mut defs = egui::FontDefinitions::default();
+        let fallback = defs
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        defs.families
+            .insert(egui::FontFamily::Name(crate::theme::FONT_BOLD.into()), fallback);
+        ctx.set_fonts(defs);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        ctx
     }
 
     #[test]
@@ -1338,6 +1482,63 @@ mod tests {
     }
 
     #[test]
+    fn group_chat_photo_preview_supports_api_image_and_data_url_and_caches_texture() {
+        let mut st = UiState::default();
+        assert!(emit_preview_photo(&mut st, "m1", "/api/image?id=deadbeef"));
+        assert!(emit_preview_photo(
+            &mut st,
+            "m2",
+            "data:image/jpeg;base64,/9j/4AAQ"
+        ));
+        assert!(!emit_preview_photo(&mut st, "m3", "javascript:alert(1)"));
+        let actions = st.drain_actions();
+        assert!(matches!(
+            &actions[0],
+            UiAction::FetchChatImage { id } if id == "deadbeef"
+        ));
+        assert!(matches!(
+            &actions[1],
+            UiAction::PreviewChatDataUrl { id, data_url } if id == "m2" && data_url.starts_with("data:image/jpeg;base64,")
+        ));
+
+        // Verify texture is uploaded once and cleared when drawer closes.
+        let tr = i18n("en");
+        let ctx = setup_ctx();
+        st.active_drawer = ActiveDrawer::GroupChat;
+        st.chat_preview_image = Some(ChatImagePreview {
+            id: "deadbeef".to_owned(),
+            width: 4,
+            height: 4,
+            rgba: vec![255; 4 * 4 * 4],
+        });
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_group_chat_drawer(ctx, &mut st, &tr);
+        });
+        let tex1 = ctx
+            .data(|d| d.get_temp::<CachedPreviewTexture>(preview_cache_id()))
+            .expect("texture cached after first frame")
+            .handle
+            .id();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            draw_group_chat_drawer(ctx, &mut st, &tr);
+        });
+        let tex2 = ctx
+            .data(|d| d.get_temp::<CachedPreviewTexture>(preview_cache_id()))
+            .expect("texture remains cached on second frame")
+            .handle
+            .id();
+        assert_eq!(tex1, tex2, "cached preview TextureHandle must be reused without re-upload");
+
+        clear_preview_cache(&ctx, &mut st);
+        assert!(st.chat_preview_image.is_none());
+        assert!(
+            ctx.data(|d| d.get_temp::<CachedPreviewTexture>(preview_cache_id()))
+                .is_none(),
+            "closing preview/drawer must drop cached TextureHandle"
+        );
+    }
+
+    #[test]
     fn group_chat_drawer_renders_cleanly_in_en_vi_th_with_zero_raw_keys() {
         let mut st = UiState::with_demo_seed(
             station_3d::OfficeLayout::Pro,
@@ -1351,17 +1552,7 @@ mod tests {
 
         for lang in ["en", "vi", "th"] {
             let tr = i18n(lang);
-            let ctx = egui::Context::default();
-            let mut defs = egui::FontDefinitions::default();
-            let fallback = defs
-                .families
-                .get(&egui::FontFamily::Proportional)
-                .cloned()
-                .unwrap_or_default();
-            defs.families
-                .insert(egui::FontFamily::Name(crate::theme::FONT_BOLD.into()), fallback);
-            ctx.set_fonts(defs);
-            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            let ctx = setup_ctx();
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 draw_group_chat_drawer(ctx, &mut st, &tr);
             });

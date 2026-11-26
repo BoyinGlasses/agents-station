@@ -39,6 +39,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 const MAX_SSE_LINE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CHAT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CHAT_DATA_URL_LEN: usize = 500_000;
 const REMOTE_ACTION_QUEUE_CAP: usize = 64;
 const TOAST_QUEUE_CAP: usize = 32;
 const HARNESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -88,6 +90,11 @@ enum BridgeAsyncResult {
     SessionUndo(SessionUndoView),
     RewriteResult(Result<String, String>),
     WrappedSummary(Result<WrappedSummaryUi, String>),
+    WrappedExported {
+        rel_path: Option<String>,
+        toast_title: String,
+        toast_body: String,
+    },
     ChatImage(Result<ChatImagePreview, String>),
 }
 
@@ -742,8 +749,36 @@ fn parse_wrapped_from_json(val: &Value) -> WrappedSummaryUi {
     }
 }
 
+fn sanitize_wrapped_date_tag(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if station_core::http::api::is_valid_day_key(trimmed) {
+        return trimmed.to_owned();
+    }
+    let clean: String = trimmed
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(32)
+        .collect();
+    if clean.is_empty() {
+        "latest".to_owned()
+    } else {
+        clean
+    }
+}
+
 fn decode_bounded_chat_preview(id: String, bytes: &[u8]) -> Result<ChatImagePreview, String> {
-    let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
+    if bytes.is_empty() || bytes.len() > MAX_CHAT_IMAGE_BYTES {
+        return Err("image size limit exceeded".to_owned());
+    }
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode().map_err(|e| e.to_string())?;
     let thumb = img.thumbnail(360, 270).to_rgba8();
     let (w, h) = (thumb.width() as usize, thumb.height() as usize);
     Ok(ChatImagePreview {
@@ -752,6 +787,37 @@ fn decode_bounded_chat_preview(id: String, bytes: &[u8]) -> Result<ChatImagePrev
         height: h,
         rgba: thumb.into_raw(),
     })
+}
+
+fn decode_chat_data_url(id: String, data_url: &str) -> Result<ChatImagePreview, String> {
+    if data_url.len() >= MAX_CHAT_DATA_URL_LEN {
+        return Err("image size limit exceeded".to_owned());
+    }
+    let rest = data_url
+        .strip_prefix("data:image/jpeg;base64,")
+        .or_else(|| data_url.strip_prefix("data:image/png;base64,"))
+        .ok_or_else(|| "unsupported image format".to_owned())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(rest)
+        .map_err(|e| e.to_string())?;
+    decode_bounded_chat_preview(id, &bytes)
+}
+
+async fn read_response_bytes_bounded(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > max_bytes as u64) {
+        return Err("image size limit exceeded".to_owned());
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err("image size limit exceeded".to_owned());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
 }
 
 fn parse_accounts_from_view(val: &Value) -> Vec<AccountOption> {
@@ -1671,10 +1737,18 @@ fn spawn_attached_sse_client(
                                             .send()
                                             .await
                                         {
-                                            Ok(r) if r.status().is_success() => match r.bytes().await {
-                                                Ok(bytes) => decode_bounded_chat_preview(id, &bytes),
-                                                Err(e) => Err(e.to_string()),
-                                            },
+                                            Ok(r) if r.status().is_success() => {
+                                                match read_response_bytes_bounded(r, MAX_CHAT_IMAGE_BYTES).await {
+                                                    Ok(bytes) => {
+                                                        tokio::task::spawn_blocking(move || {
+                                                            decode_bounded_chat_preview(id, &bytes)
+                                                        })
+                                                        .await
+                                                        .unwrap_or_else(|e| Err(e.to_string()))
+                                                    }
+                                                    Err(e) => Err(e),
+                                                }
+                                            }
                                             Ok(r) => Err(format!("HTTP {}", r.status().as_u16())),
                                             Err(e) => Err(e.to_string()),
                                         };
@@ -2312,17 +2386,12 @@ struct PendingPhotoJob {
 struct PendingPhotoCapture(Option<PendingPhotoJob>);
 
 struct PendingTimelapseJob {
-    shape: ClipShape,
-    music: bool,
-    gif_path: PathBuf,
-    wav_path: Option<PathBuf>,
-    title: String,
     total_frames: u32,
     captured_frames: u32,
     frame_interval_sec: f32,
     elapsed_since_last: f32,
-    in_flight: Arc<std::sync::atomic::AtomicBool>,
-    encoder: Arc<Mutex<Option<image::codecs::gif::GifEncoder<std::fs::File>>>>,
+    frame_tx: Option<std::sync::mpsc::SyncSender<Image>>,
+    cancel_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Resource, Default)]
@@ -3375,6 +3444,16 @@ fn sync_live_state_to_ui(
                     ui.wrapped.error = Some(err);
                 }
             },
+            BridgeAsyncResult::WrappedExported {
+                rel_path,
+                toast_title,
+                toast_body,
+            } => {
+                if let Some(path) = rel_path {
+                    ui.wrapped.last_saved_path = Some(path);
+                }
+                ui.push_toast(toast_title, toast_body);
+            }
             BridgeAsyncResult::ChatImage(res) => match res {
                 Ok(preview) => {
                     ui.chat_preview_image = Some(preview);
@@ -3708,45 +3787,50 @@ fn drive_pending_photo_capture(
             .spawn(Screenshot::primary_window())
             .observe(move |trigger: Trigger<ScreenshotCaptured>| {
                 let raw_img = trigger.event().0.clone();
-                if let Ok(dyn_img) = raw_img.try_into_dynamic() {
-                    let rgba = dyn_img.to_rgba8();
-                    let (target_w, target_h) =
-                        job.size.target_dimensions(rgba.width(), rgba.height());
-                    let mut out_rgba = if (target_w, target_h) == (rgba.width(), rgba.height()) {
-                        rgba
-                    } else {
-                        image::imageops::resize(
-                            &rgba,
-                            target_w,
-                            target_h,
-                            image::imageops::FilterType::Lanczos3,
-                        )
-                    };
-                    if job.show_names || job.show_mark {
-                        let mut fonts = station_canvas2d::FontEngine::from_assets_dir(&job.assets_dir);
-                        let tags = if job.show_names { job.tags.as_slice() } else { &[] };
-                        let mark = job.show_mark.then_some("Agents Station");
-                        station_canvas2d::paint_photo_overlays(
-                            out_rgba.as_mut(),
-                            target_w,
-                            target_h,
-                            tags,
-                            mark,
-                            &mut fonts,
-                        );
+                let job = job.clone();
+                let toast_tx = toast_tx.clone();
+                std::thread::spawn(move || {
+                    if let Ok(dyn_img) = raw_img.try_into_dynamic() {
+                        let rgba = dyn_img.to_rgba8();
+                        let (target_w, target_h) =
+                            job.size.target_dimensions(rgba.width(), rgba.height());
+                        let mut out_rgba = if (target_w, target_h) == (rgba.width(), rgba.height()) {
+                            rgba
+                        } else {
+                            image::imageops::resize(
+                                &rgba,
+                                target_w,
+                                target_h,
+                                image::imageops::FilterType::Lanczos3,
+                            )
+                        };
+                        if job.show_names || job.show_mark {
+                            let mut fonts =
+                                station_canvas2d::FontEngine::from_assets_dir(&job.assets_dir);
+                            let tags = if job.show_names { job.tags.as_slice() } else { &[] };
+                            let mark = job.show_mark.then_some("Agents Station");
+                            station_canvas2d::paint_photo_overlays(
+                                out_rgba.as_mut(),
+                                target_w,
+                                target_h,
+                                tags,
+                                mark,
+                                &mut fonts,
+                            );
+                        }
+                        let _ = std::fs::create_dir_all(&job.shots_dir);
+                        let fname = format!("shot-{target_w}x{target_h}-{}.png", now_ms());
+                        let shot_path = job.shots_dir.join(&fname);
+                        let saved = out_rgba.save(&shot_path).is_ok();
+                        drop(out_rgba);
+                        if saved {
+                            let _ = toast_tx.try_send((
+                                job.title,
+                                format!("shots/{fname} ({target_w}x{target_h})"),
+                            ));
+                        }
                     }
-                    let _ = std::fs::create_dir_all(&job.shots_dir);
-                    let fname = format!("shot-{target_w}x{target_h}-{}.png", now_ms());
-                    let shot_path = job.shots_dir.join(&fname);
-                    let saved = out_rgba.save(&shot_path).is_ok();
-                    drop(out_rgba);
-                    if saved {
-                        let _ = toast_tx.try_send((
-                            job.title.clone(),
-                            format!("shots/{fname} ({target_w}x{target_h})"),
-                        ));
-                    }
-                }
+                });
             });
     }
     if ui.photo_capture_hide_frames > 0 {
@@ -3862,40 +3946,52 @@ fn write_headless_timelapse_gif(
     true
 }
 
-fn drive_pending_timelapse_capture(
-    mut commands: Commands,
-    time: Res<Time>,
-    bridge: Res<LiveServerBridge>,
-    mut ui: ResMut<UiState>,
-    mut pending: ResMut<PendingTimelapseCapture>,
-) {
-    let Some(job) = pending.0.as_mut() else {
-        return;
-    };
-
-    if job.captured_frames >= job.total_frames {
-        if job.in_flight.load(std::sync::atomic::Ordering::Acquire) {
-            return;
-        }
-        let job = pending.0.take().expect("checked Some");
-        // Drop encoder handle to flush GIF trailer to disk cleanly.
-        if let Ok(mut guard) = job.encoder.lock() {
-            guard.take();
-        }
-        ui.timelapse_recording = false;
-        ui.timelapse_progress = 1.0;
-        ui.timelapse_elapsed_sec = 15;
-        let gif_name = job
-            .gif_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("timelapse.gif")
-            .to_owned();
-        let wav_path = job.wav_path;
-        let music = job.music;
-        let title = job.title;
-        let toast_tx = bridge.toast_tx.clone();
-        std::thread::spawn(move || {
+fn spawn_timelapse_encoder_worker(
+    shape: ClipShape,
+    music: bool,
+    gif_path: PathBuf,
+    wav_path: Option<PathBuf>,
+    title: String,
+    toast_tx: mpsc::Sender<(String, String)>,
+    cancel_flag: Arc<std::sync::atomic::AtomicBool>,
+) -> Option<std::sync::mpsc::SyncSender<Image>> {
+    let file = std::fs::File::create(&gif_path).ok()?;
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Image>(1);
+    let (tw, th) = timelapse_dimensions(shape);
+    std::thread::Builder::new()
+        .name("station-timelapse-encoder".to_owned())
+        .spawn(move || {
+            let mut enc = image::codecs::gif::GifEncoder::new_with_speed(file, 20);
+            let _ = enc.set_repeat(image::codecs::gif::Repeat::Infinite);
+            for raw_img in rx {
+                if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                if let Ok(dyn_img) = raw_img.try_into_dynamic() {
+                    let resized =
+                        dyn_img.resize_to_fill(tw, th, image::imageops::FilterType::Triangle);
+                    let frame = image::Frame::from_parts(
+                        resized.to_rgba8(),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(1000, 1),
+                    );
+                    let _ = enc.encode_frame(frame);
+                }
+            }
+            drop(enc);
+            if cancel_flag.load(std::sync::atomic::Ordering::Acquire) {
+                let _ = std::fs::remove_file(&gif_path);
+                if let Some(wp) = wav_path {
+                    let _ = std::fs::remove_file(wp);
+                }
+                return;
+            }
+            let gif_name = gif_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("timelapse.gif")
+                .to_owned();
             let mut detail = format!("shots/{gif_name}");
             if music
                 && let Some(wp) = wav_path
@@ -3905,49 +4001,49 @@ fn drive_pending_timelapse_capture(
                 detail = format!("shots/{gif_name} + shots/{wn}");
             }
             let _ = toast_tx.try_send((title, detail));
-        });
+        })
+        .ok()?;
+    Some(tx)
+}
+
+fn drive_pending_timelapse_capture(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut ui: ResMut<UiState>,
+    mut pending: ResMut<PendingTimelapseCapture>,
+) {
+    let Some(job) = pending.0.as_mut() else {
+        return;
+    };
+
+    if job.captured_frames >= job.total_frames {
+        // Dropping `frame_tx` closes the bounded channel so the encoder thread flushes GIF + WAV cleanly.
+        let _ = pending.0.take();
+        ui.timelapse_recording = false;
+        ui.timelapse_progress = 1.0;
+        ui.timelapse_elapsed_sec = 15;
         return;
     }
 
     job.elapsed_since_last += time.delta_secs();
-    if job.elapsed_since_last < job.frame_interval_sec
-        || job.in_flight.load(std::sync::atomic::Ordering::Acquire)
-    {
+    if job.elapsed_since_last < job.frame_interval_sec {
         return;
     }
+    let Some(frame_tx) = job.frame_tx.clone() else {
+        let _ = pending.0.take();
+        ui.timelapse_recording = false;
+        return;
+    };
     job.elapsed_since_last = 0.0;
     job.captured_frames += 1;
     let frac = (job.captured_frames as f32 / job.total_frames as f32).clamp(0.0, 1.0);
     ui.timelapse_progress = frac;
     ui.timelapse_elapsed_sec = (frac * 15.0).round() as u32;
 
-    let (tw, th) = timelapse_dimensions(job.shape);
-    let enc_arc = Arc::clone(&job.encoder);
-    let in_flight = Arc::clone(&job.in_flight);
-    in_flight.store(true, std::sync::atomic::Ordering::Release);
     commands
         .spawn(Screenshot::primary_window())
         .observe(move |trigger: Trigger<ScreenshotCaptured>| {
-            let raw_img = trigger.event().0.clone();
-            if let Ok(dyn_img) = raw_img.try_into_dynamic() {
-                let resized = dyn_img.resize_to_fill(
-                    tw,
-                    th,
-                    image::imageops::FilterType::Triangle,
-                );
-                let frame = image::Frame::from_parts(
-                    resized.to_rgba8(),
-                    0,
-                    0,
-                    image::Delay::from_numer_denom_ms(1000, 1),
-                );
-                if let Ok(mut guard) = enc_arc.lock()
-                    && let Some(enc) = guard.as_mut()
-                {
-                    let _ = enc.encode_frame(frame);
-                }
-            }
-            in_flight.store(false, std::sync::atomic::Ordering::Release);
+            let _ = frame_tx.try_send(trigger.event().0.clone());
         });
 }
 
@@ -3970,57 +4066,8 @@ fn build_wrapped_card_input(
             ("c", &w.sessions.to_string()),
         ],
     );
-    let mut highlights = Vec::new();
-    if let Some((proj, hrs)) = &w.top_project {
-        let name = if ui.streamer_mode {
-            i18n.tr("wrapped.aProject")
-        } else {
-            proj.clone()
-        };
-        let rounded = (hrs * 10.0).round() / 10.0;
-        let h_str = format!("{rounded:.1}");
-        let n_str = if (rounded - 1.0).abs() < 0.05 { "1" } else { "2" };
-        highlights.push(i18n.tr_vars(
-            "wrapped.topProject",
-            &[("name", &name), ("h", &h_str), ("n", n_str)],
-        ));
-    }
-    if let Some((day, _, _)) = &w.busiest_day {
-        let date = station_ui::drawers::modals::format_wrapped_date(day, i18n);
-        highlights.push(i18n.tr_vars("wrapped.busiestDay", &[("day", day), ("date", &date)]));
-    }
-    if w.longest_min > 0 {
-        let time_str = if w.longest_min >= 60 {
-            i18n.tr_vars(
-                "time.hourMin",
-                &[
-                    ("h", &(w.longest_min / 60).to_string()),
-                    ("m", &(w.longest_min % 60).to_string()),
-                ],
-            )
-        } else {
-            i18n.tr_count("time.min", w.longest_min as usize)
-        };
-        highlights.push(i18n.tr_vars("wrapped.longest", &[("time", &time_str)]));
-    }
-    if w.commits > 0 || w.pushes > 0 {
-        let c = i18n.tr_vars(
-            "wrapped.commits",
-            &[
-                ("n", &w.commits.to_string()),
-                ("c", &w.commits.to_string()),
-            ],
-        );
-        let p = i18n.tr_vars(
-            "wrapped.pushes",
-            &[
-                ("n", &w.pushes.to_string()),
-                ("c", &w.pushes.to_string()),
-            ],
-        );
-        highlights.push(format!("{c} · {p}"));
-    }
-    highlights.truncate(3);
+    let highlights =
+        station_ui::drawers::modals::format_wrapped_highlights(w, ui.streamer_mode, i18n);
 
     station_canvas2d::WrappedCardInput {
         brand_title: "Agents Station".to_owned(),
@@ -4041,26 +4088,24 @@ fn build_wrapped_card_input(
     }
 }
 
-fn copy_png_or_path_to_clipboard(png_bytes: &[u8], path_str: &str) -> bool {
+fn copy_rgba_or_path_to_clipboard(surf: &station_canvas2d::RgbaSurface, path_str: &str) -> bool {
     let Ok(mut cb) = arboard::Clipboard::new() else {
         return false;
     };
-    if let Ok(img) = image::load_from_memory(png_bytes) {
-        let rgba = img.to_rgba8();
-        let data = arboard::ImageData {
-            width: rgba.width() as usize,
-            height: rgba.height() as usize,
-            bytes: std::borrow::Cow::Owned(rgba.into_raw()),
-        };
-        if cb.set_image(data).is_ok() {
-            return true;
-        }
+    let data = arboard::ImageData {
+        width: surf.width as usize,
+        height: surf.height as usize,
+        bytes: std::borrow::Cow::Borrowed(&surf.rgba),
+    };
+    if cb.set_image(data).is_ok() {
+        return true;
     }
     cb.set_text(path_str.to_owned()).is_ok()
 }
 
 fn render_group_chat_photo_data_url(
     ui: &UiState,
+    i18n: &I18nStore,
     shared_fonts: Option<&mut station_3d::SharedFontEngine>,
     assets_dir: &std::path::Path,
 ) -> Option<String> {
@@ -4098,9 +4143,10 @@ fn render_group_chat_photo_data_url(
         true,
         false,
     );
+    let live_lbl = i18n.tr("ui.activityPanel.live");
     fonts.draw_text(
         &mut c,
-        &format!("{} live · {}", ui.sessions.len(), ui.clock_label),
+        &format!("{} {} · {}", ui.sessions.len(), live_lbl, ui.clock_label),
         24.0,
         62.0,
         18.0,
@@ -4110,12 +4156,18 @@ fn render_group_chat_photo_data_url(
         false,
         false,
     );
+    let redacted = i18n.tr("station.streamerRedacted");
     for (idx, s) in ui.sessions.iter().take(4).enumerate() {
         let y = 112.0 + idx as f32 * 54.0;
         c.round_rect(24.0, y, 432.0, 42.0, 8.0, station_canvas2d::hex("#18202B"));
+        let label = if ui.streamer_mode {
+            redacted.as_str()
+        } else {
+            s.project.as_str()
+        };
         fonts.draw_text(
             &mut c,
-            &s.project,
+            label,
             38.0,
             y + 11.0,
             16.0,
@@ -5489,21 +5541,26 @@ fn process_ui_actions(
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Shutter);
                 }
-                if !aux.primary_win_q.is_empty()
+                if let Some(primary_ent) = aux.primary_win_q.iter().next()
                     && let Some(pending) = aux.pending_photo.as_deref_mut()
                 {
+                    let (win_w, win_h) = tray_params
+                        .windows
+                        .get(primary_ent)
+                        .map(|w| (w.width().max(1.0), w.height().max(1.0)))
+                        .unwrap_or((1280.0, 720.0));
                     let tags: Vec<station_canvas2d::PhotoNameTag> = ui
                         .projected_labels
                         .iter()
                         .filter(|l| l.kind == ProjectedLabelKind::WorkerTag && !l.behind_camera)
                         .map(|l| station_canvas2d::PhotoNameTag {
-                            x_norm: (l.screen_pos.x / 1280.0).clamp(0.05, 0.95),
-                            y_norm: (l.screen_pos.y / 720.0).clamp(0.05, 0.95),
+                            x_norm: (l.screen_pos.x / win_w).clamp(0.05, 0.95),
+                            y_norm: (l.screen_pos.y / win_h).clamp(0.05, 0.95),
                             text: l.text.clone(),
                             dot_rgba: Some([l.accent.r(), l.accent.g(), l.accent.b(), 255]),
                         })
                         .collect();
-                    // Hide PhotoBar HUD for the capture frame, then screenshot + scale + paint overlays.
+                    // Hide PhotoBar HUD for the capture frame, then screenshot + scale + paint overlays off-thread.
                     ui.photo_capture_hide_frames = 2;
                     pending.0 = Some(PendingPhotoJob {
                         size,
@@ -5528,6 +5585,14 @@ fn process_ui_actions(
                 }
             }
             UiAction::TriggerTimelapseClip { shape, music } => {
+                if ui.timelapse_recording
+                    || aux
+                        .pending_timelapse
+                        .as_deref()
+                        .is_some_and(|p| p.0.is_some())
+                {
+                    continue;
+                }
                 ui.clip_shape = shape;
                 ui.clip_music = music;
                 let shots_dir = bridge.data_dir.join("shots");
@@ -5544,26 +5609,29 @@ fn process_ui_actions(
 
                 if !aux.primary_win_q.is_empty()
                     && let Some(pending_tl) = aux.pending_timelapse.as_deref_mut()
-                    && let Ok(file) = std::fs::File::create(&gif_path)
                 {
-                    let mut enc = image::codecs::gif::GifEncoder::new_with_speed(file, 20);
-                    let _ = enc.set_repeat(image::codecs::gif::Repeat::Infinite);
-                    ui.timelapse_recording = true;
-                    ui.timelapse_progress = 0.0;
-                    ui.timelapse_elapsed_sec = 0;
-                    pending_tl.0 = Some(PendingTimelapseJob {
+                    let cancel_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    if let Some(frame_tx) = spawn_timelapse_encoder_worker(
                         shape,
                         music,
                         gif_path,
                         wav_path,
-                        title: i18n.tr("ui.clip.button"),
-                        total_frames: 15,
-                        captured_frames: 0,
-                        frame_interval_sec: 1.0,
-                        elapsed_since_last: 1.0,
-                        in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                        encoder: Arc::new(Mutex::new(Some(enc))),
-                    });
+                        i18n.tr("ui.clip.button"),
+                        bridge.toast_tx.clone(),
+                        Arc::clone(&cancel_flag),
+                    ) {
+                        ui.timelapse_recording = true;
+                        ui.timelapse_progress = 0.0;
+                        ui.timelapse_elapsed_sec = 0;
+                        pending_tl.0 = Some(PendingTimelapseJob {
+                            total_frames: 15,
+                            captured_frames: 0,
+                            frame_interval_sec: 1.0,
+                            elapsed_since_last: 1.0,
+                            frame_tx: Some(frame_tx),
+                            cancel_flag,
+                        });
+                    }
                 } else {
                     let gif_ok = write_headless_timelapse_gif(
                         &gif_path,
@@ -5591,15 +5659,11 @@ fn process_ui_actions(
                 ui.timelapse_progress = 0.0;
                 ui.timelapse_elapsed_sec = 0;
                 if let Some(pending_tl) = aux.pending_timelapse.as_deref_mut()
-                    && let Some(job) = pending_tl.0.take()
+                    && let Some(mut job) = pending_tl.0.take()
                 {
-                    if let Ok(mut guard) = job.encoder.lock() {
-                        guard.take();
-                    }
-                    let _ = std::fs::remove_file(&job.gif_path);
-                    if let Some(wp) = job.wav_path {
-                        let _ = std::fs::remove_file(wp);
-                    }
+                    job.cancel_flag
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    job.frame_tx.take();
                 }
                 ui.push_toast(i18n.tr("ui.clip.button"), i18n.tr("ui.clip.canceled"));
             }
@@ -6220,6 +6284,7 @@ fn process_ui_actions(
             UiAction::SendGroupPhoto => {
                 let Some(data_url) = render_group_chat_photo_data_url(
                     &ui,
+                    &i18n,
                     world_params.shared_fonts.as_deref_mut(),
                     &bridge.assets_dir,
                 ) else {
@@ -6265,17 +6330,18 @@ fn process_ui_actions(
                     if let Some((path, _mime)) = resolved {
                         let async_tx = bridge.async_tx.clone();
                         let img_id = id.clone();
+                        let gone_msg = i18n.tr("activity.image.gone");
                         std::thread::spawn(move || {
                             let res = station_core::store::images::read_image_bytes_bounded(
                                 &path,
-                                station_core::store::images::MAX_IMAGE_BYTES,
+                                MAX_CHAT_IMAGE_BYTES as u64,
                             )
-                            .map_err(|_| "image unavailable".to_owned())
+                            .map_err(|_| gone_msg)
                             .and_then(|bytes| decode_bounded_chat_preview(img_id, &bytes));
                             let _ = async_tx.try_send(BridgeAsyncResult::ChatImage(res));
                         });
                     } else {
-                        ui.push_toast(i18n.tr("chat.photo"), i18n.tr("drawer.unreachable"));
+                        ui.push_toast(i18n.tr("chat.photo"), i18n.tr("activity.image.gone"));
                     }
                 }
                 BridgeBackend::BindError { .. } => {
@@ -6283,23 +6349,44 @@ fn process_ui_actions(
                     continue;
                 }
             },
+            UiAction::PreviewChatDataUrl { id, data_url } => {
+                let async_tx = bridge.async_tx.clone();
+                let gone_msg = i18n.tr("activity.image.gone");
+                std::thread::spawn(move || {
+                    let res = decode_chat_data_url(id, &data_url).map_err(|_| gone_msg);
+                    let _ = async_tx.try_send(BridgeAsyncResult::ChatImage(res));
+                });
+            }
             UiAction::SaveWhiteboard(text) => {
                 let todos = parse_whiteboard_todos(&text);
-                ui.session_todos = parse_todos_from_values(&todos);
-                let _ = station_core::atomic::write_json_atomic(
-                    &bridge.data_dir.join("whiteboard.json"),
-                    &json!({ "text": text, "todos": todos }),
-                );
                 match &bridge.backend {
                     BridgeBackend::InProcess { app_state, .. } => {
                         if let Ok(mut office) = app_state.office.lock() {
-                            office.todos = todos;
+                            let _ = office.set_todos(todos);
+                            ui.session_todos = parse_todos_from_values(&office.todos);
+                            ui.whiteboard_text =
+                                station_ui::drawers::whiteboard::format_todos_markdown(
+                                    &ui.session_todos,
+                                );
                         }
                     }
                     BridgeBackend::AttachedHttp { action_tx, .. } => {
+                        let clean_todos: Vec<Value> = todos
+                            .into_iter()
+                            .map(|mut v| {
+                                if let Some(obj) = v.as_object_mut()
+                                    && let Some(raw) = obj.get("text").and_then(Value::as_str)
+                                {
+                                    let clean = station_core::redact::redact(raw);
+                                    obj.insert("text".to_owned(), Value::String(clean));
+                                }
+                                v
+                            })
+                            .collect();
+                        ui.session_todos = parse_todos_from_values(&clean_todos);
                         let _ = action_tx.try_send(RemoteActionCmd {
                             path: "/api/todos",
-                            body: json!({ "todos": todos }),
+                            body: json!({ "todos": clean_todos }),
                             refresh: RefreshKind::Live,
                             launch_toast_label: None,
                         });
@@ -6309,6 +6396,7 @@ fn process_ui_actions(
                         continue;
                     }
                 }
+                let redraw_text = ui.whiteboard_text.clone();
                 if let (Some(mats), Some(imgs), Some(shared_fonts)) = (
                     world_params.materials.as_deref_mut(),
                     world_params.images.as_deref_mut(),
@@ -6317,7 +6405,7 @@ fn process_ui_actions(
                     let fonts = shared_fonts.get_or_init();
                     for wb_mat in &aux.wb_q {
                         station_3d::furniture::redraw_whiteboard_surface(
-                            &text,
+                            &redraw_text,
                             ui.streamer_mode,
                             &wb_mat.0,
                             mats,
@@ -6330,18 +6418,21 @@ fn process_ui_actions(
                     sfx.play_sfx(SfxKind::Rustle);
                 }
             }
-            UiAction::SyncWhiteboardTodos(todos) => {
+            UiAction::SyncWhiteboardTodos(mut todos) => {
+                for t in &mut todos {
+                    t.text = station_core::redact::redact(t.text.trim())
+                        .chars()
+                        .take(140)
+                        .collect();
+                }
+                ui.session_todos = todos.clone();
                 let text = station_ui::drawers::whiteboard::format_todos_markdown(&todos);
                 ui.whiteboard_text = text.clone();
                 let todos_json = todos_to_json_values(&todos);
-                let _ = station_core::atomic::write_json_atomic(
-                    &bridge.data_dir.join("whiteboard.json"),
-                    &json!({ "text": text, "todos": todos_json }),
-                );
                 match &bridge.backend {
                     BridgeBackend::InProcess { app_state, .. } => {
                         if let Ok(mut office) = app_state.office.lock() {
-                            office.todos = todos_json;
+                            let _ = office.set_todos(todos_json);
                         }
                     }
                     BridgeBackend::AttachedHttp { action_tx, .. } => {
@@ -6403,58 +6494,66 @@ fn process_ui_actions(
             },
             UiAction::ExportWrappedPng { copy_clipboard } => {
                 let input = build_wrapped_card_input(&ui, &i18n);
-                let png_res = if let Some(sf) = world_params.shared_fonts.as_deref_mut() {
-                    station_canvas2d::encode_wrapped_png(&input, sf.get_or_init())
-                } else {
-                    let mut fonts = station_canvas2d::FontEngine::from_assets_dir(&bridge.assets_dir);
-                    station_canvas2d::encode_wrapped_png(&input, &mut fonts)
-                };
-                match png_res {
-                    Ok(png_bytes) => {
-                        let shots_dir = bridge.data_dir.join("shots");
-                        let _ = std::fs::create_dir_all(&shots_dir);
-                        let date_tag = if ui.wrapped.to.is_empty() {
-                            i18n.tr("wrapped.fileNow")
-                        } else {
-                            ui.wrapped.to.clone()
-                        };
-                        let fname = format!("wrapped-{date_tag}-{}.png", now_ms());
-                        let out_path = shots_dir.join(&fname);
-                        if std::fs::write(&out_path, &png_bytes).is_ok() {
-                            let rel = format!("shots/{fname}");
-                            ui.wrapped.last_saved_path = Some(rel.clone());
-                            if copy_clipboard {
-                                let copied = copy_png_or_path_to_clipboard(
-                                    &png_bytes,
-                                    &out_path.to_string_lossy(),
-                                );
-                                let msg = if copied {
-                                    i18n.tr("wrapped.copied")
-                                } else {
-                                    i18n.tr_vars(
-                                        "wrapped.copyFailed",
-                                        &[("button", &i18n.tr("ui.wrapped.save"))],
-                                    )
-                                };
-                                ui.push_toast(i18n.tr("ui.wrapped.title"), msg);
-                            } else {
-                                ui.push_toast(i18n.tr("ui.wrapped.title"), rel);
-                            }
-                        } else {
-                            ui.push_toast(
-                                i18n.tr("ui.wrapped.title"),
-                                i18n.tr("ui.photo.failed"),
-                            );
-                        }
-                        drop(png_bytes);
-                        if let Some(sfx) = aux.sfx.as_deref_mut() {
-                            sfx.play_sfx(SfxKind::Shutter);
-                        }
-                    }
-                    Err(_) => {
-                        ui.push_toast(i18n.tr("ui.wrapped.title"), i18n.tr("ui.photo.failed"));
-                    }
+                let shots_dir = bridge.data_dir.join("shots");
+                let assets_dir = bridge.assets_dir.clone();
+                let date_tag = sanitize_wrapped_date_tag(&ui.wrapped.to);
+                let toast_title = i18n.tr("ui.wrapped.title");
+                let copied_msg = i18n.tr("wrapped.copied");
+                let copy_failed_msg = i18n.tr_vars(
+                    "wrapped.copyFailed",
+                    &[("button", &i18n.tr("ui.wrapped.save"))],
+                );
+                let photo_failed_msg = i18n.tr("ui.photo.failed");
+                let async_tx = bridge.async_tx.clone();
+
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Shutter);
                 }
+                std::thread::spawn(move || {
+                    let mut fonts = station_canvas2d::FontEngine::from_assets_dir(&assets_dir);
+                    let surf = station_canvas2d::draw_wrapped_card(&input, &mut fonts);
+                    let png_res = station_canvas2d::encode_rgba_to_png(&surf);
+                    let result = match png_res {
+                        Ok(png_bytes) => {
+                            let _ = std::fs::create_dir_all(&shots_dir);
+                            let fname = format!("wrapped-{date_tag}-{}.png", now_ms());
+                            let out_path = shots_dir.join(&fname);
+                            if std::fs::write(&out_path, &png_bytes).is_ok() {
+                                let rel = format!("shots/{fname}");
+                                let toast_body = if copy_clipboard {
+                                    if copy_rgba_or_path_to_clipboard(
+                                        &surf,
+                                        &out_path.to_string_lossy(),
+                                    ) {
+                                        copied_msg
+                                    } else {
+                                        copy_failed_msg
+                                    }
+                                } else {
+                                    rel.clone()
+                                };
+                                BridgeAsyncResult::WrappedExported {
+                                    rel_path: Some(rel),
+                                    toast_title,
+                                    toast_body,
+                                }
+                            } else {
+                                BridgeAsyncResult::WrappedExported {
+                                    rel_path: None,
+                                    toast_title,
+                                    toast_body: photo_failed_msg,
+                                }
+                            }
+                        }
+                        Err(_) => BridgeAsyncResult::WrappedExported {
+                            rel_path: None,
+                            toast_title,
+                            toast_body: photo_failed_msg,
+                        },
+                    };
+                    drop(surf);
+                    let _ = async_tx.try_send(result);
+                });
             }
             UiAction::RefreshTelemetry => {
                 bridge.sys_refresh_due = true;
@@ -9483,26 +9582,40 @@ mod tests {
             );
         }
 
-        // 3. Verify 1080x1350 Wrapped PNG + Timelapse GIF + procedural lo-fi WAV on disk
+        // 3. Verify 1080x1350 Wrapped PNG (exported off-thread) + Timelapse GIF + procedural lo-fi WAV on disk
         let shots_dir = data_dir.join("shots");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut wrapped_png = None;
+        while std::time::Instant::now() < deadline {
+            if let Ok(rd) = std::fs::read_dir(&shots_dir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if p.file_name()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|n| n.starts_with("wrapped-") && n.ends_with(".png"))
+                        && p.metadata().is_ok_and(|m| m.len() > 100)
+                    {
+                        wrapped_png = Some(p);
+                        break;
+                    }
+                }
+            }
+            if wrapped_png.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let wrapped_png = wrapped_png.expect("wrapped PNG must be written to data/shots/");
+        let wrapped_bytes = std::fs::read(&wrapped_png).unwrap();
+        assert!(wrapped_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let img = image::load_from_memory(&wrapped_bytes).unwrap();
+        assert_eq!((img.width(), img.height()), (1080, 1350));
+
         let files: Vec<PathBuf> = std::fs::read_dir(&shots_dir)
             .unwrap()
             .flatten()
             .map(|e| e.path())
             .collect();
-        let wrapped_png = files
-            .iter()
-            .find(|p| {
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .is_some_and(|n| n.starts_with("wrapped-") && n.ends_with(".png"))
-            })
-            .expect("wrapped PNG must be written to data/shots/");
-        let wrapped_bytes = std::fs::read(wrapped_png).unwrap();
-        assert!(wrapped_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
-        let img = image::load_from_memory(&wrapped_bytes).unwrap();
-        assert_eq!((img.width(), img.height()), (1080, 1350));
-
         let gif_file = files
             .iter()
             .find(|p| p.extension().and_then(|s| s.to_str()) == Some("gif"))
@@ -9517,6 +9630,38 @@ mod tests {
         let wav_bytes = std::fs::read(wav_file).unwrap();
         assert_eq!(&wav_bytes[0..4], b"RIFF");
         assert_eq!(&wav_bytes[8..12], b"WAVE");
+    }
+
+    #[test]
+    fn task6_review_guards_bound_image_decode_sanitize_wrapped_date_and_redact_todos() {
+        // 1. Oversized / invalid image bytes fail safely
+        let oversized = vec![0u8; MAX_CHAT_IMAGE_BYTES + 1];
+        assert!(decode_bounded_chat_preview("big".to_owned(), &oversized).is_err());
+        assert!(decode_bounded_chat_preview("bad".to_owned(), b"not-an-image").is_err());
+        assert!(decode_chat_data_url("bad".to_owned(), "data:text/html;base64,PGI+").is_err());
+
+        // 2. Valid data-URL photo generated by render_group_chat_photo_data_url decodes cleanly
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let i18n = I18nStore::load_from_assets(&assets_dir, "en");
+        let mut ui_demo = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        ui_demo.streamer_mode = true;
+        let data_url = render_group_chat_photo_data_url(&ui_demo, &i18n, None, &assets_dir)
+            .expect("valid JPEG data URL");
+        assert!(data_url.starts_with("data:image/jpeg;base64,"));
+        let prev = decode_chat_data_url("photo-1".to_owned(), &data_url)
+            .expect("data URL must decode cleanly through bounded decoder");
+        assert!(prev.width > 0 && prev.width <= 360);
+        assert!(prev.height > 0 && prev.height <= 270);
+
+        // 3. Wrapped filename date tag sanitization blocks traversal
+        assert_eq!(sanitize_wrapped_date_tag("2026-11-26"), "2026-11-26");
+        assert_eq!(sanitize_wrapped_date_tag("../../etc/passwd"), "etcpasswd");
+        assert_eq!(sanitize_wrapped_date_tag("///..."), "latest");
+        assert_eq!(sanitize_wrapped_date_tag(""), "latest");
     }
 
     #[test]

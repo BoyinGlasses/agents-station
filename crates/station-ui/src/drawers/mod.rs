@@ -19,6 +19,9 @@ pub fn draw_active_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nS
     }
 
     let drawer = state.active_drawer;
+    if drawer != ActiveDrawer::GroupChat {
+        group_chat::clear_preview_cache(ctx, state);
+    }
     if drawer == ActiveDrawer::None {
         return;
     }

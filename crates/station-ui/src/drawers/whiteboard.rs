@@ -254,7 +254,7 @@ pub fn draw_whiteboard_modal(ctx: &egui::Context, state: &mut UiState, i18n: &I1
                                             } else {
                                                 item.text.clone()
                                             };
-                                            let mut rt = RichText::new(txt).size(12.0).color(fg);
+                                            let mut rt = RichText::new(&txt).size(12.0).color(fg);
                                             if item.done {
                                                 rt = rt.strikethrough();
                                             }
@@ -265,7 +265,7 @@ pub fn draw_whiteboard_modal(ctx: &egui::Context, state: &mut UiState, i18n: &I1
                                                 |ui| {
                                                     let del_hint = i18n.tr_vars(
                                                         "board.deleteTodo",
-                                                        &[("text", &item.text)],
+                                                        &[("text", &txt)],
                                                     );
                                                     if ui
                                                         .add(

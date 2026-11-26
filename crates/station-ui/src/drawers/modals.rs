@@ -44,7 +44,11 @@ pub fn format_wrapped_hours_key(key: &str, hours: f64, i18n: &I18nStore) -> Stri
     i18n.tr_vars(key, &[("h", &h_str), ("n", n_str)])
 }
 
-fn format_wrapped_highlights(w: &WrappedSummaryUi, streamer: bool, i18n: &I18nStore) -> Vec<String> {
+pub fn format_wrapped_highlights(
+    w: &WrappedSummaryUi,
+    streamer: bool,
+    i18n: &I18nStore,
+) -> Vec<String> {
     let mut out = Vec::new();
     if let Some((proj, hrs)) = &w.top_project {
         let name = if streamer {
@@ -60,9 +64,13 @@ fn format_wrapped_highlights(w: &WrappedSummaryUi, streamer: bool, i18n: &I18nSt
             &[("name", &name), ("h", &h_str), ("n", n_str)],
         ));
     }
-    if let Some((day, _weekday, _hrs)) = &w.busiest_day {
+    if let Some((day, weekday, _hrs)) = &w.busiest_day {
+        let weekday_lbl = i18n.tr_pick("people.duty.board.days", (*weekday as usize) % 7);
         let date = format_wrapped_date(day, i18n);
-        out.push(i18n.tr_vars("wrapped.busiestDay", &[("day", day), ("date", &date)]));
+        out.push(i18n.tr_vars(
+            "wrapped.busiestDay",
+            &[("day", &weekday_lbl), ("date", &date)],
+        ));
     }
     if w.longest_min > 0 {
         let time_str = if w.longest_min >= 60 {
@@ -395,6 +403,29 @@ mod tests {
                 draw_wrapped_modal(ctx, &mut st, &tr);
                 draw_timelapse_overlay(ctx, &mut st, &tr);
             });
+        }
+    }
+
+    #[test]
+    fn wrapped_highlights_resolves_localized_weekday_without_duplicating_iso_date() {
+        let summary = WrappedSummaryUi {
+            busiest_day: Some(("2026-11-26".to_owned(), 4, 12.5)), // 4 = Thu
+            ..Default::default()
+        };
+        for (lang, expected_day) in [("en", "Thu"), ("vi", "Thứ Năm"), ("th", "พฤ.")] {
+            let tr = i18n(lang);
+            let lines = format_wrapped_highlights(&summary, false, &tr);
+            assert_eq!(lines.len(), 1);
+            assert!(
+                lines[0].contains(expected_day),
+                "expected localized weekday `{expected_day}` in `{}`",
+                lines[0]
+            );
+            assert!(
+                !lines[0].contains("2026-11-26"),
+                "must not duplicate raw ISO date in `{}`",
+                lines[0]
+            );
         }
     }
 }
