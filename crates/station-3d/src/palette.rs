@@ -1,8 +1,11 @@
 use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use station_canvas2d::RgbaSurface;
 use std::collections::HashMap;
+use std::f32::consts::FRAC_PI_2;
 
 /// Marker for every 3D world entity so layout changes, 2D mode, and Tray minimize
 /// can despawn and release the entire 3D scene cleanly.
@@ -22,6 +25,7 @@ pub struct WorldPalette {
     materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
     owned_materials: Vec<Handle<StandardMaterial>>,
     owned_images: Vec<Handle<Image>>,
+    floor_tile_vram_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,6 +88,7 @@ impl WorldPalette {
             materials: HashMap::new(),
             owned_materials: Vec::new(),
             owned_images: Vec::new(),
+            floor_tile_vram_bytes: 0,
         }
     }
 
@@ -239,6 +244,98 @@ impl WorldPalette {
         mat
     }
 
+    pub fn textured_lit_double_sided(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        surface: RgbaSurface,
+        roughness: f32,
+    ) -> Handle<StandardMaterial> {
+        let tex = self.upload_surface(images, surface);
+        let mat = materials.add(StandardMaterial {
+            base_color_texture: Some(tex),
+            perceptual_roughness: roughness,
+            cull_mode: None,
+            double_sided: true,
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        mat
+    }
+
+    /// Uploads a compact repeating tile (`RENDER_WORLD` + `ImageAddressMode::Repeat` on U & V)
+    /// and tracks its GPU footprint in `floor_tile_vram_bytes`.
+    pub fn upload_repeating_surface(
+        &mut self,
+        images: &mut Assets<Image>,
+        surface: RgbaSurface,
+    ) -> Handle<Image> {
+        let bytes = surface.rgba.len();
+        let mut img = Image::new(
+            Extent3d {
+                width: surface.width.max(1),
+                height: surface.height.max(1),
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            surface.rgba,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mipmap_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+        let handle = images.add(img);
+        self.owned_images.push(handle.clone());
+        self.floor_tile_vram_bytes = self.floor_tile_vram_bytes.saturating_add(bytes);
+        handle
+    }
+
+    /// Creates a PBR material reusing an already-uploaded repeating tile handle with custom
+    /// UV repeat scale (`Affine2::from_scale`) and albedo tint (`base_color`).
+    pub fn tiled_mat_from_handle(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+        tex: Handle<Image>,
+        repeat: Vec2,
+        tint_hex: &str,
+        roughness: f32,
+    ) -> Handle<StandardMaterial> {
+        let mat = materials.add(StandardMaterial {
+            base_color: srgb_hex(tint_hex),
+            base_color_texture: Some(tex),
+            uv_transform: Affine2::from_scale(Vec2::new(repeat.x.max(0.01), repeat.y.max(0.01))),
+            perceptual_roughness: roughness.clamp(0.05, 1.0),
+            ..default()
+        });
+        self.owned_materials.push(mat.clone());
+        mat
+    }
+
+    /// Uploads a repeating tile surface (`RENDER_WORLD` + `ImageAddressMode::Repeat`)
+    /// and builds a UV-scaled PBR material.
+    pub fn tiled_mat(
+        &mut self,
+        images: &mut Assets<Image>,
+        materials: &mut Assets<StandardMaterial>,
+        surface: RgbaSurface,
+        repeat: Vec2,
+        tint_hex: &str,
+        roughness: f32,
+    ) -> Handle<StandardMaterial> {
+        let tex = self.upload_repeating_surface(images, surface);
+        self.tiled_mat_from_handle(materials, tex, repeat, tint_hex, roughness)
+    }
+
+    pub fn floor_tile_vram_bytes(&self) -> usize {
+        self.floor_tile_vram_bytes
+    }
+
     pub fn material_count(&self) -> usize {
         self.materials.len()
     }
@@ -247,6 +344,7 @@ impl WorldPalette {
         for h in self.owned_images.drain(..) {
             images.remove(&h);
         }
+        self.floor_tile_vram_bytes = 0;
     }
 
     /// Removes every unit mesh, deduplicated material, textured material, and GPU image
@@ -366,6 +464,58 @@ pub fn spawn_quad(
             Transform::from_translation(pos)
                 .with_rotation(rot)
                 .with_scale(Vec3::new(size.x, size.y, 1.0)),
+        ))
+        .id()
+}
+
+/// Spawns a horizontal floor quad lying in the XZ plane facing `+Y`.
+pub fn spawn_floor_quad(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    size: Vec2,
+) -> Entity {
+    spawn_quad(commands, palette, mat, pos, size, Quat::from_rotation_x(-FRAC_PI_2))
+}
+
+pub fn spawn_cyl_rot(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    diameter: f32,
+    height: f32,
+    rot: Quat,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_cyl.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos)
+                .with_rotation(rot)
+                .with_scale(Vec3::new(diameter, height, diameter)),
+        ))
+        .id()
+}
+
+pub fn spawn_cone_rot(
+    commands: &mut Commands,
+    palette: &WorldPalette,
+    mat: Handle<StandardMaterial>,
+    pos: Vec3,
+    scale: Vec3,
+    rot: Quat,
+) -> Entity {
+    commands
+        .spawn((
+            WorldEntity,
+            Mesh3d(palette.unit_cone.clone()),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos)
+                .with_rotation(rot)
+                .with_scale(scale),
         ))
         .id()
 }
