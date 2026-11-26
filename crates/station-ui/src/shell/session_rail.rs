@@ -142,7 +142,7 @@ pub fn draw_session_rail(
                                 let (ic_r, _) =
                                     ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
                                 icons::paint_icon(ui.painter(), ic_r, IconKind::Search, FAINT);
-                                ui.add(
+                                let search_resp = ui.add(
                                     egui::TextEdit::singleline(&mut state.session_search)
                                         .frame(false)
                                         .desired_width(f32::INFINITY)
@@ -152,6 +152,9 @@ pub fn draw_session_rail(
                                                 .color(FAINT),
                                         ),
                                 );
+                                if search_resp.lost_focus() {
+                                    state.input_lost_focus_this_frame = true;
+                                }
                             });
                         });
                 });

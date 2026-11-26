@@ -98,6 +98,7 @@ pub fn compute_shell_layout(
 /// Draws the 3-column control-room shell (`TopBar` + `SessionRail` + transparent `Stage` + `ActivityPanel`)
 /// and returns the exact logical `egui::Rect` of the central stage for 3D camera viewport cropping.
 pub fn draw_shell(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) -> Rect {
+    state.input_lost_focus_this_frame = false;
     let layout = compute_shell_layout(
         ctx.screen_rect().width(),
         state.fullscreen_stage,

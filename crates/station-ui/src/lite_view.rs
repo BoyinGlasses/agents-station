@@ -116,7 +116,12 @@ pub fn handle_lite_keyboard(
     ordered_ids: &[String],
     search_has_focus: bool,
 ) -> LiteShortcutOutcome {
-    if search_has_focus || ctx.wants_keyboard_input() {
+    if search_has_focus
+        || state.input_lost_focus_this_frame
+        || state.active_drawer != ActiveDrawer::None
+        || state.open_popover.is_some()
+        || ctx.wants_keyboard_input()
+    {
         return LiteShortcutOutcome::None;
     }
     let has_mod = ctx.input(|i| i.modifiers.ctrl || i.modifiers.alt || i.modifiers.command);
@@ -301,7 +306,9 @@ pub fn render_lite_stage_center(ui: &mut egui::Ui, state: &mut UiState, i18n: &I
                     state.lite_focus_search_req = false;
                     resp.request_focus();
                 }
-                if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                if (resp.has_focus() || resp.lost_focus())
+                    && ui.input(|i| i.key_pressed(Key::Escape))
+                {
                     state.lite_search.clear();
                     resp.surrender_focus();
                 }
@@ -482,6 +489,9 @@ fn draw_lite_session_card(
         LINE_2
     };
 
+    let mut card_hovered = false;
+    let mut card_clicked = false;
+
     let card = egui::Frame::NONE
         .fill(CARD)
         .corner_radius(CornerRadius::same(10))
@@ -495,109 +505,119 @@ fn draw_lite_session_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            // Row 1: status dot + title + right-aligned metrics (zero overlap at 1280px width)
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let (dot_r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                if is_work {
-                    ui.painter().circle_filled(dot_r.center(), 5.5, GREEN_SOFT);
-                } else if is_wait {
-                    ui.painter().circle_filled(dot_r.center(), 5.5, AMBER_SOFT);
-                }
-                ui.painter().circle_filled(dot_r.center(), 3.6, dot_col);
+            // Non-interactive header/meta/doing/prompt region owns card click sense so inline
+            // Approve/Deny buttons below are NEVER intercepted by reverse hit-testing.
+            let body = egui::Frame::NONE.show(ui, |ui| {
+                ui.set_width(ui.available_width());
 
-                ui.label(heading_bold(clip_chars(&sess.project, 24), 13.0));
+                // Row 1: status dot + title + right-aligned metrics (zero overlap at 1280px width)
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (dot_r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                    if is_work {
+                        ui.painter().circle_filled(dot_r.center(), 5.5, GREEN_SOFT);
+                    } else if is_wait {
+                        ui.painter().circle_filled(dot_r.center(), 5.5, AMBER_SOFT);
+                    }
+                    ui.painter().circle_filled(dot_r.center(), 3.6, dot_col);
 
-                // Right-aligned metrics: cost, age, context bar, todo counter
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    if sess.cost_usd > 0.0 {
-                        ui.label(
-                            RichText::new(format!("${:.2}", sess.cost_usd))
-                                .font(FontId::new(10.5, FontFamily::Monospace))
-                                .color(MUTED),
-                        );
-                    }
-                    if !sess.age_label.is_empty() {
-                        ui.label(
-                            RichText::new(&sess.age_label)
-                                .font(FontId::new(10.5, FontFamily::Monospace))
-                                .color(FAINT),
-                        );
-                    }
-                    if sess.ctx_pct > 0.005 {
-                        draw_ctx_bar(ui, sess.ctx_pct, i18n);
-                    }
-                    if sess.todos_total > 0 {
-                        let done_s = sess.todos_done.to_string();
-                        let total_s = sess.todos_total.to_string();
-                        let tip = i18n.tr_vars(
-                            "lite.todoTitle",
-                            &[("done", done_s.as_str()), ("n", total_s.as_str())],
-                        );
-                        ui.label(
-                            RichText::new(format!("{}/{}", sess.todos_done, sess.todos_total))
-                                .font(FontId::new(10.5, FontFamily::Monospace))
-                                .color(if sess.todos_done == sess.todos_total {
-                                    GREEN
-                                } else {
-                                    MUTED
-                                }),
-                        )
-                        .on_hover_text(tip);
-                    }
+                    ui.label(heading_bold(clip_chars(&sess.project, 24), 13.0));
+
+                    // Right-aligned metrics: cost, age, context bar, todo counter
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if sess.cost_usd > 0.0 {
+                            ui.label(
+                                RichText::new(format!("${:.2}", sess.cost_usd))
+                                    .font(FontId::new(10.5, FontFamily::Monospace))
+                                    .color(MUTED),
+                            );
+                        }
+                        if !sess.age_label.is_empty() {
+                            ui.label(
+                                RichText::new(&sess.age_label)
+                                    .font(FontId::new(10.5, FontFamily::Monospace))
+                                    .color(FAINT),
+                            );
+                        }
+                        if sess.ctx_pct > 0.005 {
+                            draw_ctx_bar(ui, sess.ctx_pct, i18n);
+                        }
+                        if sess.todos_total > 0 {
+                            let done_s = sess.todos_done.to_string();
+                            let total_s = sess.todos_total.to_string();
+                            let tip = i18n.tr_vars(
+                                "lite.todoTitle",
+                                &[("done", done_s.as_str()), ("n", total_s.as_str())],
+                            );
+                            ui.label(
+                                RichText::new(format!("{}/{}", sess.todos_done, sess.todos_total))
+                                    .font(FontId::new(10.5, FontFamily::Monospace))
+                                    .color(if sess.todos_done == sess.todos_total {
+                                        GREEN
+                                    } else {
+                                        MUTED
+                                    }),
+                            )
+                            .on_hover_text(tip);
+                        }
+                    });
                 });
-            });
 
-            // Row 1b: folder pill + git branch/dirty badge + cache-warmth indicator (clean `.v2-sub` line)
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
-                let chip_text = if state.streamer_mode {
-                    sess.agent.clone()
-                } else if !sess.dir.is_empty() {
-                    clip_chars(&sess.dir, 30)
-                } else {
-                    sess.agent.clone()
-                };
-                draw_meta_pill(ui, &chip_text, MUTED, BADGE_BG, LINE);
-
-                if let Some(branch) = &sess.git_branch
-                    && !branch.is_empty()
-                {
-                    let branch_label = if sess.git_dirty > 0 {
-                        format!("{} •{}", clip_chars(branch, 20), sess.git_dirty)
+                // Row 1b: folder pill + git branch/dirty badge + cache-warmth indicator
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 4.0);
+                    let chip_text = if state.streamer_mode {
+                        sess.agent.clone()
+                    } else if !sess.dir.is_empty() {
+                        clip_chars(&sess.dir, 30)
                     } else {
-                        clip_chars(branch, 20)
+                        sess.agent.clone()
                     };
-                    let b_col = if sess.git_dirty > 0 { AMBER } else { MUTED };
-                    draw_meta_pill(ui, &branch_label, b_col, BADGE_BG, LINE);
+                    draw_meta_pill(ui, &chip_text, MUTED, BADGE_BG, LINE);
+
+                    if let Some(branch) = &sess.git_branch
+                        && !branch.is_empty()
+                    {
+                        let branch_label = if sess.git_dirty > 0 {
+                            format!("{} •{}", clip_chars(branch, 20), sess.git_dirty)
+                        } else {
+                            clip_chars(branch, 20)
+                        };
+                        let b_col = if sess.git_dirty > 0 { AMBER } else { MUTED };
+                        draw_meta_pill(ui, &branch_label, b_col, BADGE_BG, LINE);
+                    }
+
+                    draw_cache_warmth_badge(ui, sess.cache_warmth, i18n);
+                });
+
+                // Row 2: current doing / status line
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (ic, text, col) =
+                        resolve_now_line(sess, group_status, state.streamer_mode, i18n);
+                    let (ic_r, _) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::hover());
+                    icons::paint_icon(ui.painter(), ic_r, ic, col);
+                    ui.label(RichText::new(text).size(12.0).color(col));
+                });
+
+                // Optional prompt preview line (matches `my-station-latest-check.png`)
+                if !state.streamer_mode && !sess.last_prompt.is_empty() {
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(format!("“{}”", clip_chars(&sess.last_prompt, 92)))
+                            .size(11.0)
+                            .color(FAINT),
+                    );
                 }
-
-                draw_cache_warmth_badge(ui, sess.cache_warmth, i18n);
             });
+            let body_click = body.response.interact(Sense::click());
+            card_hovered = body_click.hovered();
+            card_clicked = body_click.clicked();
 
-            // Row 2: current doing / status line
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let (ic, text, col) = resolve_now_line(sess, group_status, state.streamer_mode, i18n);
-                let (ic_r, _) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::hover());
-                icons::paint_icon(ui.painter(), ic_r, ic, col);
-                ui.label(RichText::new(text).size(12.0).color(col));
-            });
-
-            // Optional prompt preview line (matches `my-station-latest-check.png`)
-            if !state.streamer_mode && !sess.last_prompt.is_empty() {
-                ui.add_space(2.0);
-                ui.label(
-                    RichText::new(format!("“{}”", clip_chars(&sess.last_prompt, 92)))
-                        .size(11.0)
-                        .color(FAINT),
-                );
-            }
-
-            // Inline Approve / Deny directly on Waiting cards
+            // Inline Approve / Deny directly on Waiting cards (outside `body_click`!)
             if is_wait && let Some(p) = perm {
                 ui.add_space(6.0);
                 if !p.summary.is_empty() && !state.streamer_mode {
@@ -620,9 +640,7 @@ fn draw_lite_session_card(
     ui.painter()
         .rect_filled(stripe, CornerRadius::same(2), stripe_col);
 
-    // Click on card selects session & opens SessionDrawer (only when no inline button consumed click).
-    let click = card.response.interact(Sense::click());
-    if click.hovered() && !selected {
+    if card_hovered && !selected {
         ui.painter().rect_stroke(
             r,
             CornerRadius::same(10),
@@ -630,7 +648,7 @@ fn draw_lite_session_card(
             StrokeKind::Inside,
         );
     }
-    if click.clicked() {
+    if card_clicked {
         state.selected_session = Some(sess.id.clone());
         state.active_drawer = ActiveDrawer::Session;
     }
@@ -1059,6 +1077,9 @@ mod tests {
         );
         assert_eq!(state.active_drawer, ActiveDrawer::Session);
 
+        // Close drawer before testing Y/N (shortcuts are suppressed while a drawer is open).
+        state.active_drawer = ActiveDrawer::None;
+
         // 4. Y approves pending perm and emits DecidePermission("allow")
         let raw_y = egui::RawInput {
             events: vec![key_event(Key::Y)],
@@ -1256,5 +1277,280 @@ mod tests {
                 assert!(!val.is_empty() && val != key, "lang={lang} raw key {key}");
             }
         }
+    }
+
+    fn pointer_click_events(pos: Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn find_text_center(shapes: &[egui::epaint::ClippedShape], needle: &str) -> Option<Pos2> {
+        for clipped in shapes {
+            if let Shape::Text(ts) = &clipped.shape
+                && ts.galley.text().contains(needle)
+            {
+                let rect = Rect::from_min_size(ts.pos, ts.galley.size());
+                return Some(rect.center());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn pointer_clicking_inline_approve_and_deny_decides_perm_without_opening_session_drawer() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(720.0, 720.0));
+
+        // 1. Click inline Allow (Y) button
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.active_drawer = ActiveDrawer::None;
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+        let raw0 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw0.clone(), |_| {});
+        let out1 = ctx.run(raw0.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_lite_stage_center(ui, &mut state, &i18n);
+            });
+        });
+        let allow_pos = find_text_center(&out1.shapes, "Allow (Y)")
+            .expect("expected inline Allow (Y) button text in lite_view");
+
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: pointer_click_events(allow_pos),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_lite_stage_center(ui, &mut state, &i18n);
+                });
+            },
+        );
+        assert!(
+            state.pending_perms.is_empty(),
+            "pointer-clicking Allow (Y) must resolve pending permission"
+        );
+        assert_eq!(
+            state.active_drawer,
+            ActiveDrawer::None,
+            "pointer-clicking Allow (Y) must NOT be stolen by card click to open SessionDrawer"
+        );
+        let actions = state.drain_actions();
+        assert!(matches!(
+            actions.as_slice(),
+            [UiAction::DecidePermission { id, decision }] if id == "perm-1" && decision == "allow"
+        ));
+
+        // 2. Click inline Deny (N) button
+        state.pending_perms.push(PendingPermCard {
+            id: "perm-deny".to_owned(),
+            session_id: "sess-codex-2".to_owned(),
+            agent: "codex".to_owned(),
+            tool: "Bash".to_owned(),
+            summary: "rm -rf tmp".to_owned(),
+            kind: "permission".to_owned(),
+        });
+        let out2 = ctx.run(raw0, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_lite_stage_center(ui, &mut state, &i18n);
+            });
+        });
+        let deny_pos = find_text_center(&out2.shapes, "Deny (N)")
+            .expect("expected inline Deny (N) button text in lite_view");
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: pointer_click_events(deny_pos),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_lite_stage_center(ui, &mut state, &i18n);
+                });
+            },
+        );
+        assert!(state.pending_perms.is_empty());
+        assert_eq!(state.active_drawer, ActiveDrawer::None);
+        let actions2 = state.drain_actions();
+        assert!(matches!(
+            actions2.as_slice(),
+            [UiAction::DecidePermission { id, decision }] if id == "perm-deny" && decision == "deny"
+        ));
+    }
+
+    #[test]
+    fn escape_inside_lite_search_clears_query_and_surrenders_focus() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(720.0, 720.0));
+
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.lite_search = "codex".to_owned();
+        state.lite_focus_search_req = true;
+
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+        let raw0 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw0.clone(), |_| {});
+        // Frame 1: focus search box via `lite_focus_search_req`
+        let _ = ctx.run(raw0.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_lite_stage_center(ui, &mut state, &i18n);
+            });
+        });
+        assert!(ctx.wants_keyboard_input(), "search box must be focused before Esc");
+
+        // Frame 2: press Escape inside focused search box
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![key_event(Key::Escape)],
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    render_lite_stage_center(ui, &mut state, &i18n);
+                });
+            },
+        );
+        assert!(
+            state.lite_search.is_empty(),
+            "Esc in lite search box must clear state.lite_search, got {:?}",
+            state.lite_search
+        );
+        assert!(
+            !ctx.wants_keyboard_input(),
+            "Esc in lite search box must leave search unfocused"
+        );
+    }
+
+    #[test]
+    fn keyboard_shortcuts_blocked_behind_open_drawer_popover_or_session_rail_enter() {
+        use crate::state::TopBarPopover;
+
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+
+        let ids = vec!["sess-codex-2".to_owned(), "sess-claude-1".to_owned()];
+
+        // 1. Open drawer suppresses shortcuts
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.active_drawer = ActiveDrawer::Settings;
+        let mut out = LiteShortcutOutcome::FocusSearch;
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![key_event(Key::Y)],
+                ..Default::default()
+            },
+            |ctx| {
+                out = handle_lite_keyboard(ctx, &mut state, &ids, false);
+            },
+        );
+        assert_eq!(out, LiteShortcutOutcome::None);
+        assert_eq!(state.pending_perms.len(), 1);
+
+        // 2. Open TopBar popover suppresses shortcuts
+        state.active_drawer = ActiveDrawer::None;
+        state.open_popover = Some(TopBarPopover::Plan);
+        let _ = ctx.run(
+            egui::RawInput {
+                events: vec![key_event(Key::N)],
+                ..Default::default()
+            },
+            |ctx| {
+                out = handle_lite_keyboard(ctx, &mut state, &ids, false);
+            },
+        );
+        assert_eq!(out, LiteShortcutOutcome::None);
+        assert_eq!(state.pending_perms.len(), 1);
+
+        // 3. Pressing Enter inside SessionRail search in 2D Lite must NOT open SessionDrawer
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0));
+        let mut shell_state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        shell_state.view_mode = ViewMode::Lite2D;
+        shell_state.active_drawer = ActiveDrawer::None;
+        let ctx2 = egui::Context::default();
+        crate::install_egui_fonts(&ctx2, &bundle);
+        let raw_base = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx2.run(raw_base.clone(), |_| {});
+        let out_frame = ctx2.run(raw_base.clone(), |ctx| {
+            let _ = crate::shell::draw_shell(ctx, &mut shell_state, &i18n);
+        });
+        let rail_search_pos = find_text_center(&out_frame.shapes, "Search by name or folder")
+            .expect("expected SessionRail search hint");
+        // Focus SessionRail search by clicking it
+        let _ = ctx2.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: pointer_click_events(rail_search_pos),
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = crate::shell::draw_shell(ctx, &mut shell_state, &i18n);
+            },
+        );
+        assert!(ctx2.wants_keyboard_input(), "SessionRail search must be focused");
+        // Now press Enter in SessionRail search
+        let _ = ctx2.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![key_event(Key::Enter)],
+                ..Default::default()
+            },
+            |ctx| {
+                let _ = crate::shell::draw_shell(ctx, &mut shell_state, &i18n);
+            },
+        );
+        assert_eq!(
+            shell_state.active_drawer,
+            ActiveDrawer::None,
+            "Enter inside SessionRail search MUST NOT trigger Lite OpenSession on the same frame"
+        );
     }
 }
