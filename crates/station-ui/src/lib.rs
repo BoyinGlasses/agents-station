@@ -2,6 +2,7 @@ pub mod drawers;
 pub mod fonts;
 pub mod i18n;
 pub mod icons;
+pub mod labels3d;
 pub mod lite_view;
 pub mod shell;
 pub mod state;
