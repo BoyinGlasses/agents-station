@@ -1463,10 +1463,13 @@ pub fn sync_camera_viewport_to_stage(
     let win = windows.iter().next();
     for mut cam in &mut cams {
         let (scale, target_phys) = match &cam.target {
-            RenderTarget::Image(_) => (
-                1.0_f32,
-                cam.physical_target_size().unwrap_or(UVec2::new(1280, 720)),
-            ),
+            RenderTarget::Image(_) => match cam.physical_target_size() {
+                Some(sz) => (1.0_f32, sz),
+                None => {
+                    cam.is_active = false;
+                    continue;
+                }
+            },
             _ => match win {
                 Some(w) => (
                     w.scale_factor(),
@@ -4807,6 +4810,39 @@ mod tests {
         assert!(
             !cam_min.is_active,
             "camera must deactivate when window physical size is 0x0"
+        );
+    }
+
+    #[test]
+    fn sync_camera_viewport_deactivates_render_target_image_when_target_size_unknown() {
+        let mut app = App::new();
+        app.insert_resource(StageViewportRect(Some(egui::Rect::from_min_max(
+            egui::pos2(300.0, 56.0),
+            egui::pos2(950.0, 720.0),
+        ))))
+        .add_systems(Update, sync_camera_viewport_to_stage);
+
+        let cam_entity = app
+            .world_mut()
+            .spawn((
+                station_3d::camera::MainOfficeCamera,
+                Camera {
+                    target: RenderTarget::Image(Handle::<Image>::default().into()),
+                    is_active: true,
+                    ..default()
+                },
+            ))
+            .id();
+
+        app.update();
+        let cam = app.world().get::<Camera>(cam_entity).unwrap();
+        assert!(
+            !cam.is_active,
+            "RenderTarget::Image camera must deactivate when physical_target_size() is None"
+        );
+        assert!(
+            cam.viewport.is_none(),
+            "viewport must not be populated with hardcoded fallback dimensions"
         );
     }
 }
