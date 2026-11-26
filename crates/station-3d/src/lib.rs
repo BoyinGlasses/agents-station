@@ -14,6 +14,7 @@ pub mod ibl;
 pub mod interact;
 pub mod layout;
 pub mod life;
+pub mod life_systems;
 pub mod lights;
 pub mod nav;
 pub mod palette;

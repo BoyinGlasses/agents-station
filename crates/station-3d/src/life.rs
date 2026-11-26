@@ -39,9 +39,62 @@ pub fn weather_city_display(raw: &str) -> (String, String) {
 pub enum SeasonTheme {
     #[default]
     Normal,
+    Halloween,
     Tet,
     MidAutumn,
     Christmas,
+}
+
+impl SeasonTheme {
+    /// Resolves the active office seasonal decoration theme from a calendar date (`env.js:67-71`):
+    /// - `Halloween`: Oct 20 – Nov 2
+    /// - `Christmas`: Dec 10 – Dec 31
+    /// - `Tet`: Vietnamese Lunar New Year window (`[-14..=+7]` days around Mùng 1 Tết)
+    /// - `Normal`: all other dates
+    pub fn from_date(year: i32, month: u32, day: u32) -> Self {
+        let md = month * 100 + day;
+        if (1020..=1102).contains(&md) {
+            return Self::Halloween;
+        }
+        if (1210..=1231).contains(&md) {
+            return Self::Christmas;
+        }
+        if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+            // Exact Vietnamese Lunar New Year (Mùng 1 Tết, UTC+7, matching `workdays.js:19`)
+            const TET_MUNG1: [(i32, u32, u32); 12] = [
+                (2024, 2, 10),
+                (2025, 1, 29),
+                (2026, 2, 17),
+                (2027, 2, 6),
+                (2028, 1, 26),
+                (2029, 2, 13),
+                (2030, 2, 3),
+                (2031, 1, 23),
+                (2032, 2, 11),
+                (2033, 1, 31),
+                (2034, 2, 19),
+                (2035, 2, 8),
+            ];
+            for &(ty, tm, td) in &TET_MUNG1 {
+                if ty == year || ty == year + 1 {
+                    if let Some(tet) = chrono::NaiveDate::from_ymd_opt(ty, tm, td) {
+                        let diff = date.signed_duration_since(tet).num_days();
+                        if (-14..=7).contains(&diff) {
+                            return Self::Tet;
+                        }
+                    }
+                }
+            }
+        }
+        Self::Normal
+    }
+
+    /// Resolves today's seasonal theme using local wall clock.
+    pub fn from_local_today() -> Self {
+        use chrono::Datelike;
+        let today = chrono::Local::now().date_naive();
+        Self::from_date(today.year(), today.month(), today.day())
+    }
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -181,6 +234,7 @@ pub fn spawn_life_elements(
 
     // 4. Seasonal accent decor
     match life.season {
+        SeasonTheme::Halloween => {}
         SeasonTheme::Tet => {
             let blossom = pal.emissive(materials, "#FF85B3", 0.85);
             spawn_sphere(commands, pal, blossom, Vec3::new(-4.4, 1.35, 3.3), Vec3::splat(0.65));
@@ -239,5 +293,31 @@ mod tests {
             weather_city_display("HCMC"),
             ("hcm".to_owned(), "TP. Hồ Chí Minh".to_owned())
         );
+    }
+
+    #[test]
+    fn season_theme_from_date_matches_halloween_christmas_and_lunar_tet_windows() {
+        assert_eq!(SeasonTheme::from_date(2026, 10, 31), SeasonTheme::Halloween);
+        assert_eq!(SeasonTheme::from_date(2026, 10, 20), SeasonTheme::Halloween);
+        assert_eq!(SeasonTheme::from_date(2026, 11, 2), SeasonTheme::Halloween);
+        assert_eq!(SeasonTheme::from_date(2026, 11, 3), SeasonTheme::Normal);
+
+        assert_eq!(SeasonTheme::from_date(2026, 12, 10), SeasonTheme::Christmas);
+        assert_eq!(SeasonTheme::from_date(2026, 12, 24), SeasonTheme::Christmas);
+        assert_eq!(SeasonTheme::from_date(2026, 12, 31), SeasonTheme::Christmas);
+        assert_eq!(SeasonTheme::from_date(2026, 12, 9), SeasonTheme::Normal);
+
+        // Authentic Vietnamese Lunar New Year dates across multiple years
+        assert_eq!(SeasonTheme::from_date(2025, 1, 29), SeasonTheme::Tet);
+        assert_eq!(SeasonTheme::from_date(2025, 1, 16), SeasonTheme::Tet); // within 14d before
+        assert_eq!(SeasonTheme::from_date(2025, 2, 5), SeasonTheme::Tet); // within 7d after
+        assert_eq!(SeasonTheme::from_date(2026, 2, 17), SeasonTheme::Tet);
+        assert_eq!(SeasonTheme::from_date(2026, 2, 3), SeasonTheme::Tet);
+        assert_eq!(SeasonTheme::from_date(2026, 2, 24), SeasonTheme::Tet);
+        assert_eq!(SeasonTheme::from_date(2027, 2, 6), SeasonTheme::Tet);
+
+        // Ordinary non-holiday dates
+        assert_eq!(SeasonTheme::from_date(2026, 5, 15), SeasonTheme::Normal);
+        assert_eq!(SeasonTheme::from_date(2026, 8, 12), SeasonTheme::Normal);
     }
 }

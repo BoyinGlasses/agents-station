@@ -180,6 +180,12 @@ fn season_bulb_colors(season: SeasonTheme) -> [LinearRgba; 4] {
             LinearRgba::new(2.9, 2.2, 0.9, 1.0),
             LinearRgba::new(2.5, 2.5, 2.7, 1.0),
         ],
+        SeasonTheme::Halloween => [
+            LinearRgba::new(2.9, 1.35, 0.25, 1.0),
+            LinearRgba::new(1.85, 0.7, 2.7, 1.0),
+            LinearRgba::new(2.8, 2.0, 0.35, 1.0),
+            LinearRgba::new(2.9, 0.9, 0.25, 1.0),
+        ],
         SeasonTheme::MidAutumn => [
             LinearRgba::new(2.9, 1.5, 0.3, 1.0),
             LinearRgba::new(2.8, 2.2, 0.55, 1.0),
