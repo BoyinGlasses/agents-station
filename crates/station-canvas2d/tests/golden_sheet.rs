@@ -36,6 +36,18 @@ fn generates_golden_canvas2d_contact_sheet_png() {
         true,
         false,
     );
+    fonts.draw_text(
+        &mut sheet,
+        "Tiếng Việt: Ă Ắ Ặ Đ Ơ Ư Ỹ · ผู้จัดการ · ภาษาไทย · ≤ 300 MB",
+        1576.0,
+        18.0,
+        18.0,
+        hex("#A8D5BA"),
+        TextAlign::Right,
+        Some(760.0),
+        false,
+        false,
+    );
 
     // Row 1: Desk screens + Live TV + Arcade
     let code = draw_desk_screen(ScreenKind::Code, &mut fonts);
