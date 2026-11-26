@@ -171,6 +171,10 @@ enum BridgeAsyncResult {
         push_count: usize,
         pin: Option<String>,
     },
+    WeatherFetched {
+        code: u32,
+        temp_c: f32,
+    },
 }
 
 #[derive(Clone)]
@@ -4288,9 +4292,11 @@ impl Plugin for LiveServerBridgePlugin {
                     drive_pending_photo_capture,
                     drive_pending_timelapse_capture,
                     process_ui_actions,
-                    sync_live_sessions_to_3d,
-                    handle_picking_events,
+                    step_demo_simulation_system,
                     step_replay_system,
+                    sync_live_sessions_to_3d,
+                    sync_life_world_data_system,
+                    handle_picking_events,
                 )
                     .chain()
                     .before(station_3d::LightingSyncSet),
@@ -4674,6 +4680,7 @@ fn sync_live_state_to_ui(
     i18n: Option<Res<I18nStore>>,
     windows: Query<&Window>,
     mut tray: Option<ResMut<TrayState>>,
+    mut life: Option<ResMut<station_3d::life::OfficeLifeState>>,
 ) {
     ui.clock_label = Local::now().format("%H:%M").to_string();
 
@@ -4882,6 +4889,14 @@ fn sync_live_state_to_ui(
                     ui.pairing_pin = p;
                 }
             }
+            BridgeAsyncResult::WeatherFetched { code, temp_c } => {
+                if let Some(l) = life.as_deref_mut() {
+                    apply_weather_to_state(code, temp_c, l, &mut ui);
+                } else {
+                    let mut tmp = station_3d::life::OfficeLifeState::default();
+                    apply_weather_to_state(code, temp_c, &mut tmp, &mut ui);
+                }
+            }
         }
     }
 
@@ -4948,7 +4963,7 @@ fn sync_live_state_to_ui(
     match &bridge.backend {
         BridgeBackend::AttachedHttp { snapshot, .. } => {
             let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if !ui.demo_running {
+            if !ui.demo_running && !ui.replay_active {
                 synced_live_perms = snap.has_snapshot;
                 apply_remote_snapshot_to_ui(&snap, &mut ui);
                 ui.pending_perms
@@ -4958,7 +4973,7 @@ fn sync_live_state_to_ui(
             }
         }
         BridgeBackend::InProcess { app_state, .. } => {
-            if !ui.demo_running {
+            if !ui.demo_running && !ui.replay_active {
                 synced_live_perms = true;
                 sync_office_core_to_ui(app_state, &bridge.dismissed_ci_ids, &mut ui);
             }
@@ -5232,29 +5247,58 @@ fn load_replay_range_into_state(
     let items = station_core::state::sessions::read_replay_range(data_dir, from, to);
     let events: Vec<station_3d::replay::ReplayEvent> = items
         .into_iter()
-        .map(|it| station_3d::replay::ReplayEvent {
-            ts: it.t,
-            session_id: it
-                .m
-                .get("s")
-                .and_then(|s| s.get("id"))
-                .or_else(|| it.m.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            kind: it
-                .m
-                .get("k")
-                .and_then(Value::as_str)
-                .unwrap_or("ev")
-                .to_owned(),
-            summary: it
-                .m
-                .get("e")
-                .and_then(|e| e.get("label"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+        .map(|it| {
+            let sess_obj = it.m.get("s");
+            let ev_obj = it.m.get("e");
+            station_3d::replay::ReplayEvent {
+                ts: it.t,
+                session_id: sess_obj
+                    .and_then(|s| s.get("id"))
+                    .or_else(|| it.m.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                kind: it
+                    .m
+                    .get("k")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ev")
+                    .to_owned(),
+                summary: ev_obj
+                    .and_then(|e| e.get("label"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                agent: sess_obj
+                    .and_then(|s| s.get("agent"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("claude")
+                    .to_owned(),
+                project: sess_obj
+                    .and_then(|s| s.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                status: sess_obj
+                    .and_then(|s| s.get("status"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                tool: ev_obj
+                    .and_then(|e| e.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                desk: sess_obj
+                    .and_then(|s| s.get("desk"))
+                    .and_then(Value::as_u64)
+                    .map(|d| d as usize),
+                event_type: ev_obj
+                    .and_then(|e| e.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            }
         })
         .collect();
     rep.load_events(events);
@@ -5294,6 +5338,305 @@ fn sync_replay_ui_readout(rep: &station_3d::replay::ReplayState, ui: &mut UiStat
     }
 }
 
+fn weather_desc_for_code(code: u32) -> &'static str {
+    match code {
+        0 => "Clear",
+        1..=2 => "Partly cloudy",
+        3 => "Cloudy",
+        4..=48 => "Fog",
+        49..=57 => "Drizzle",
+        58..=67 => "Rain",
+        68..=77 => "Snow",
+        78..=82 => "Showers",
+        _ => "Storm",
+    }
+}
+
+fn apply_weather_to_state(
+    code: u32,
+    temp_c: f32,
+    life: &mut station_3d::life::OfficeLifeState,
+    ui: &mut UiState,
+) {
+    life.apply_open_meteo(code, temp_c);
+    ui.weather_temp_c = temp_c.round() as i32;
+    ui.weather_desc = weather_desc_for_code(code).to_owned();
+}
+
+/// Non-blocking Open-Meteo fetch (5s timeout, offline-safe, zero `powershell.exe` spawns).
+fn spawn_open_meteo_fetch(city_code: String, tx: mpsc::Sender<BridgeAsyncResult>) {
+    let coords = station_3d::life::VN_WEATHER_CITIES
+        .iter()
+        .find(|(code, _, _, _)| code.eq_ignore_ascii_case(&city_code))
+        .map(|(_, _, lat, lon)| (*lat, *lon));
+    let Some((lat, lon)) = coords else {
+        return;
+    };
+    let _ = std::thread::Builder::new()
+        .name("station-open-meteo".to_owned())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let Ok(client) = reqwest::Client::builder()
+                    .timeout(Duration::from_secs(5))
+                    .build()
+                else {
+                    return;
+                };
+                let url = format!(
+                    "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code&timezone=auto"
+                );
+                let Ok(resp) = client.get(url).send().await else {
+                    return;
+                };
+                let Ok(val) = resp.json::<Value>().await else {
+                    return;
+                };
+                let Some(cur) = val.get("current") else {
+                    return;
+                };
+                let Some(code) = cur.get("weather_code").and_then(Value::as_u64) else {
+                    return;
+                };
+                let Some(temp) = cur.get("temperature_2m").and_then(Value::as_f64) else {
+                    return;
+                };
+                let _ = tx.try_send(BridgeAsyncResult::WeatherFetched {
+                    code: code as u32,
+                    temp_c: temp as f32,
+                });
+            });
+        });
+}
+
+fn apply_replay_snapshot_to_ui(rep: &station_3d::replay::ReplayState, ui: &mut UiState) {
+    sync_replay_ui_readout(rep, ui);
+    if !rep.active || rep.events.is_empty() {
+        return;
+    }
+    ui.sessions = rep
+        .snapshot
+        .sessions
+        .iter()
+        .map(|s| SessionCard {
+            id: s.id.clone(),
+            agent: s.agent.clone(),
+            project: s.project.clone(),
+            status: normalize_status(&s.status).to_owned(),
+            last_prompt: s.last_summary.clone(),
+            tool: s.tool.clone(),
+            tool_kind: s.tool.clone(),
+            desk: s.desk,
+            ..Default::default()
+        })
+        .collect();
+    ui.feed = rep
+        .events
+        .iter()
+        .filter(|e| e.ts <= rep.cursor_ms)
+        .rev()
+        .take(80)
+        .map(|e| {
+            let kind = if !e.event_type.is_empty() {
+                normalize_feed_kind(&e.event_type)
+            } else {
+                normalize_feed_kind(&e.kind)
+            };
+            let is_fail = e.event_type == "fail" || e.event_type == "testfail";
+            FeedEntry {
+                ts_label: format_hhmm_ms(e.ts),
+                agent: if e.project.is_empty() {
+                    e.agent.clone()
+                } else {
+                    e.project.clone()
+                },
+                kind: kind.to_owned(),
+                message: e.summary.clone(),
+                level: if is_fail { "err" } else { "info" }.to_owned(),
+                attention: is_fail || e.event_type == "wait",
+            }
+        })
+        .collect();
+}
+
+fn sync_demo_sessions_to_ui(demo: &station_3d::DemoSimState, ui: &mut UiState) {
+    ui.sessions = demo
+        .sessions
+        .iter()
+        .map(|s| SessionCard {
+            id: s.id.clone(),
+            agent: s.agent.clone(),
+            project: s.name.clone(),
+            dir: s.dir.clone(),
+            status: normalize_status(&s.status).to_owned(),
+            model: "claude-opus-5-5".to_owned(),
+            last_prompt: s.last_prompt.clone(),
+            tool: s.tool_label.clone(),
+            tool_kind: s.tool_kind.clone(),
+            desk: s.desk,
+            cost_usd: s.cost_usd,
+            tokens: s.ctx_tokens,
+            ctx_pct: if s.ctx_max > 0 {
+                (s.ctx_tokens as f32 / s.ctx_max as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            subagents: s
+                .subagents
+                .iter()
+                .map(|sub| station_ui::state::SubagentItem {
+                    id: sub.id.clone(),
+                    label: sub.kind.clone(),
+                    doing: sub.desc.clone(),
+                })
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_demo_simulation_system(
+    time: Res<Time>,
+    mut ui: ResMut<UiState>,
+    mut demo: Option<ResMut<station_3d::DemoSimState>>,
+    mut postbox: Option<ResMut<station_3d::PostboxState>>,
+    mut incidents: Option<ResMut<station_3d::IncidentState>>,
+    mut tests_board: Option<ResMut<station_3d::TestsBoardState>>,
+    mut rocket_queue: Option<ResMut<station_3d::RocketLaunchQueue>>,
+    mut cast_events: Option<ResMut<station_3d::CastEvents>>,
+) {
+    let Some(demo) = demo.as_deref_mut() else {
+        return;
+    };
+    if !ui.demo_running || !demo.active {
+        return;
+    }
+    let emitted = demo.tick(time.delta_secs());
+    if !emitted.is_empty() || ui.sessions.len() != demo.sessions.len() {
+        sync_demo_sessions_to_ui(demo, &mut ui);
+    }
+    for ev in &emitted {
+        let is_fail = ev.event_type == "fail" || ev.event_type == "testfail";
+        let ts_label = ui.clock_label.clone();
+        ui.feed.insert(
+            0,
+            FeedEntry {
+                ts_label,
+                agent: ev.project.clone(),
+                kind: normalize_feed_kind(&ev.event_type).to_owned(),
+                message: ev.label.clone(),
+                level: if is_fail { "err" } else { "info" }.to_owned(),
+                attention: is_fail || ev.event_type == "wait",
+            },
+        );
+        if ui.feed.len() > 80 {
+            ui.feed.truncate(80);
+        }
+        match ev.event_type.as_str() {
+            "commit" => {
+                if let Some(pb) = postbox.as_deref_mut() {
+                    pb.on_commit();
+                }
+            }
+            "push" => {
+                if let Some(pb) = postbox.as_deref_mut() {
+                    pb.on_push();
+                }
+                if let Some(rq) = rocket_queue.as_deref_mut() {
+                    rq.pending = true;
+                }
+            }
+            "deploy" => {
+                if let Some(rq) = rocket_queue.as_deref_mut() {
+                    rq.pending = true;
+                }
+            }
+            "release" => {
+                if let Some(ce) = cast_events.as_deref_mut() {
+                    ce.release_tag = Some(ev.label.clone());
+                }
+            }
+            "fail" => {
+                if let Some(inc) = incidents.as_deref_mut() {
+                    inc.record_failure();
+                }
+            }
+            "test" => {
+                if let Some(tb) = tests_board.as_deref_mut() {
+                    tb.set_row(ev.desk, station_3d::TestRunStatus::Running);
+                }
+            }
+            "testok" => {
+                if let Some(tb) = tests_board.as_deref_mut() {
+                    tb.set_row(ev.desk, station_3d::TestRunStatus::Pass);
+                }
+            }
+            "testfail" => {
+                if let Some(tb) = tests_board.as_deref_mut() {
+                    tb.set_row(ev.desk, station_3d::TestRunStatus::Fail);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(ce) = cast_events.as_deref_mut() {
+        let (pct, chg) = station_3d::demo_battery(demo.sim_secs / 60.0);
+        ce.battery_pct = pct;
+        ce.battery_charging = chg;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_life_world_data_system(
+    time: Res<Time>,
+    bridge: Res<LiveServerBridge>,
+    mut trophies: Option<ResMut<station_3d::TrophiesShelfState>>,
+    mut strips: Option<ResMut<station_3d::PhotostripsState>>,
+    mut pal: Option<ResMut<WorldPalette>>,
+    mut images: Option<ResMut<Assets<Image>>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut q_strips: Query<(&station_3d::PhotostripSlot, &mut Visibility)>,
+    mut elapsed: bevy::prelude::Local<f32>,
+    mut initialized: bevy::prelude::Local<bool>,
+) {
+    *elapsed += time.delta_secs();
+    if *initialized && *elapsed < 5.0 {
+        return;
+    }
+    *initialized = true;
+    *elapsed = 0.0;
+
+    if let Some(tr) = trophies.as_deref_mut() {
+        let totals_path = bridge.data_dir.join("totals.json");
+        tr.load_from_totals_json(&totals_path);
+    }
+    if let Some(st) = strips.as_deref_mut() {
+        let shots_dir = bridge.data_dir.join("shots");
+        if let (Some(pal), Some(imgs), Some(mats)) = (
+            pal.as_deref_mut(),
+            images.as_deref_mut(),
+            materials.as_deref_mut(),
+        ) {
+            station_3d::sync_photostrips_from_shots_dir(
+                &shots_dir,
+                st,
+                pal,
+                imgs,
+                mats,
+                &mut q_strips,
+            );
+        } else {
+            st.scan_shots_dir(&shots_dir);
+        }
+    }
+}
+
 fn step_replay_system(
     time: Res<Time>,
     mut ui: ResMut<UiState>,
@@ -5304,7 +5647,7 @@ fn step_replay_system(
     };
     if rep.active && rep.playing {
         rep.step(time.delta_secs());
-        sync_replay_ui_readout(rep, &mut ui);
+        apply_replay_snapshot_to_ui(rep, &mut ui);
     }
 }
 
@@ -5758,6 +6101,7 @@ struct AuxActionParams<'w, 's> {
     life: Option<ResMut<'w, station_3d::life::OfficeLifeState>>,
     camera_rig: Option<ResMut<'w, station_3d::camera::CameraRig>>,
     cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
+    demo: Option<ResMut<'w, station_3d::DemoSimState>>,
     replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
     rocket_queue: Option<ResMut<'w, station_3d::RocketLaunchQueue>>,
     pending_photo: Option<ResMut<'w, PendingPhotoCapture>>,
@@ -6999,6 +7343,16 @@ fn process_ui_actions(
                 if let Some(life) = aux.life.as_deref_mut() {
                     life.weather_city = code.clone();
                 }
+                let live_net = matches!(
+                    &bridge.backend,
+                    BridgeBackend::InProcess {
+                        runtime_handle: Some(_),
+                        ..
+                    } | BridgeBackend::AttachedHttp { .. }
+                );
+                if live_net {
+                    spawn_open_meteo_fetch(code.clone(), bridge.async_tx.clone());
+                }
                 persist_pref(&bridge, "weatherCity", json!(code));
                 ui.push_toast(
                     i18n.tr("ui.topBar.weather"),
@@ -7286,18 +7640,27 @@ fn process_ui_actions(
             UiAction::ToggleDemo => {
                 ui.demo_running = !ui.demo_running;
                 if ui.demo_running {
-                    let demo = UiState::with_demo_seed(ui.layout, ui.backdrop, ui.night);
-                    ui.sessions = demo.sessions;
-                    ui.pending_perms = demo.pending_perms;
-                    ui.feed = demo.feed;
-                    ui.chat = demo.chat;
-                    ui.burn = demo.burn;
-                    ui.selected_session = demo.selected_session;
+                    let demo_seed = UiState::with_demo_seed(ui.layout, ui.backdrop, ui.night);
+                    ui.pending_perms = demo_seed.pending_perms;
+                    ui.feed = demo_seed.feed;
+                    ui.chat = demo_seed.chat;
+                    ui.burn = demo_seed.burn;
+                    if let Some(sim) = aux.demo.as_deref_mut() {
+                        sim.start();
+                        sync_demo_sessions_to_ui(sim, &mut ui);
+                        ui.selected_session = ui.sessions.first().map(|s| s.id.clone());
+                    } else {
+                        ui.sessions = demo_seed.sessions;
+                        ui.selected_session = demo_seed.selected_session;
+                    }
                     if let Some(sfx) = aux.sfx.as_deref_mut() {
                         sfx.play_sfx(SfxKind::Ding);
                     }
                     ui.push_toast(i18n.tr("station.demoChip"), i18n.tr("station.demoOn"));
                 } else {
+                    if let Some(sim) = aux.demo.as_deref_mut() {
+                        sim.stop();
+                    }
                     ui.sessions.clear();
                     ui.pending_perms.clear();
                     ui.feed.clear();
@@ -7324,11 +7687,16 @@ fn process_ui_actions(
                         rep.active = true;
                         rep.playing = true;
                         ui.replay_heatmap = build_replay_heatmap(rep, 24);
-                        sync_replay_ui_readout(rep, &mut ui);
+                        apply_replay_snapshot_to_ui(rep, &mut ui);
                         ui.replay_active = true;
                     } else {
-                        rep.playing = false;
-                        rep.active = false;
+                        rep.restore_live();
+                        if let BridgeBackend::InProcess { app_state, .. } = &bridge.backend {
+                            sync_office_core_to_ui(app_state, &bridge.dismissed_ci_ids, &mut ui);
+                        } else if let BridgeBackend::AttachedHttp { snapshot, .. } = &bridge.backend {
+                            let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            apply_remote_snapshot_to_ui(&snap, &mut ui);
+                        }
                     }
                 }
                 let replay_msg = if ui.replay_active {
@@ -7348,7 +7716,7 @@ fn process_ui_actions(
                 ui.replay_progress = frac.clamp(0.0, 1.0);
                 if let Some(rep) = aux.replay.as_deref_mut() {
                     rep.scrub(ui.replay_progress);
-                    sync_replay_ui_readout(rep, &mut ui);
+                    apply_replay_snapshot_to_ui(rep, &mut ui);
                     ui.replay_active = true;
                 }
             }
@@ -7365,7 +7733,7 @@ fn process_ui_actions(
                     rep.speed = ui.replay_speed.max(1.0);
                     rep.active = true;
                     ui.replay_heatmap = build_replay_heatmap(rep, 24);
-                    sync_replay_ui_readout(rep, &mut ui);
+                    apply_replay_snapshot_to_ui(rep, &mut ui);
                     ui.replay_active = true;
                 }
             }
@@ -7373,8 +7741,13 @@ fn process_ui_actions(
                 ui.replay_active = false;
                 ui.replay_playing = false;
                 if let Some(rep) = aux.replay.as_deref_mut() {
-                    rep.playing = false;
-                    rep.active = false;
+                    rep.restore_live();
+                }
+                if let BridgeBackend::InProcess { app_state, .. } = &bridge.backend {
+                    sync_office_core_to_ui(app_state, &bridge.dismissed_ci_ids, &mut ui);
+                } else if let BridgeBackend::AttachedHttp { snapshot, .. } = &bridge.backend {
+                    let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    apply_remote_snapshot_to_ui(&snap, &mut ui);
                 }
             }
             UiAction::OpenPlaceCard(place_id) => {
@@ -12460,5 +12833,115 @@ mod tests {
         assert_eq!(tel.dev_servers[0].port, Some(5173));
         assert!(!tel.dev_servers[1].alive);
         assert_eq!(tel.dev_servers[1].desk_index, None);
+    }
+
+    #[test]
+    fn bridge_live_demo_replay_weather_trophies_and_photostrips_sync_cleanly() {
+        // 1. Weather sync applies Open-Meteo code & temp to OfficeLifeState and UiState
+        let mut life = station_3d::life::OfficeLifeState::default();
+        let mut ui = UiState::default();
+        apply_weather_to_state(95, 25.4, &mut life, &mut ui);
+        assert!(life.storm);
+        assert_eq!(life.rain_intensity, 1.0);
+        assert_eq!(ui.weather_temp_c, 25);
+        assert!(!ui.weather_desc.is_empty());
+
+        // 2. Live Demo emitter drives ui.sessions, ui.feed, Postbox, TestsBoard, Incidents
+        let mut app = App::new();
+        let mut demo_ui = UiState::default();
+        demo_ui.demo_running = true;
+        let mut demo_sim = station_3d::DemoSimState::default();
+        demo_sim.start();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(demo_ui)
+            .insert_resource(demo_sim)
+            .insert_resource(station_3d::PostboxState::default())
+            .insert_resource(station_3d::IncidentState::default())
+            .insert_resource(station_3d::TestsBoardState::default())
+            .insert_resource(station_3d::RocketLaunchQueue::default())
+            .insert_resource(station_3d::CastEvents::default())
+            .add_systems(Update, step_demo_simulation_system);
+
+        for _ in 0..210 {
+            app.world_mut()
+                .resource_mut::<Time<()>>()
+                .advance_by(std::time::Duration::from_millis(250));
+            app.update();
+        }
+        assert_eq!(app.world().resource::<UiState>().sessions.len(), 6);
+        assert!(!app.world().resource::<UiState>().feed.is_empty());
+        assert!(app.world().resource::<station_3d::IncidentState>().is_active());
+        assert!(app.world().resource::<station_3d::PostboxState>().today_commits >= 1);
+
+        // 3. Replay world snapshot projects sessions & feed at scrubbed cursor
+        let mut rep = station_3d::replay::ReplayState::default();
+        rep.load_events(vec![
+            station_3d::replay::ReplayEvent {
+                ts: 10_000,
+                session_id: "r1".into(),
+                kind: "ev".into(),
+                summary: "Edited bridge.rs".into(),
+                agent: "claude".into(),
+                project: "agents-station".into(),
+                status: "work".into(),
+                tool: "edit".into(),
+                desk: Some(1),
+                event_type: "edit".into(),
+            },
+            station_3d::replay::ReplayEvent {
+                ts: 20_000,
+                session_id: "r1".into(),
+                kind: "ev".into(),
+                summary: "Turn finished".into(),
+                agent: "claude".into(),
+                project: "agents-station".into(),
+                status: "rest".into(),
+                tool: "stop".into(),
+                desk: Some(1),
+                event_type: "stop".into(),
+            },
+        ]);
+        rep.scrub(0.0);
+        let mut rep_ui = UiState::default();
+        apply_replay_snapshot_to_ui(&rep, &mut rep_ui);
+        assert_eq!(rep_ui.sessions.len(), 1);
+        assert_eq!(rep_ui.sessions[0].status, "work");
+        assert_eq!(rep_ui.feed.len(), 1);
+
+        rep.scrub(1.0);
+        apply_replay_snapshot_to_ui(&rep, &mut rep_ui);
+        assert_eq!(rep_ui.sessions[0].status, "rest");
+        assert_eq!(rep_ui.feed.len(), 2);
+
+        // 4. Trophies (totals.json) & Photostrips (shots/) sync via sync_life_world_data_system
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("totals.json"),
+            r#"{"since":1700000000000,"live":{"prompts":200},"earned":{"open":1700000000000,"p100":1}}"#,
+        )
+        .unwrap();
+        let shots = tmp.path().join("shots");
+        std::fs::create_dir_all(&shots).unwrap();
+        image::RgbaImage::from_pixel(64, 96, image::Rgba([90, 140, 220, 255]))
+            .save(shots.join("s1.png"))
+            .unwrap();
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets"),
+            "127.0.0.1".into(),
+            0,
+            false,
+            false,
+        );
+        let mut sync_app = App::new();
+        sync_app
+            .insert_resource(Time::<()>::default())
+            .insert_resource(bridge)
+            .insert_resource(station_3d::TrophiesShelfState::default())
+            .insert_resource(station_3d::PhotostripsState::default())
+            .add_systems(Update, sync_life_world_data_system);
+        sync_app.update();
+        assert_eq!(sync_app.world().resource::<station_3d::TrophiesShelfState>().entries.len(), 1);
+        assert_eq!(sync_app.world().resource::<station_3d::PhotostripsState>().loaded_paths.len(), 1);
     }
 }
