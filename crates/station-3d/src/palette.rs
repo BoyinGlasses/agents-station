@@ -22,6 +22,7 @@ pub struct WorldPalette {
     pub unit_plane: Handle<Mesh>,
     pub unit_cone: Handle<Mesh>,
     pub unit_torus: Handle<Mesh>,
+    pub thin_ring: Handle<Mesh>,
     materials: HashMap<MaterialKey, Handle<StandardMaterial>>,
     owned_materials: Vec<Handle<StandardMaterial>>,
     owned_images: Vec<Handle<Image>>,
@@ -85,6 +86,7 @@ impl WorldPalette {
             unit_plane: meshes.add(Plane3d::new(Vec3::Z, Vec2::splat(0.5))),
             unit_cone: meshes.add(Cone::new(0.5, 1.0)),
             unit_torus: meshes.add(Torus::new(0.32, 0.5)),
+            thin_ring: meshes.add(Torus::new(0.478, 0.522)),
             materials: HashMap::new(),
             owned_materials: Vec::new(),
             owned_images: Vec::new(),
@@ -469,6 +471,7 @@ impl WorldPalette {
             &self.unit_plane,
             &self.unit_cone,
             &self.unit_torus,
+            &self.thin_ring,
         ] {
             meshes.remove(h);
         }

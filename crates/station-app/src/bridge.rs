@@ -4964,6 +4964,7 @@ fn sync_live_state_to_ui(
 fn sync_live_sessions_to_3d(
     mut commands: Commands,
     ui: Res<UiState>,
+    mut rack_telemetry: Option<ResMut<station_3d::ServerRackTelemetry>>,
     pal: Option<ResMut<WorldPalette>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     screen_mats: Option<Res<station_3d::desks::ScreenMaterials>>,
@@ -4990,6 +4991,9 @@ fn sync_live_sessions_to_3d(
         Without<station_3d::chibi::StatusHalo>,
     >,
 ) {
+    if let Some(ref mut rack) = rack_telemetry {
+        rack.cpu_load = (ui.sys.cpu_pct / 100.0).clamp(0.0, 1.0);
+    }
     let (Some(mut pal), Some(mut mats), Some(scr_mats)) = (pal, materials, screen_mats) else {
         return;
     };
@@ -12193,5 +12197,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sync_live_sessions_to_3d_writes_clamped_cpu_load_into_server_rack_telemetry() {
+        let mut app = App::new();
+        let mut ui = UiState::default();
+        ui.sys.cpu_pct = 64.0;
+        app.insert_resource(ui);
+        app.insert_resource(station_3d::ServerRackTelemetry::default());
+        app.add_systems(Update, sync_live_sessions_to_3d);
+
+        app.update();
+        let load = app.world().resource::<station_3d::ServerRackTelemetry>().cpu_load;
+        assert!(
+            (load - 0.64).abs() < 1e-4,
+            "expected cpu_load 0.64 from ui.sys.cpu_pct=64.0, got {load}"
+        );
+
+        app.world_mut().resource_mut::<UiState>().sys.cpu_pct = 145.0;
+        app.update();
+        assert_eq!(
+            app.world().resource::<station_3d::ServerRackTelemetry>().cpu_load,
+            1.0,
+            "cpu_load must clamp to 1.0 above 100%"
+        );
+
+        app.world_mut().resource_mut::<UiState>().sys.cpu_pct = -5.0;
+        app.update();
+        assert_eq!(
+            app.world().resource::<station_3d::ServerRackTelemetry>().cpu_load,
+            0.0,
+            "cpu_load must clamp to 0.0 below 0%"
+        );
     }
 }

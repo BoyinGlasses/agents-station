@@ -1227,6 +1227,8 @@ pub fn animate_desks_system(
     mut backs_q: Query<(&mut ChairBackPivot, &mut Transform), Without<DeskLampBulb>>,
     mut vis_q: Query<&mut Visibility>,
     lamp_bulbs_q: Query<&DeskLampBulb>,
+    mut live_by_desk: Local<HashMap<usize, (bool, usize)>>,
+    mut nap_by_desk: Local<HashMap<usize, bool>>,
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
@@ -1272,15 +1274,15 @@ pub fn animate_desks_system(
         }
     }
 
-    // 3. Collect live desk occupancy, nap state, and git-dirty file count
+    // 3. Collect live desk occupancy, nap state, and git-dirty file count (reusing Local maps)
     let has_preview = !preview_workers.is_empty();
-    let mut live_by_desk: HashMap<usize, (bool, usize)> = HashMap::new();
+    live_by_desk.clear();
     for (lw, cw) in &live_workers {
         let napping = cw.anim == WorkerAnim::Sleep;
         live_by_desk.insert(lw.desk_index, (napping, lw.git_dirty));
     }
 
-    let mut nap_by_desk: HashMap<usize, bool> = HashMap::new();
+    nap_by_desk.clear();
     for (mut kit, mut bed, mut mess) in &mut desks_q {
         let idx = kit.desk_index;
         let (occupied, napping, dirty) = if let Some(&(nap, dirty)) = live_by_desk.get(&idx) {

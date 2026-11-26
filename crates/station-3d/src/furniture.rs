@@ -18,7 +18,10 @@ use station_canvas2d::office_surfaces::{
     draw_cozy_sun_poster, draw_globe_map, draw_neon_ship_it,
 };
 use station_canvas2d::{FontEngine, hex};
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+
+pub const GLOBE_RADIUS: f32 = 0.44;
+pub const GLOBE_MERIDIAN_INNER_RADIUS: f32 = 0.478;
 
 const CONFETTI_COLORS: [&str; 6] = [
     "#ED7A13", "#FFE787", "#6A8042", "#3F7CC4", "#E8A0B4", "#8C4FA8",
@@ -55,6 +58,9 @@ pub struct FloorLampBulb {
 pub struct SpinningGlobe {
     pub speed: f32,
 }
+
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GlobeMeridian;
 
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WallClock {
@@ -919,11 +925,13 @@ pub fn spawn_furniture(
                 ));
                 tilt.spawn((
                     WorldEntity,
-                    Mesh3d(palette.unit_torus.clone()),
+                    GlobeMeridian,
+                    Mesh3d(palette.thin_ring.clone()),
                     MeshMaterial3d(brass),
+                    // Bevy's Torus lies in XZ (normal +Y); Rx(FRAC_PI_2) tilts it into a vertical
+                    // pole-to-pole meridian plane and Ry(FRAC_PI_4) faces the isometric camera.
                     Transform::IDENTITY
-                        .with_rotation(Quat::from_euler(EulerRot::YXZ, FRAC_PI_2, 0.0, -0.45))
-                        .with_scale(Vec3::new(1.0, 0.12, 1.0)),
+                        .with_rotation(Quat::from_rotation_y(FRAC_PI_4) * Quat::from_rotation_x(FRAC_PI_2)),
                 ));
             });
     }
@@ -1175,7 +1183,7 @@ pub fn animate_furniture_system(
     if let Some(ref mut pal) = palette {
         if !puff_origins.is_empty() {
             let puff_m = pal.mat(&mut materials, "#F1F1F1", 0.95, 0.0);
-            let mut prng = FurnRng(((t * 1000.0) as u64).wrapping_add(19) | 1);
+            let mut prng = FurnRng((((t * 1000.0) as u64).wrapping_add(19) % 2_147_483_646) + 1);
             for origin in puff_origins {
                 let jitter = Vec3::new(prng.range(-0.08, 0.08), 0.0, prng.range(-0.08, 0.08));
                 let vel = Vec3::new(prng.range(-0.3, 0.3), -0.4, prng.range(-0.3, 0.3));
@@ -1199,7 +1207,7 @@ pub fn animate_furniture_system(
                 .iter()
                 .map(|c| pal.matte(&mut materials, c))
                 .collect();
-            let mut crng = FurnRng(((t * 1000.0) as u64).wrapping_add(97) | 1);
+            let mut crng = FurnRng((((t * 1000.0) as u64).wrapping_add(97) % 2_147_483_646) + 1);
             for origin in confetti_origins {
                 for i in 0..CONFETTI_COUNT {
                     let vel = Vec3::new(
@@ -1492,6 +1500,57 @@ mod tests {
         assert_eq!(
             remaining, 0,
             "all smoke puffs and confetti must despawn after lifetime expires, found {remaining}"
+        );
+    }
+
+    #[test]
+    fn globe_meridian_is_vertical_pole_to_pole_and_clears_globe_sphere() {
+        use crate::layout::OfficeLayout;
+
+        assert!(
+            GLOBE_MERIDIAN_INNER_RADIUS > GLOBE_RADIUS,
+            "meridian inner radius ({GLOBE_MERIDIAN_INNER_RADIUS}) must clear globe radius ({GLOBE_RADIUS})"
+        );
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+
+        let spec = LayoutSpec::for_layout(OfficeLayout::Cozy);
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = WorldPalette::new(&mut meshes);
+                    let mut cmds = world.commands();
+                    spawn_furniture(&mut cmds, &mut pal, &mut mats, &mut imgs, &mut fonts, &spec);
+                    cmds.insert_resource(pal);
+                });
+            });
+        });
+        world.flush();
+
+        let (meridian_tf, meridian_mesh) = world
+            .query_filtered::<(&Transform, &Mesh3d), With<GlobeMeridian>>()
+            .single(&world)
+            .expect("GlobeMeridian entity must be spawned");
+        let pal = world.resource::<WorldPalette>();
+        assert_eq!(
+            meridian_mesh.0, pal.thin_ring,
+            "GlobeMeridian must use WorldPalette::thin_ring whose inner radius clears the 0.44m sphere"
+        );
+        // Unrotated Bevy Torus normal is +Y; a vertical pole-to-pole meridian has rotated normal
+        // perpendicular to the globe's polar +Y axis (normal.y == 0).
+        let ring_normal = meridian_tf.rotation * Vec3::Y;
+        assert!(
+            ring_normal.y.abs() < 1e-4,
+            "GlobeMeridian must be upright vertical (ring_normal.y == 0), got {ring_normal:?}"
+        );
+        assert!(
+            (meridian_tf.scale - Vec3::ONE).length() < 1e-4,
+            "GlobeMeridian must keep uniform 1.0 scale so inner radius stays 0.478m > 0.44m"
         );
     }
 }
