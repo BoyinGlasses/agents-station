@@ -56,6 +56,9 @@ pub struct Cli {
     #[arg(long)]
     pub lite: bool,
 
+    #[arg(long)]
+    pub panel: bool,
+
     #[arg(long, hide = true)]
     pub gui_worker: bool,
 
@@ -177,5 +180,15 @@ mod tests {
         let default_port = Cli::try_parse_from(["agents-station", "status-line"]).unwrap();
         assert!(matches!(default_port.command, Some(Command::StatusLine)));
         assert_eq!(default_port.port, 4310);
+    }
+
+    #[test]
+    fn cli_parses_panel_flag_for_compact_420x640_window() {
+        let default = Cli::try_parse_from(["agents-station"]).unwrap();
+        assert!(!default.panel);
+
+        let panel = Cli::try_parse_from(["agents-station", "--panel", "--lang", "vi"]).unwrap();
+        assert!(panel.panel);
+        assert_eq!(panel.lang.as_deref(), Some("vi"));
     }
 }

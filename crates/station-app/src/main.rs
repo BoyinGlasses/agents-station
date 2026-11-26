@@ -80,20 +80,34 @@ fn resolve_effective_gpu_pref(cli: &cli::Cli) -> cli::GpuPreference {
     }
 }
 
+pub fn initial_window_size(cli: &cli::Cli) -> (f32, f32) {
+    if cli.panel || cli.capture_scene.as_deref() == Some("panel") {
+        (420.0, 640.0)
+    } else {
+        (1280.0, 720.0)
+    }
+}
+
+fn is_lite_or_panel(cli: &cli::Cli) -> bool {
+    cli.lite
+        || cli.panel
+        || matches!(cli.capture_scene.as_deref(), Some("lite-2d" | "panel"))
+}
+
 fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
-    let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
-    let default_backend = if is_lite_2d {
+    let default_backend = if is_lite_or_panel(cli) {
         Backends::DX12
     } else {
         Backends::VULKAN
     };
     let effective_gpu = resolve_effective_gpu_pref(cli);
-    // Keep PbrPlugin active even in --lite so switching 2D Lite -> 3D works seamlessly at runtime.
+    let (win_w, win_h) = initial_window_size(cli);
+    // Keep PbrPlugin active even in --lite/--panel so switching 2D -> 3D works seamlessly at runtime.
     DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Agents Station".to_owned(),
-                resolution: (1280.0_f32, 720.0_f32).into(),
+                resolution: (win_w, win_h).into(),
                 ..default()
             }),
             close_when_requested: false,
@@ -114,7 +128,7 @@ fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
 fn build_gui_app(cli: &cli::Cli) -> App {
     let mut app = App::new();
     let capture_mode = cli.capture_scene.is_some();
-    let is_lite_2d = cli.lite || cli.capture_scene.as_deref() == Some("lite-2d");
+    let is_lite_2d = is_lite_or_panel(cli);
     app.add_plugins(build_default_plugins(cli))
         .add_plugins(MeshPickingPlugin)
         .insert_resource(DirectionalLightShadowMap { size: 1024 })
@@ -160,6 +174,23 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             );
             ui_state.view_mode = station_ui::ViewMode::Lite2D;
             ui_state.sys.private_mb = 78.0;
+            let initial_lang = cli.lang.clone().unwrap_or_else(|| "en".to_owned());
+            app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
+                .add_systems(Startup, spawn_lite_2d_camera)
+                .add_plugins(station_ui::StationUiPlugin {
+                    assets_dir,
+                    initial_state: ui_state,
+                    initial_lang,
+                });
+        }
+        Some("panel") => {
+            let mut ui_state = station_ui::UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            );
+            ui_state.view_mode = station_ui::ViewMode::PanelCompact;
+            ui_state.sys.private_mb = 74.0;
             let initial_lang = cli.lang.clone().unwrap_or_else(|| "en".to_owned());
             app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
                 .add_systems(Startup, spawn_lite_2d_camera)
@@ -277,7 +308,11 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             let initial_sound = ui_state.sound_on;
             let initial_city = initial_city_code;
             if is_lite_2d {
-                ui_state.view_mode = station_ui::ViewMode::Lite2D;
+                ui_state.view_mode = if cli.panel {
+                    station_ui::ViewMode::PanelCompact
+                } else {
+                    station_ui::ViewMode::Lite2D
+                };
                 app.add_plugins(station_3d::OfficeWorldRuntimePlugin {
                     assets_dir: assets_dir.clone(),
                 })
@@ -477,7 +512,7 @@ fn main() -> anyhow::Result<()> {
     let is_gui = matches!(cli.command, None | Some(cli::Command::Gui))
         && cli.capture_scene.is_none();
 
-    if is_gui && !cli.gui_worker {
+    if is_gui && !cli.gui_worker && !cli.panel {
         return run_tray_parent(&cli);
     }
 
@@ -536,5 +571,16 @@ mod tests {
             plugins.enabled::<bevy::pbr::PbrPlugin>(),
             "PbrPlugin must remain enabled in --lite so switching 2D Lite -> 3D works seamlessly"
         );
+    }
+
+    #[test]
+    fn panel_flag_selects_420x640_compact_window_and_lite_backend() {
+        let panel_cli = cli::Cli::parse_from(["agents-station", "--panel"]);
+        assert_eq!(initial_window_size(&panel_cli), (420.0, 640.0));
+        assert!(is_lite_or_panel(&panel_cli));
+
+        let full_cli = cli::Cli::parse_from(["agents-station"]);
+        assert_eq!(initial_window_size(&full_cli), (1280.0, 720.0));
+        assert!(!is_lite_or_panel(&full_cli));
     }
 }
