@@ -229,6 +229,16 @@ fn draw_stacked_bar(
     }
 }
 
+/// Computes `(col_w, gap)` for daily burn bar charts accounting for `8.0`px horizontal padding
+/// so 30-day charts fit every bar inside narrow drawers without clipping the rightmost bars.
+pub fn compute_daily_chart_layout(avail_w: f32, count: usize) -> (f32, f32) {
+    let n = count.max(1);
+    let inner_w = (avail_w - 8.0).max(0.0);
+    let gap = if n > 14 { 2.0 } else { 4.0 };
+    let col_w = ((inner_w - gap * (n.saturating_sub(1) as f32)) / n as f32).clamp(4.0, 42.0);
+    (col_w, gap)
+}
+
 fn draw_daily_chart(ui: &mut egui::Ui, per_day: &[BurnDayBucketUi], i18n: &I18nStore) {
     let bars = scale_burn_buckets(per_day, 84.0);
     if bars.is_empty() {
@@ -236,8 +246,7 @@ fn draw_daily_chart(ui: &mut egui::Ui, per_day: &[BurnDayBucketUi], i18n: &I18nS
     }
     let count = bars.len().max(1);
     let avail = ui.available_width();
-    let gap = 4.0;
-    let col_w = ((avail - gap * (count.saturating_sub(1) as f32)) / count as f32).clamp(8.0, 42.0);
+    let (col_w, gap) = compute_daily_chart_layout(avail, count);
     let chart_h = 98.0;
     let (area, _) = ui.allocate_exact_size(vec2(avail, chart_h), Sense::hover());
     ui.painter().rect_filled(area, 6.0, BG);
@@ -245,7 +254,7 @@ fn draw_daily_chart(ui: &mut egui::Ui, per_day: &[BurnDayBucketUi], i18n: &I18nS
     let max_usd = bars.iter().map(|b| b.total_usd).fold(0.0_f64, f64::max);
     for (idx, bar) in bars.iter().enumerate() {
         let x0 = area.left() + 4.0 + idx as f32 * (col_w + gap);
-        if x0 + col_w > area.right() {
+        if x0 + col_w > area.right() - 3.5 {
             break;
         }
         let bottom = area.bottom() - 16.0;
@@ -438,7 +447,9 @@ pub fn draw_burn_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nSto
                                 "plugin" => AMBER,
                                 _ => ACCENT,
                             };
-                            let display_name = if matches!(
+                            let display_name = if streamer {
+                                redacted.clone()
+                            } else if matches!(
                                 r.name.as_str(),
                                 "custom" | "third-party" | "custom_skill"
                             ) {
@@ -645,5 +656,21 @@ mod tests {
         assert_eq!(scaled[1].segments.len(), 2);
         let seg_sum: f32 = scaled[1].segments.iter().map(|(_, h)| *h).sum();
         assert!((seg_sum - scaled[1].height_px).abs() < 0.5);
+    }
+
+    #[test]
+    fn burn_30_day_chart_fits_all_30_bars_inside_366px_plot_width() {
+        let avail_w = 366.0_f32;
+        let (col_w, gap) = compute_daily_chart_layout(avail_w, 30);
+        let mut rendered = 0usize;
+        for idx in 0..30 {
+            let x0 = 4.0 + idx as f32 * (col_w + gap);
+            if x0 + col_w <= avail_w - 3.5 {
+                rendered += 1;
+            }
+        }
+        assert_eq!(rendered, 30, "all 30 daily bars must fit inside 366px plot without clipping");
+        assert!(col_w >= 4.0);
+        assert_eq!(gap, 2.0);
     }
 }

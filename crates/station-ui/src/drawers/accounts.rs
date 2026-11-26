@@ -134,6 +134,41 @@ pub fn draw_accounts_panel(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nSt
         ui.label(RichText::new(msg).size(10.5).color(AMBER));
         ui.add_space(4.0);
     }
+    if provider == AiProviderTab::Antigravity
+        && let Some(pending_slug) = state.ai_accounts.ag_pending.clone().filter(|s| !s.is_empty())
+    {
+        let pending_name = if streamer {
+            redacted.clone()
+        } else {
+            entries
+                .iter()
+                .find(|e| e.slug == pending_slug)
+                .map(|e| display_account_name(e, provider, i18n))
+                .unwrap_or(pending_slug)
+        };
+        egui::Frame::NONE
+            .fill(CARD)
+            .corner_radius(CornerRadius::same(8))
+            .inner_margin(Margin::symmetric(9, 7))
+            .stroke(Stroke::new(1.0_f32, AMBER))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let msg = i18n.tr_vars(
+                    "ai.ag.pending",
+                    &[("name", &pending_name), ("app", "Antigravity")],
+                );
+                ui.label(RichText::new(msg).size(10.5).color(AMBER));
+                if ui.small_button(i18n.tr("ai.ag.cancelPending")).clicked() {
+                    state.ai_accounts.ag_pending = None;
+                    state.push_action(UiAction::AiAccountMutate {
+                        provider: AiProviderTab::Antigravity,
+                        action: "cancel".to_owned(),
+                        body: json!({}),
+                    });
+                }
+            });
+        ui.add_space(4.0);
+    }
 
     if entries.is_empty() {
         ui.label(RichText::new(i18n.tr("ui.topBar.planEmpty")).size(11.0).color(MUTED));
@@ -218,8 +253,12 @@ pub fn draw_accounts_panel(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nSt
                                 }
 
                                 let raw_name = display_account_name(entry, provider, i18n);
-                                let disp_name = if streamer && !entry.slug.is_empty() {
-                                    redacted.clone()
+                                let disp_name = if streamer {
+                                    if provider == AiProviderTab::Claude && entry.slug.is_empty() {
+                                        i18n.tr("mac.plan.mainAccount")
+                                    } else {
+                                        redacted.clone()
+                                    }
                                 } else {
                                     raw_name.clone()
                                 };
@@ -464,6 +503,16 @@ pub fn draw_accounts_panel(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nSt
                     body: json!({ "on": auto }),
                 });
             }
+            let mut away = state.ai_accounts.ag_away;
+            let away_lbl = i18n.tr_vars("ai.ag.awayOk", &[("min", "5"), ("app", "Antigravity")]);
+            if ui.checkbox(&mut away, away_lbl).changed() {
+                state.ai_accounts.ag_away = away;
+                state.push_action(UiAction::AiAccountMutate {
+                    provider,
+                    action: "auto".to_owned(),
+                    body: json!({ "away": away }),
+                });
+            }
         }
     }
 
@@ -498,6 +547,7 @@ pub fn draw_accounts_panel(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nSt
 pub fn draw_accounts_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) {
     if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         state.active_drawer = ActiveDrawer::None;
+        state.ai_accounts.loaded = false;
         return;
     }
     let mut open = true;
@@ -523,12 +573,18 @@ pub fn draw_accounts_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18
         });
     if !open {
         state.active_drawer = ActiveDrawer::None;
+        state.ai_accounts.loaded = false;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_i18n(lang: &str) -> I18nStore {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        I18nStore::load_from_assets(&dir, lang)
+    }
 
     #[test]
     fn ai_accounts_tab_state_switches_between_claude_codex_and_antigravity() {
@@ -550,5 +606,66 @@ mod tests {
         set_active_provider_tab(&mut st, AiProviderTab::Claude);
         assert_eq!(st.tab, AiProviderTab::Claude);
         assert_eq!(st.tab.api_prefix(), "/api/accounts");
+    }
+
+    #[test]
+    fn accounts_drawer_redacts_main_account_in_streamer_mode_and_renders_ag_pending_and_away() {
+        let tr = test_i18n("en");
+        let ctx = egui::Context::default();
+        let mut defs = egui::FontDefinitions::default();
+        let fb = defs
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .cloned()
+            .unwrap_or_default();
+        defs.families
+            .insert(egui::FontFamily::Name(crate::theme::FONT_BOLD.into()), fb);
+        ctx.set_fonts(defs);
+        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let mut st = UiState::new_live(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        st.active_drawer = ActiveDrawer::Accounts;
+        st.streamer_mode = true;
+        st.ai_accounts.loaded = true;
+        st.ai_accounts.claude = vec![AiAccountEntry {
+            slug: String::new(),
+            label: "secret-boss@corp.io".to_owned(),
+            active: true,
+            ..Default::default()
+        }];
+        st.ai_accounts.ag = vec![AiAccountEntry {
+            slug: "ag-1".to_owned(),
+            label: "AG Seat".to_owned(),
+            active: false,
+            ..Default::default()
+        }];
+        st.ai_accounts.ag_pending = Some("ag-1".to_owned());
+        st.ai_accounts.ag_away = true;
+
+        // Render Claude tab in streamer mode: must not leak custom main-account label.
+        let out = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        let leaked = out.shapes.iter().any(|cs| {
+            format!("{:?}", cs.shape).contains("secret-boss@corp.io")
+        });
+        assert!(!leaked, "main account custom label must be redacted in streamer mode");
+
+        // Render Antigravity tab with pending switch + away toggle.
+        st.ai_accounts.tab = AiProviderTab::Antigravity;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(st.ai_accounts.loaded);
+
+        // Closing Accounts drawer resets loaded so reopening fetches fresh status.
+        st.active_drawer = ActiveDrawer::None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            crate::drawers::draw_active_drawer(ctx, &mut st, &tr);
+        });
+        assert!(!st.ai_accounts.loaded);
     }
 }

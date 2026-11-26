@@ -215,7 +215,7 @@ pub fn draw_mac_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStor
                         );
                         draw_gauge(
                             ui,
-                            "CPU",
+                            &i18n.tr("station.cpu"),
                             &format!("{:.0}%", sys.cpu_pct),
                             &cpu_sub,
                             cpu_ratio,
@@ -503,7 +503,9 @@ pub fn draw_mac_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStor
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
                                     let repo_disp = if streamer { redacted.as_str() } else { it.repo.as_str() };
-                                    let br = if it.branch.is_empty() {
+                                    let br = if streamer {
+                                        redacted.clone()
+                                    } else if it.branch.is_empty() {
                                         i18n.tr_vars("mac.stranded.detached", &[("sha", "HEAD")])
                                     } else {
                                         it.branch.clone()
