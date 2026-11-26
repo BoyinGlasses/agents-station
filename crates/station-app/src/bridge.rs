@@ -3,24 +3,31 @@ use crate::tray::{TrayState, notify_parent_hold_alert, notify_parent_in_tray};
 use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::render::camera::{RenderTarget, ScalingMode, Viewport};
+use bevy::render::camera::{RenderTarget, Viewport};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::PrimaryWindow;
 use bevy_egui::egui;
 use chrono::{Local, TimeZone};
 use serde_json::{Value, json};
-use station_3d::{BackdropAssets, BackdropEntity, SfxKind, WorldEntity, WorldPalette};
+use station_3d::{BackdropAssets, BackdropEntity, LayoutSpec, SfxKind, WorldEntity, WorldPalette};
 use station_canvas2d::BrandRegistry;
 use station_core::http::{AppState, HarnessApi, start_http_server};
 use station_core::state::sessions::{PermDecision, now_ms};
 use station_launcher::focus_launch::{Win32WindowLauncher, WindowLauncher};
 use station_launcher::{HarnessService, HarnessStatus, LaunchOutcome};
-use station_ui::state::{
-    BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, SessionCard,
-    SysSnapshot, UiAction, normalize_feed_kind, normalize_status,
+use station_ui::icons::IconKind;
+use station_ui::labels3d::{
+    LabelPriority, ProjectedLabel, ProjectedLabelKind, accent_for_status, estimate_label_size,
+    project_world_to_stage,
 };
+use station_ui::state::{
+    BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, PlaceCardAction,
+    PlaceCardInfo, PlaceCardRow, ReplayRange, SessionCard, SysSnapshot, UiAction,
+    normalize_feed_kind, normalize_status,
+};
+use station_ui::theme::{ACCENT, AMBER, BLUE, GREEN, RED};
 use station_ui::{ActiveDrawer, I18nStore, StageViewportRect, UiState, ViewMode};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -1454,6 +1461,500 @@ pub fn compute_camera_viewport(
     })
 }
 
+fn zone_specs_for_layout(spec: &LayoutSpec) -> Vec<(&'static str, IconKind, &'static str, Vec3)> {
+    if spec.layout.is_pro() {
+        vec![
+            ("director", IconKind::Home, "places.chip.director", Vec3::new(-5.4, 2.7, -6.2)),
+            ("meeting", IconKind::Users, "places.chip.meeting", Vec3::new(0.2, 2.7, -5.6)),
+            ("library", IconKind::Book, "places.chip.libraryPro", Vec3::new(5.8, 2.85, -6.6)),
+            ("coffee", IconKind::Coffee, "places.chip.dining", Vec3::new(11.3, 1.4, -3.0)),
+            ("lounge", IconKind::Sparkle, "places.chip.lounge", Vec3::new(11.2, 1.3, 6.2)),
+            (
+                "deploy",
+                IconKind::Rocket,
+                "places.chip.deploy",
+                Vec3::new(spec.rocket[0], 0.9, spec.rocket[1] + 0.7),
+            ),
+            ("server", IconKind::Server, "places.chip.serverPro", Vec3::new(-5.8, 2.75, -1.0)),
+            (
+                "board",
+                IconKind::List,
+                "places.chip.board",
+                Vec3::new(-3.4, 3.15, spec.board[2]),
+            ),
+        ]
+    } else {
+        vec![
+            ("library", IconKind::Book, "places.chip.library", Vec3::new(-5.2, 2.8, -5.3)),
+            ("server", IconKind::Server, "places.chip.server", Vec3::new(5.5, 2.58, -5.08)),
+            ("deploy", IconKind::Rocket, "places.chip.deploy", Vec3::new(7.25, 0.9, -2.9)),
+            ("board", IconKind::List, "places.chip.board", Vec3::new(-7.86, 3.4, -2.6)),
+            ("coffee", IconKind::Coffee, "places.chip.coffee", Vec3::new(-5.55, 1.02, 5.74)),
+            ("meeting", IconKind::Users, "places.chip.meeting", Vec3::new(5.2, 0.9, 2.4)),
+        ]
+    }
+}
+
+fn zone_live_subtitle(place_id: &str, ui: &UiState, i18n: &I18nStore) -> Option<String> {
+    match place_id {
+        "coffee" | "lounge" => {
+            let n = ui.resting_count();
+            (n > 0).then(|| i18n.tr_count("places.live.resting", n))
+        }
+        "meeting" => {
+            let n: usize = ui.sessions.iter().map(|s| s.subagents.len()).sum();
+            (n > 0).then(|| i18n.tr_count("places.live.subagents", n))
+        }
+        "server" => {
+            if ui.sys.mem_total_gb > 0.0 {
+                let pct = ((ui.sys.mem_used_gb / ui.sys.mem_total_gb) * 100.0).round() as u32;
+                Some(format!("RAM {pct}%"))
+            } else {
+                None
+            }
+        }
+        "library" => {
+            let n = ui
+                .sessions
+                .iter()
+                .filter(|s| s.status == "work" && matches!(s.tool_kind.as_deref(), Some("read" | "grep" | "glob")))
+                .count();
+            (n > 0).then(|| i18n.tr_count("places.live.reading", n))
+        }
+        "board" => {
+            let n = ui.sessions.iter().filter(|s| s.status != "rest").count();
+            (n > 0).then(|| i18n.tr_count("places.live.tasks", n))
+        }
+        _ => None,
+    }
+}
+
+fn tool_icon_kind(tool_kind: Option<&str>) -> IconKind {
+    match tool_kind.unwrap_or("") {
+        "edit" | "write" | "patch" => IconKind::Pencil,
+        "read" | "grep" | "glob" => IconKind::File,
+        "web" | "fetch" | "browse" => IconKind::Globe,
+        "agent" | "subagent" => IconKind::Users,
+        _ => IconKind::Terminal,
+    }
+}
+
+fn build_place_card_info(place_id: &str, ui: &UiState, i18n: &I18nStore) -> PlaceCardInfo {
+    match place_id {
+        "meeting" => {
+            let mut rows = Vec::new();
+            for s in &ui.sessions {
+                for sub in &s.subagents {
+                    rows.push(PlaceCardRow {
+                        title: sub.label.clone(),
+                        subtitle: sub.doing.clone(),
+                        session_id: Some(s.id.clone()),
+                        accent_tone: Some("blue".to_owned()),
+                    });
+                }
+            }
+            PlaceCardInfo {
+                place_id: place_id.to_owned(),
+                icon: IconKind::Users,
+                title: i18n.tr("places.meeting.title"),
+                subtitle: i18n.tr("places.meeting.sub"),
+                rows,
+                empty_text: i18n.tr("places.meeting.empty"),
+                footer_note: None,
+                actions: vec![PlaceCardAction {
+                    id: "focus_meeting".to_owned(),
+                    label: i18n.tr("ui.cameraToolbar.meeting"),
+                    primary: true,
+                }],
+            }
+        }
+        "coffee" => {
+            let rows = ui
+                .sessions
+                .iter()
+                .filter(|s| s.status == "rest")
+                .map(|s| PlaceCardRow {
+                    title: s.project.clone(),
+                    subtitle: if s.last_prompt.is_empty() {
+                        i18n.tr("places.coffee.noPrompt")
+                    } else {
+                        s.last_prompt.clone()
+                    },
+                    session_id: Some(s.id.clone()),
+                    accent_tone: Some("amber".to_owned()),
+                })
+                .collect();
+            PlaceCardInfo {
+                place_id: place_id.to_owned(),
+                icon: IconKind::Coffee,
+                title: i18n.tr("places.coffee.title"),
+                subtitle: i18n.tr("places.coffee.sub"),
+                rows,
+                empty_text: i18n.tr("places.coffee.empty"),
+                footer_note: Some(i18n.tr("places.coffee.hint")),
+                actions: vec![PlaceCardAction {
+                    id: "brew".to_owned(),
+                    label: i18n.tr("places.coffee.brew"),
+                    primary: true,
+                }],
+            }
+        }
+        "lounge" => {
+            let rows = ui
+                .sessions
+                .iter()
+                .filter(|s| s.status == "rest")
+                .map(|s| PlaceCardRow {
+                    title: s.project.clone(),
+                    subtitle: s.model.clone(),
+                    session_id: Some(s.id.clone()),
+                    accent_tone: Some("green".to_owned()),
+                })
+                .collect();
+            PlaceCardInfo {
+                place_id: place_id.to_owned(),
+                icon: IconKind::Sparkle,
+                title: i18n.tr("places.lounge.title"),
+                subtitle: i18n.tr("places.lounge.sub"),
+                rows,
+                empty_text: i18n.tr("places.lounge.empty"),
+                footer_note: None,
+                actions: vec![
+                    PlaceCardAction {
+                        id: "cat".to_owned(),
+                        label: i18n.tr("places.lounge.cat"),
+                        primary: false,
+                    },
+                    PlaceCardAction {
+                        id: "rocket".to_owned(),
+                        label: i18n.tr("places.lounge.rocket"),
+                        primary: true,
+                    },
+                ],
+            }
+        }
+        "deploy" => PlaceCardInfo {
+            place_id: place_id.to_owned(),
+            icon: IconKind::Rocket,
+            title: i18n.tr("places.deploy.title"),
+            subtitle: i18n.tr("places.deploy.sub"),
+            rows: ui
+                .sessions
+                .iter()
+                .map(|s| PlaceCardRow {
+                    title: s.project.clone(),
+                    subtitle: s.tool.clone().unwrap_or_else(|| s.model.clone()),
+                    session_id: Some(s.id.clone()),
+                    accent_tone: Some(if s.status == "work" { "green" } else { "amber" }.to_owned()),
+                })
+                .collect(),
+            empty_text: i18n.tr("places.deploy.empty"),
+            footer_note: None,
+            actions: vec![PlaceCardAction {
+                id: "test_launch".to_owned(),
+                label: i18n.tr("places.deploy.test"),
+                primary: true,
+            }],
+        },
+        "library" => PlaceCardInfo {
+            place_id: place_id.to_owned(),
+            icon: IconKind::Book,
+            title: i18n.tr("places.library.title"),
+            subtitle: i18n.tr("places.library.sub"),
+            rows: ui
+                .sessions
+                .iter()
+                .filter(|s| matches!(s.tool_kind.as_deref(), Some("read" | "grep" | "glob")))
+                .map(|s| PlaceCardRow {
+                    title: s.project.clone(),
+                    subtitle: s.tool.clone().unwrap_or_default(),
+                    session_id: Some(s.id.clone()),
+                    accent_tone: Some("blue".to_owned()),
+                })
+                .collect(),
+            empty_text: i18n.tr("places.library.empty"),
+            footer_note: Some(i18n.tr_count("places.library.today", ui.kpi_reads as usize)),
+            actions: Vec::new(),
+        },
+        "director" => PlaceCardInfo {
+            place_id: place_id.to_owned(),
+            icon: IconKind::Home,
+            title: i18n.tr("places.director.title"),
+            subtitle: i18n.tr("places.director.sub"),
+            rows: ui
+                .sessions
+                .iter()
+                .filter(|s| !s.last_prompt.is_empty())
+                .map(|s| PlaceCardRow {
+                    title: s.project.clone(),
+                    subtitle: s.last_prompt.clone(),
+                    session_id: Some(s.id.clone()),
+                    accent_tone: Some("green".to_owned()),
+                })
+                .collect(),
+            empty_text: i18n.tr("places.director.empty"),
+            footer_note: None,
+            actions: Vec::new(),
+        },
+        _ => PlaceCardInfo {
+            place_id: place_id.to_owned(),
+            icon: IconKind::Monitor,
+            title: i18n.tr("places.desks.title"),
+            subtitle: i18n.tr("places.desks.sub"),
+            rows: ui
+                .sessions
+                .iter()
+                .map(|s| PlaceCardRow {
+                    title: i18n.tr_vars(
+                        "places.desks.row",
+                        &[("n", &(s.desk + 1).to_string()), ("name", &s.project)],
+                    ),
+                    subtitle: s.tool.clone().unwrap_or_else(|| s.model.clone()),
+                    session_id: Some(s.id.clone()),
+                    accent_tone: Some(
+                        match s.status.as_str() {
+                            "work" => "green",
+                            "wait" => "amber",
+                            _ => "blue",
+                        }
+                        .to_owned(),
+                    ),
+                })
+                .collect(),
+            empty_text: i18n.tr("places.desks.empty"),
+            footer_note: Some(i18n.tr_count("places.desks.edits", ui.kpi_edits as usize)),
+            actions: vec![PlaceCardAction {
+                id: "focus_desks".to_owned(),
+                label: i18n.tr("ui.cameraToolbar.desks"),
+                primary: true,
+            }],
+        },
+    }
+}
+
+/// Projects 3D worker tags, speech bubbles, permission alerts, subagents, and zone chips through
+/// `Camera::world_to_viewport` into `UiState::projected_labels`, culling behind-camera points.
+#[allow(clippy::too_many_arguments)]
+pub fn project_stage_labels_to_ui(
+    stage_viewport: Res<StageViewportRect>,
+    i18n: Res<I18nStore>,
+    mut ui: ResMut<UiState>,
+    rig: Option<Res<station_3d::camera::CameraRig>>,
+    cams: Query<(&Camera, &GlobalTransform), With<station_3d::camera::MainOfficeCamera>>,
+    live_workers: Query<(&station_3d::people::LiveSessionWorker, &GlobalTransform)>,
+    props_q: Query<(&station_3d::interact::InteractiveProp, &GlobalTransform)>,
+) {
+    if let Some(rig) = rig.as_deref() {
+        ui.camera_zoom_pct = rig.zoom_pct();
+        ui.first_person = rig.first_person;
+        ui.camera_preset = rig.active_preset;
+
+        if rig.first_person {
+            let mut nearest: Option<(f32, String)> = None;
+            for (prop, gtf) in &props_q {
+                let d = rig.fp_pos.distance(gtf.translation());
+                if d < 3.2 && nearest.as_ref().is_none_or(|(best, _)| d < *best) {
+                    let label = if prop.id == "cat" {
+                        i18n.tr("fp.petCat")
+                    } else {
+                        i18n.tr(&format!("places.chip.{}", prop.place))
+                    };
+                    nearest = Some((d, label));
+                }
+            }
+            for (w, gtf) in &live_workers {
+                let d = rig.fp_pos.distance(gtf.translation());
+                if d < 3.0 && nearest.as_ref().is_none_or(|(best, _)| d < *best) {
+                    let key = if w.status == "rest" { "fp.wake" } else { "fp.watch" };
+                    nearest = Some((d, i18n.tr_vars(key, &[("name", &w.name)])));
+                }
+            }
+            ui.fp_near_label = nearest.map(|(_, label)| label);
+        } else {
+            ui.fp_near_label = None;
+            ui.fp_billiards = None;
+        }
+    }
+
+    let Some(stage_rect) = stage_viewport.0 else {
+        ui.projected_labels.clear();
+        return;
+    };
+    let Ok((cam, cam_tf)) = cams.single() else {
+        ui.projected_labels.clear();
+        return;
+    };
+
+    let spec = LayoutSpec::for_layout(ui.layout);
+    let mut live_positions: HashMap<&str, Vec3> = HashMap::new();
+    for (w, gtf) in &live_workers {
+        live_positions.insert(w.session_id.as_str(), gtf.translation());
+    }
+
+    let mut labels = Vec::with_capacity(ui.sessions.len() * 2 + 12);
+
+    // 1. Workers, speech bubbles, permission badges, and meeting-room subagents
+    for s in &ui.sessions {
+        let base_pos = live_positions.get(s.id.as_str()).copied().or_else(|| {
+            spec.desks.get(s.desk).map(|desk| {
+                let rot = Quat::from_rotation_y(desk.ry);
+                Vec3::new(desk.x, 0.0, desk.z) + rot * Vec3::new(0.0, 0.0, -0.62)
+            })
+        });
+        let Some(anchor) = base_pos else {
+            continue;
+        };
+
+        let head_world = anchor + Vec3::Y * 1.95;
+        if let Some((screen_pos, depth)) = project_world_to_stage(head_world, cam, cam_tf, stage_rect)
+        {
+            let tag_id = format!("worker:{}", s.id);
+            let is_hot = ui.hovered_label_id.as_deref() == Some(tag_id.as_str())
+                || ui.selected_session.as_deref() == Some(s.id.as_str());
+            let perm = ui.pending_perms.iter().find(|p| p.session_id == s.id);
+
+            let tag_text = s.project.clone();
+            let tag_sub = Some(s.agent.clone());
+            let tag_size =
+                estimate_label_size(ProjectedLabelKind::WorkerTag, &tag_text, tag_sub.as_deref());
+
+            labels.push(ProjectedLabel {
+                id: tag_id,
+                kind: ProjectedLabelKind::WorkerTag,
+                priority: if is_hot {
+                    LabelPriority::Hovered
+                } else {
+                    LabelPriority::WorkingSession
+                },
+                screen_pos,
+                depth,
+                behind_camera: false,
+                size: tag_size,
+                text: tag_text,
+                subtitle: tag_sub,
+                accent: accent_for_status(&s.status),
+                status: Some(s.status.clone()),
+                session_id: Some(s.id.clone()),
+                place_id: None,
+                icon: None,
+            });
+
+            if let Some(p) = perm {
+                let p_text = format!("{} · {}", i18n.tr("station.approval"), p.tool);
+                let p_size =
+                    estimate_label_size(ProjectedLabelKind::PermissionBadge, &p_text, None);
+                let p_accent = if p.kind == "denied" { RED } else { AMBER };
+                labels.push(ProjectedLabel {
+                    id: format!("perm:{}", p.id),
+                    kind: ProjectedLabelKind::PermissionBadge,
+                    priority: LabelPriority::Permission,
+                    screen_pos: egui::pos2(screen_pos.x, screen_pos.y - 32.0),
+                    depth: (depth - 0.1).max(0.0),
+                    behind_camera: false,
+                    size: p_size,
+                    text: p_text,
+                    subtitle: None,
+                    accent: p_accent,
+                    status: Some("wait".to_owned()),
+                    session_id: Some(s.id.clone()),
+                    place_id: None,
+                    icon: Some(IconKind::Alert),
+                });
+            } else if s.status == "work"
+                && let Some(tool) = s.tool.as_deref().filter(|t| !t.is_empty())
+            {
+                let short: String = tool.chars().take(30).collect();
+                let b_size = estimate_label_size(ProjectedLabelKind::SpeechBubble, &short, None);
+                labels.push(ProjectedLabel {
+                    id: format!("bubble:{}", s.id),
+                    kind: ProjectedLabelKind::SpeechBubble,
+                    priority: LabelPriority::WorkingSession,
+                    screen_pos: egui::pos2(screen_pos.x, screen_pos.y - 34.0),
+                    depth,
+                    behind_camera: false,
+                    size: b_size,
+                    text: short,
+                    subtitle: None,
+                    accent: GREEN,
+                    status: Some("work".to_owned()),
+                    session_id: Some(s.id.clone()),
+                    place_id: None,
+                    icon: Some(tool_icon_kind(s.tool_kind.as_deref())),
+                });
+            }
+        }
+
+        // Subagents seated around the meeting room table
+        for (sub_idx, sub) in s.subagents.iter().enumerate() {
+            let sub_world = Vec3::new(
+                spec.meet[0] + (sub_idx as f32 - 0.5) * 0.9,
+                1.65,
+                spec.meet[1] + 0.4,
+            );
+            if let Some((screen_pos, depth)) =
+                project_world_to_stage(sub_world, cam, cam_tf, stage_rect)
+            {
+                let sz = estimate_label_size(ProjectedLabelKind::SubagentTag, &sub.label, None);
+                labels.push(ProjectedLabel {
+                    id: format!("sub:{}", sub.id),
+                    kind: ProjectedLabelKind::SubagentTag,
+                    priority: LabelPriority::Subagent,
+                    screen_pos,
+                    depth,
+                    behind_camera: false,
+                    size: sz,
+                    text: sub.label.clone(),
+                    subtitle: None,
+                    accent: BLUE,
+                    status: Some("sub".to_owned()),
+                    session_id: Some(s.id.clone()),
+                    place_id: None,
+                    icon: None,
+                });
+            }
+        }
+    }
+
+    // 2. Office zone chips
+    for (place_id, icon, i18n_key, world_pos) in zone_specs_for_layout(&spec) {
+        let Some((screen_pos, depth)) = project_world_to_stage(world_pos, cam, cam_tf, stage_rect)
+        else {
+            continue;
+        };
+        let label_id = format!("zone:{place_id}");
+        let is_open = ui
+            .active_place_card
+            .as_ref()
+            .is_some_and(|c| c.place_id == place_id);
+        let is_hot = is_open || ui.hovered_label_id.as_deref() == Some(label_id.as_str());
+        let text = i18n.tr(i18n_key);
+        let live = zone_live_subtitle(place_id, &ui, &i18n);
+        let sz = estimate_label_size(ProjectedLabelKind::ZoneChip, &text, live.as_deref());
+        labels.push(ProjectedLabel {
+            id: label_id,
+            kind: ProjectedLabelKind::ZoneChip,
+            priority: if is_hot {
+                LabelPriority::Hovered
+            } else {
+                LabelPriority::ZoneChip
+            },
+            screen_pos,
+            depth,
+            behind_camera: false,
+            size: sz,
+            text,
+            subtitle: live,
+            accent: ACCENT,
+            status: None,
+            session_id: None,
+            place_id: Some(place_id.to_owned()),
+            icon: Some(icon),
+        });
+    }
+
+    ui.projected_labels = labels;
+}
+
 /// Synchronizes the main 3D office camera viewport to the central stage rect reported by `station-ui`.
 pub fn sync_camera_viewport_to_stage(
     stage_rect: Res<StageViewportRect>,
@@ -1921,6 +2422,7 @@ fn sync_live_sessions_to_3d(
 
 fn handle_picking_events(
     mut ui: ResMut<UiState>,
+    i18n: Res<I18nStore>,
     mut worker_ev: EventReader<station_3d::WorkerSelected>,
     mut prop_ev: EventReader<station_3d::interact::PropActivated>,
 ) {
@@ -1932,8 +2434,90 @@ fn handle_picking_events(
         match ev.id {
             "whiteboard" => ui.active_drawer = ActiveDrawer::Whiteboard,
             "tv" | "dev-servers" => ui.active_drawer = ActiveDrawer::System,
-            _ => ui.push_toast(ev.place.to_uppercase(), ev.label),
+            _ => {
+                ui.active_place_card = Some(build_place_card_info(ev.place, &ui, &i18n));
+            }
         }
+    }
+}
+
+fn load_replay_range_into_state(
+    data_dir: &std::path::Path,
+    range: ReplayRange,
+    rep: &mut station_3d::replay::ReplayState,
+) {
+    let now = now_ms();
+    let (from, to) = match range {
+        ReplayRange::H1 => (now.saturating_sub(3_600_000), now),
+        ReplayRange::H3 => (now.saturating_sub(10_800_000), now),
+        ReplayRange::Today => (now.saturating_sub(86_400_000), now),
+        ReplayRange::Yesterday => (
+            now.saturating_sub(172_800_000),
+            now.saturating_sub(86_400_000),
+        ),
+    };
+    let items = station_core::state::sessions::read_replay_range(data_dir, from, to);
+    let events: Vec<station_3d::replay::ReplayEvent> = items
+        .into_iter()
+        .map(|it| station_3d::replay::ReplayEvent {
+            ts: it.t,
+            session_id: it
+                .m
+                .get("s")
+                .and_then(|s| s.get("id"))
+                .or_else(|| it.m.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            kind: it
+                .m
+                .get("k")
+                .and_then(Value::as_str)
+                .unwrap_or("ev")
+                .to_owned(),
+            summary: it
+                .m
+                .get("e")
+                .and_then(|e| e.get("label"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .collect();
+    rep.load_events(events);
+}
+
+fn build_replay_heatmap(rep: &station_3d::replay::ReplayState, bins: usize) -> Vec<f32> {
+    if rep.events.is_empty() || rep.end_ms <= rep.start_ms || bins == 0 {
+        return vec![0.12; bins.max(16)];
+    }
+    let span = (rep.end_ms - rep.start_ms).max(1) as f64;
+    let mut counts = vec![0u32; bins];
+    for ev in &rep.events {
+        let frac = (ev.ts.saturating_sub(rep.start_ms) as f64 / span).clamp(0.0, 0.9999);
+        let idx = (frac * bins as f64) as usize;
+        counts[idx.min(bins - 1)] += 1;
+    }
+    let peak = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
+    counts
+        .into_iter()
+        .map(|c| (c as f32 / peak).max(0.08))
+        .collect()
+}
+
+fn sync_replay_ui_readout(rep: &station_3d::replay::ReplayState, ui: &mut UiState) {
+    ui.replay_active = rep.active;
+    ui.replay_playing = rep.playing;
+    if rep.end_ms > rep.start_ms {
+        let span = (rep.end_ms - rep.start_ms) as f32;
+        ui.replay_progress =
+            (rep.cursor_ms.saturating_sub(rep.start_ms) as f32 / span).clamp(0.0, 1.0);
+        ui.replay_time_label = format_hhmm_ms(rep.cursor_ms);
+        ui.replay_span_label = format!(
+            "{} – {}",
+            format_hhmm_ms(rep.start_ms),
+            format_hhmm_ms(rep.end_ms)
+        );
     }
 }
 
@@ -1947,9 +2531,7 @@ fn step_replay_system(
     };
     if rep.active && rep.playing {
         rep.step(time.delta_secs());
-        if !rep.playing {
-            ui.replay_playing = false;
-        }
+        sync_replay_ui_readout(rep, &mut ui);
     }
 }
 
@@ -2449,34 +3031,144 @@ fn process_ui_actions(
                     format!("Saved {} (applies on next launch)", pref.label()),
                 );
             }
+            UiAction::SelectCameraPreset(preset) => {
+                ui.camera_preset = preset;
+                ui.first_person = false;
+                if let Some(rig) = aux.camera_rig.as_deref_mut() {
+                    rig.apply_preset(preset, ui.layout);
+                    ui.camera_zoom_pct = rig.zoom_pct();
+                    let next_proj = rig.projection();
+                    for mut proj in &mut aux.cam_q {
+                        *proj = next_proj.clone();
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+            }
+            UiAction::ZoomCamera(factor) => {
+                if let Some(rig) = aux.camera_rig.as_deref_mut() {
+                    rig.zoom_by(factor);
+                    ui.camera_zoom_pct = rig.zoom_pct();
+                    let next_proj = rig.projection();
+                    for mut proj in &mut aux.cam_q {
+                        *proj = next_proj.clone();
+                    }
+                }
+            }
+            UiAction::ResetCameraZoom => {
+                ui.camera_zoom_pct = 100;
+                if let Some(rig) = aux.camera_rig.as_deref_mut() {
+                    rig.reset_zoom();
+                    ui.camera_zoom_pct = rig.zoom_pct();
+                    let next_proj = rig.projection();
+                    for mut proj in &mut aux.cam_q {
+                        *proj = next_proj.clone();
+                    }
+                }
+            }
+            UiAction::ToggleFullscreenStage => {
+                if ui.fullscreen_stage {
+                    ui.photo_mode = false;
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+            }
+            UiAction::SetPhotoMode(enabled) => {
+                ui.photo_mode = enabled;
+                if enabled {
+                    ui.active_place_card = None;
+                    if let Some(rig) = aux.camera_rig.as_deref_mut()
+                        && rig.first_person
+                    {
+                        rig.first_person = false;
+                        ui.first_person = false;
+                        let next_proj = rig.projection();
+                        for mut proj in &mut aux.cam_q {
+                            *proj = next_proj.clone();
+                        }
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+            }
+            UiAction::CapturePhoto {
+                size,
+                show_names,
+                show_mark,
+            } => {
+                ui.photo_size = size;
+                ui.photo_show_names = show_names;
+                ui.photo_show_mark = show_mark;
+                let shots_dir = bridge.data_dir.join("shots");
+                let _ = std::fs::create_dir_all(&shots_dir);
+                let fname = format!("shot-{}-{}.png", size.dimensions_tag(), now_ms());
+                let shot_path = shots_dir.join(&fname);
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Shutter);
+                }
+                if !aux.primary_win_q.is_empty() {
+                    commands
+                        .spawn(Screenshot::primary_window())
+                        .observe(save_to_disk(shot_path));
+                } else {
+                    let _ = save_photostrip_png(
+                        &shot_path,
+                        &ui,
+                        world_params.shared_fonts.as_deref_mut(),
+                        &bridge.assets_dir,
+                    );
+                }
+                ui.push_toast(
+                    i18n.tr("ui.photo.label"),
+                    format!("shots/{fname} ({})", size.dimensions_tag()),
+                );
+            }
+            UiAction::TriggerTimelapseClip { shape, music } => {
+                ui.clip_shape = shape;
+                ui.clip_music = music;
+                let shots_dir = bridge.data_dir.join("shots");
+                let _ = std::fs::create_dir_all(&shots_dir);
+                let shape_tag = match shape {
+                    station_ui::state::ClipShape::Square => "1x1",
+                    station_ui::state::ClipShape::Tall => "9x16",
+                };
+                let fname = format!("timelapse-15s-{shape_tag}-{}.png", now_ms());
+                let clip_path = shots_dir.join(&fname);
+                let _ = save_photostrip_png(
+                    &clip_path,
+                    &ui,
+                    world_params.shared_fonts.as_deref_mut(),
+                    &bridge.assets_dir,
+                );
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Ding);
+                }
+                ui.push_toast(i18n.tr("ui.clip.button"), format!("shots/{fname}"));
+            }
             UiAction::ToggleCameraFp => {
                 if let Some(rig) = aux.camera_rig.as_deref_mut() {
                     rig.first_person = !rig.first_person;
                     ui.first_person = rig.first_person;
+                    let next_proj = rig.projection();
                     for mut proj in &mut aux.cam_q {
-                        if rig.first_person {
-                            *proj = Projection::Perspective(PerspectiveProjection {
-                                fov: 70.0_f32.to_radians(),
-                                near: 0.05,
-                                far: 240.0,
-                                ..default()
-                            });
-                        } else {
-                            *proj = Projection::Orthographic(OrthographicProjection {
-                                scaling_mode: ScalingMode::FixedVertical {
-                                    viewport_height: rig.viewport_height,
-                                },
-                                near: -80.0,
-                                far: 180.0,
-                                ..OrthographicProjection::default_3d()
-                            });
-                        }
+                        *proj = next_proj.clone();
                     }
                 } else {
                     ui.first_person = !ui.first_person;
                 }
                 if let Some(sfx) = aux.sfx.as_deref_mut() {
                     sfx.play_sfx(SfxKind::Click);
+                }
+            }
+            UiAction::TriggerFirstPersonInteract => {
+                if let Some(label) = ui.fp_near_label.clone() {
+                    if let Some(sfx) = aux.sfx.as_deref_mut() {
+                        sfx.play_sfx(SfxKind::Pop);
+                    }
+                    ui.push_toast(i18n.tr("ui.firstPersonHud.title"), label);
                 }
             }
             UiAction::TriggerPhoto => {
@@ -2530,59 +3222,144 @@ fn process_ui_actions(
                 }
             }
             UiAction::ToggleReplay => {
-                ui.replay_playing = !ui.replay_playing;
+                let enable = !ui.replay_active;
+                ui.replay_active = enable;
+                ui.replay_playing = enable;
                 if let Some(rep) = aux.replay.as_deref_mut() {
-                    if ui.replay_playing {
+                    if enable {
                         if rep.events.is_empty() {
-                            let now = now_ms();
-                            let from = now.saturating_sub(86_400_000);
-                            let items = station_core::state::sessions::read_replay_range(
-                                &bridge.data_dir,
-                                from,
-                                now,
-                            );
-                            let events: Vec<station_3d::replay::ReplayEvent> = items
-                                .into_iter()
-                                .map(|it| station_3d::replay::ReplayEvent {
-                                    ts: it.t,
-                                    session_id: it
-                                        .m
-                                        .get("s")
-                                        .and_then(|s| s.get("id"))
-                                        .or_else(|| it.m.get("id"))
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                    kind: it
-                                        .m
-                                        .get("k")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("ev")
-                                        .to_owned(),
-                                    summary: it
-                                        .m
-                                        .get("e")
-                                        .and_then(|e| e.get("label"))
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                })
-                                .collect();
-                            rep.load_events(events);
+                            load_replay_range_into_state(&bridge.data_dir, ui.replay_range, rep);
                         }
+                        rep.speed = ui.replay_speed.max(1.0);
                         rep.active = true;
                         rep.playing = true;
+                        ui.replay_heatmap = build_replay_heatmap(rep, 24);
+                        sync_replay_ui_readout(rep, &mut ui);
+                        ui.replay_active = true;
                     } else {
                         rep.playing = false;
                         rep.active = false;
                     }
                 }
-                let replay_msg = if ui.replay_playing {
-                    "Timeline replay playing"
+                let replay_msg = if ui.replay_active {
+                    i18n.tr("replay.conn")
                 } else {
-                    "Timeline replay stopped"
+                    i18n.tr("ui.replayBar.backToLive")
                 };
-                ui.push_toast("Replay", replay_msg);
+                ui.push_toast(i18n.tr("ui.replayBar.label"), replay_msg);
+            }
+            UiAction::ReplayTogglePlay => {
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    rep.playing = ui.replay_playing;
+                    rep.active = ui.replay_active;
+                }
+            }
+            UiAction::ReplayScrub(frac) => {
+                ui.replay_progress = frac.clamp(0.0, 1.0);
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    rep.scrub(ui.replay_progress);
+                    sync_replay_ui_readout(rep, &mut ui);
+                    ui.replay_active = true;
+                }
+            }
+            UiAction::ReplaySetSpeed(speed) => {
+                ui.replay_speed = speed.clamp(1.0, 8.0);
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    rep.speed = ui.replay_speed;
+                }
+            }
+            UiAction::ReplaySetRange(range) => {
+                ui.replay_range = range;
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    load_replay_range_into_state(&bridge.data_dir, range, rep);
+                    rep.speed = ui.replay_speed.max(1.0);
+                    rep.active = true;
+                    ui.replay_heatmap = build_replay_heatmap(rep, 24);
+                    sync_replay_ui_readout(rep, &mut ui);
+                    ui.replay_active = true;
+                }
+            }
+            UiAction::ReplayClose => {
+                ui.replay_active = false;
+                ui.replay_playing = false;
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    rep.playing = false;
+                    rep.active = false;
+                }
+            }
+            UiAction::OpenPlaceCard(place_id) => {
+                match place_id.as_str() {
+                    "server" => {
+                        ui.active_place_card = None;
+                        ui.active_drawer = ActiveDrawer::System;
+                    }
+                    "board" => {
+                        ui.active_place_card = None;
+                        ui.active_drawer = ActiveDrawer::Whiteboard;
+                    }
+                    _ => {
+                        ui.active_place_card = Some(build_place_card_info(&place_id, &ui, &i18n));
+                    }
+                }
+                if let Some(sfx) = aux.sfx.as_deref_mut() {
+                    sfx.play_sfx(SfxKind::Click);
+                }
+            }
+            UiAction::ClosePlaceCard => {
+                ui.active_place_card = None;
+            }
+            UiAction::TriggerPlaceAction {
+                place_id,
+                action_id,
+            } => {
+                match action_id.as_str() {
+                    "focus_meeting" => {
+                        if let Some(rig) = aux.camera_rig.as_deref_mut() {
+                            rig.apply_preset(station_3d::CameraPreset::Meeting, ui.layout);
+                            ui.camera_preset = station_3d::CameraPreset::Meeting;
+                            ui.camera_zoom_pct = rig.zoom_pct();
+                            let next_proj = rig.projection();
+                            for mut proj in &mut aux.cam_q {
+                                *proj = next_proj.clone();
+                            }
+                        }
+                    }
+                    "focus_desks" => {
+                        if let Some(rig) = aux.camera_rig.as_deref_mut() {
+                            rig.apply_preset(station_3d::CameraPreset::Desks, ui.layout);
+                            ui.camera_preset = station_3d::CameraPreset::Desks;
+                            ui.camera_zoom_pct = rig.zoom_pct();
+                            let next_proj = rig.projection();
+                            for mut proj in &mut aux.cam_q {
+                                *proj = next_proj.clone();
+                            }
+                        }
+                    }
+                    "cat" => {
+                        if let Some(sfx) = aux.sfx.as_deref_mut() {
+                            sfx.play_sfx(SfxKind::Meow);
+                        }
+                        ui.push_toast(i18n.tr("places.lounge.title"), i18n.tr("places.lounge.cat"));
+                    }
+                    "rocket" | "test_launch" => {
+                        if let Some(sfx) = aux.sfx.as_deref_mut() {
+                            sfx.play_sfx(SfxKind::Deploy);
+                        }
+                        ui.push_toast(
+                            i18n.tr("places.deploy.title"),
+                            i18n.tr("places.deploy.test"),
+                        );
+                    }
+                    _ => {
+                        if let Some(sfx) = aux.sfx.as_deref_mut() {
+                            sfx.play_sfx(SfxKind::Brew);
+                        }
+                        ui.push_toast(
+                            i18n.tr(&format!("places.{place_id}.title")),
+                            i18n.tr("places.coffee.brew"),
+                        );
+                    }
+                }
             }
             UiAction::SendPrompt { session_id, text } => {
                 let clean: String = station_core::redact::redact(text.trim())
@@ -4844,5 +5621,161 @@ mod tests {
             cam.viewport.is_none(),
             "viewport must not be populated with hardcoded fallback dimensions"
         );
+    }
+
+    #[test]
+    fn project_stage_labels_projects_in_front_workers_and_culls_behind_camera() {
+        use bevy::render::camera::{CameraProjectionPlugin, ManualTextureViews};
+        use bevy::render::render_resource::Extent3d;
+        use bevy::window::{WindowCreated, WindowResized, WindowScaleFactorChanged};
+
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let i18n = I18nStore::load_from_assets(&assets, "vi");
+        let stage_rect = egui::Rect::from_min_max(egui::pos2(300.0, 56.0), egui::pos2(950.0, 720.0));
+        let mut ui = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        ui.sessions.truncate(2);
+
+        let mut app = App::new();
+        app.insert_resource(Assets::<Image>::default())
+            .insert_resource(ManualTextureViews::default())
+            .insert_resource(StageViewportRect(Some(stage_rect)))
+            .insert_resource(i18n)
+            .insert_resource(ui)
+            .add_event::<WindowResized>()
+            .add_event::<WindowScaleFactorChanged>()
+            .add_event::<WindowCreated>()
+            .add_event::<AssetEvent<Image>>()
+            .add_plugins((TransformPlugin, CameraProjectionPlugin))
+            .add_systems(
+                PostUpdate,
+                project_stage_labels_to_ui.after(bevy::transform::TransformSystem::TransformPropagate),
+            );
+
+        let mut img = Image::default();
+        img.texture_descriptor.size = Extent3d {
+            width: 1280,
+            height: 720,
+            depth_or_array_layers: 1,
+        };
+        let handle = app.world_mut().resource_mut::<Assets<Image>>().add(img);
+
+        // Spawn camera looking at origin from (0, 2, 10)
+        app.world_mut().spawn((
+            station_3d::camera::MainOfficeCamera,
+            Camera {
+                target: RenderTarget::Image(handle.into()),
+                viewport: Some(Viewport {
+                    physical_position: UVec2::new(300, 56),
+                    physical_size: UVec2::new(650, 664),
+                    ..default()
+                }),
+                ..default()
+            },
+            Projection::Perspective(PerspectiveProjection {
+                fov: 70.0_f32.to_radians(),
+                near: 0.1,
+                far: 200.0,
+                ..default()
+            }),
+            Transform::from_xyz(0.0, 2.0, 10.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
+        ));
+
+        // Worker 0 in front of camera; Worker 1 behind camera.
+        app.world_mut().spawn((
+            station_3d::people::LiveSessionWorker {
+                session_id: "sess-claude-1".to_owned(),
+                agent: "claude".to_owned(),
+                name: "agents-station".to_owned(),
+                desk_index: 0,
+                status: "work".to_owned(),
+                tool_label: Some("Edit".to_owned()),
+            },
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ));
+        app.world_mut().spawn((
+            station_3d::people::LiveSessionWorker {
+                session_id: "sess-codex-2".to_owned(),
+                agent: "codex".to_owned(),
+                name: "station-core".to_owned(),
+                desk_index: 1,
+                status: "wait".to_owned(),
+                tool_label: Some("Bash".to_owned()),
+            },
+            Transform::from_xyz(0.0, 0.0, 22.0),
+        ));
+
+        app.update();
+        let projected = &app.world().resource::<UiState>().projected_labels;
+        assert!(
+            projected.iter().any(|l| l.id == "worker:sess-claude-1"),
+            "in-front worker must be projected: {projected:?}"
+        );
+        assert!(
+            !projected.iter().any(|l| l.id == "worker:sess-codex-2"),
+            "behind-camera worker must be culled cleanly: {projected:?}"
+        );
+    }
+
+    #[test]
+    fn camera_toolbar_actions_wire_presets_zoom_and_replay_without_stubs() {
+        let dir = tempfile::tempdir().unwrap();
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let i18n = I18nStore::load_from_assets(&assets, "vi");
+        let spec = LayoutSpec::for_layout(station_3d::OfficeLayout::Pro);
+        let rig = station_3d::camera::CameraRig::from_layout(&spec);
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(i18n)
+            .insert_resource(UiState::with_demo_seed(
+                station_3d::OfficeLayout::Pro,
+                station_3d::BackdropKind::City,
+                false,
+            ))
+            .insert_resource(rig)
+            .insert_resource(station_3d::replay::ReplayState::default())
+            .add_event::<station_3d::WorkerSelected>()
+            .add_event::<station_3d::interact::PropActivated>()
+            .add_event::<AppExit>()
+            .add_plugins(LiveServerBridgePlugin {
+                data_dir: dir.path().to_path_buf(),
+                assets_dir: assets,
+                host: "127.0.0.1".to_owned(),
+                port: 0,
+                start_http: false,
+            });
+        app.world_mut()
+            .spawn((station_3d::camera::MainOfficeCamera, Projection::default()));
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::SelectCameraPreset(station_3d::CameraPreset::Meeting));
+            ui.push_action(UiAction::ZoomCamera(1.2));
+            ui.push_action(UiAction::OpenPlaceCard("meeting".to_owned()));
+            ui.push_action(UiAction::ReplaySetSpeed(4.0));
+        }
+        app.update();
+
+        let ui = app.world().resource::<UiState>();
+        let rig = app.world().resource::<station_3d::camera::CameraRig>();
+        assert_eq!(rig.active_preset, station_3d::CameraPreset::Meeting);
+        assert_eq!(ui.camera_preset, station_3d::CameraPreset::Meeting);
+        assert!(rig.zoom_pct() > 200);
+        assert_eq!(ui.active_place_card.as_ref().map(|c| c.place_id.as_str()), Some("meeting"));
+        assert!((app.world().resource::<station_3d::replay::ReplayState>().speed - 4.0).abs() < 0.01);
+
+        {
+            let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.push_action(UiAction::ResetCameraZoom);
+            ui.push_action(UiAction::ClosePlaceCard);
+        }
+        app.update();
+        assert_eq!(app.world().resource::<station_3d::camera::CameraRig>().zoom_pct(), 100);
+        assert!(app.world().resource::<UiState>().active_place_card.is_none());
     }
 }

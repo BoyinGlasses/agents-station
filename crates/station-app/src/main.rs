@@ -128,9 +128,19 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     .add_systems(Update, handle_window_close_requests)
     .add_systems(
         PostUpdate,
-        bridge::sync_camera_viewport_to_stage
-            .after(bevy_egui::EguiPostUpdateSet::EndPass)
-            .run_if(resource_exists::<station_ui::StageViewportRect>),
+        (
+            bridge::sync_camera_viewport_to_stage
+                .after(bevy_egui::EguiPostUpdateSet::EndPass)
+                .run_if(resource_exists::<station_ui::StageViewportRect>),
+            bridge::project_stage_labels_to_ui
+                .after(bridge::sync_camera_viewport_to_stage)
+                .after(bevy::transform::TransformSystem::TransformPropagate)
+                .run_if(
+                    resource_exists::<station_ui::StageViewportRect>
+                        .and(resource_exists::<station_ui::UiState>)
+                        .and(resource_exists::<station_ui::I18nStore>),
+                ),
+        ),
     );
 
     let assets_dir = resolve_assets_dir();
