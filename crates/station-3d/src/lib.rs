@@ -40,7 +40,10 @@ pub use layout::{LayoutSpec, OfficeLayout};
 pub use lights::LightingSyncSet;
 pub use nav::{NavGraph, NavSpot, StationKind};
 pub use palette::{WorldEntity, WorldPalette};
-pub use people::{LiveSessionWorker, LiveWorkerSpec};
+pub use people::{
+    ChibiScale, LiveSessionWorker, LiveSyncScratch, LiveWorkerSpec, NavWalker, SUBAGENT_SCALE,
+    SleepZFloater, SubagentSpec, SubagentWorker, TeamLineDash, WorkerLifecycle,
+};
 pub use pro_floor::{
     CoolerScreen, DiningTable, FoosballTable, PhoneBooth, ReceptionCounter, RestroomStall,
 };
@@ -132,7 +135,10 @@ fn register_office_runtime(
                 props_detail::leisure::animate_leisure_system,
                 props_detail::microwave::animate_microwaves_system,
                 props_detail::shredder_cups::animate_shredder_bins_and_cups_system,
+                people::step_nav_walkers_system.before(people::animate_chibis_system),
                 people::animate_chibis_system,
+                people::update_team_lines_system.after(people::step_nav_walkers_system),
+                people::animate_sleep_z_system,
                 backdrops::animate_backdrop_traffic_system,
                 life::update_rain_system,
             ),

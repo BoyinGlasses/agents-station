@@ -570,6 +570,31 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
                     }
                 })
                 .unwrap_or(CacheWarmth::Unknown);
+            let subagents = s
+                .get("subs")
+                .or_else(|| s.get("subagents"))
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|sub| {
+                            let id = sub.get("id").and_then(Value::as_str)?.to_owned();
+                            let label = sub
+                                .get("type")
+                                .or_else(|| sub.get("label"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("agent")
+                                .to_owned();
+                            let doing = sub
+                                .get("desc")
+                                .or_else(|| sub.get("doing"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
+                            Some(station_ui::state::SubagentItem { id, label, doing })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Some(SessionCard {
                 id,
                 agent,
@@ -592,7 +617,7 @@ fn parse_sessions_from_json(val: &Value) -> Vec<SessionCard> {
                 pinned: false,
                 age_label: String::new(),
                 ctx_pct,
-                subagents: Vec::new(),
+                subagents,
             })
         })
         .collect()
@@ -4960,38 +4985,68 @@ fn sync_live_state_to_ui(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn sync_live_sessions_to_3d(
-    mut commands: Commands,
-    ui: Res<UiState>,
-    mut rack_telemetry: Option<ResMut<station_3d::ServerRackTelemetry>>,
-    mut props_telemetry: Option<ResMut<station_3d::PropsLiveTelemetry>>,
-    chibi_cache: Option<Res<station_3d::ChibiMeshCache>>,
-    pal: Option<ResMut<WorldPalette>>,
-    materials: Option<ResMut<Assets<StandardMaterial>>>,
-    screen_mats: Option<Res<station_3d::desks::ScreenMaterials>>,
-    layout: Option<Res<station_3d::OfficeLayout>>,
-    preview_q: Query<Entity, With<station_3d::people::PreviewCastWorker>>,
-    mut workers_q: Query<(
-        Entity,
-        &mut station_3d::people::LiveSessionWorker,
-        &mut station_3d::chibi::ChibiWorker,
-        Option<&Children>,
-    )>,
-    mut halo_q: Query<
-        &mut MeshMaterial3d<StandardMaterial>,
+#[derive(SystemParam)]
+#[allow(clippy::type_complexity)]
+struct LiveSync3dParams<'w, 's> {
+    chibi_cache: Option<Res<'w, station_3d::ChibiMeshCache>>,
+    pal: Option<ResMut<'w, WorldPalette>>,
+    materials: Option<ResMut<'w, Assets<StandardMaterial>>>,
+    screen_mats: Option<Res<'w, station_3d::desks::ScreenMaterials>>,
+    nav: Option<Res<'w, station_3d::NavGraph>>,
+    layout: Option<Res<'w, station_3d::OfficeLayout>>,
+    scratch: bevy::prelude::Local<'s, station_3d::LiveSyncScratch>,
+    specs_buf: bevy::prelude::Local<'s, Vec<station_3d::LiveWorkerSpec>>,
+    preview_q: Query<'w, 's, Entity, With<station_3d::people::PreviewCastWorker>>,
+    workers_q: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static mut station_3d::people::LiveSessionWorker,
+            &'static mut station_3d::chibi::ChibiWorker,
+            Option<&'static mut station_3d::NavWalker>,
+            Option<&'static mut station_3d::WorkerLifecycle>,
+            Option<&'static station_3d::ActivePropEntity>,
+            Option<&'static Children>,
+        ),
+    >,
+    subagents_q: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static mut station_3d::SubagentWorker,
+            &'static station_3d::chibi::ChibiWorker,
+        ),
+        Without<station_3d::people::LiveSessionWorker>,
+    >,
+    dashes_q: Query<'w, 's, (Entity, &'static station_3d::TeamLineDash)>,
+    halo_q: Query<
+        'w,
+        's,
+        &'static mut MeshMaterial3d<StandardMaterial>,
         (
             With<station_3d::chibi::StatusHalo>,
             Without<station_3d::desks::DeskScreen>,
         ),
     >,
-    mut screens_q: Query<
+    screens_q: Query<
+        'w,
+        's,
         (
-            &station_3d::desks::DeskScreen,
-            &mut MeshMaterial3d<StandardMaterial>,
+            &'static station_3d::desks::DeskScreen,
+            &'static mut MeshMaterial3d<StandardMaterial>,
         ),
         Without<station_3d::chibi::StatusHalo>,
     >,
+}
+
+fn sync_live_sessions_to_3d(
+    mut commands: Commands,
+    ui: Res<UiState>,
+    mut rack_telemetry: Option<ResMut<station_3d::ServerRackTelemetry>>,
+    mut props_telemetry: Option<ResMut<station_3d::PropsLiveTelemetry>>,
+    mut sync3d: LiveSync3dParams,
 ) {
     if let Some(ref mut rack) = rack_telemetry {
         rack.cpu_load = (ui.sys.cpu_pct / 100.0).clamp(0.0, 1.0);
@@ -5032,16 +5087,27 @@ fn sync_live_sessions_to_3d(
             });
         }
     }
-    let (Some(chibi_cache), Some(mut pal), Some(mut mats), Some(scr_mats)) =
-        (chibi_cache, pal, materials, screen_mats)
-    else {
+    let (Some(chibi_cache), Some(mut pal), Some(mut mats), Some(scr_mats)) = (
+        sync3d.chibi_cache,
+        sync3d.pal,
+        sync3d.materials,
+        sync3d.screen_mats,
+    ) else {
         return;
     };
-    let lay = layout.map(|l| *l).unwrap_or(ui.layout);
-    let specs: Vec<station_3d::LiveWorkerSpec> = ui
-        .sessions
-        .iter()
-        .map(|s| station_3d::LiveWorkerSpec {
+    let lay = sync3d.layout.map(|l| *l).unwrap_or(ui.layout);
+    let fallback_nav;
+    let nav_ref: &station_3d::NavGraph = match sync3d.nav.as_deref() {
+        Some(n) => n,
+        None => {
+            fallback_nav = station_3d::NavGraph::for_layout(lay);
+            &fallback_nav
+        }
+    };
+    sync3d.specs_buf.clear();
+    sync3d
+        .specs_buf
+        .extend(ui.sessions.iter().map(|s| station_3d::LiveWorkerSpec {
             session_id: s.id.clone(),
             agent: s.agent.clone(),
             name: s.project.clone(),
@@ -5050,21 +5116,33 @@ fn sync_live_sessions_to_3d(
             tool_kind: s.tool_kind.clone(),
             tool_label: s.tool.clone(),
             git_dirty: s.git_dirty,
-        })
-        .collect();
+            subagents: s
+                .subagents
+                .iter()
+                .map(|sub| station_3d::SubagentSpec {
+                    id: sub.id.clone(),
+                    label: sub.label.clone(),
+                    doing: sub.doing.clone(),
+                })
+                .collect(),
+        }));
     station_3d::people::sync_live_workers_and_screens(
         &mut commands,
         &chibi_cache,
         &mut pal,
         &mut mats,
         &scr_mats,
+        nav_ref,
         lay,
         ui.chibi_look,
-        &specs,
-        &preview_q,
-        &mut workers_q,
-        &mut halo_q,
-        &mut screens_q,
+        &sync3d.specs_buf,
+        &mut sync3d.scratch,
+        &sync3d.preview_q,
+        &mut sync3d.workers_q,
+        &mut sync3d.subagents_q,
+        &sync3d.dashes_q,
+        &mut sync3d.halo_q,
+        &mut sync3d.screens_q,
     );
 }
 
