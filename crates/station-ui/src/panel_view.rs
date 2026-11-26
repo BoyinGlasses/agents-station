@@ -57,6 +57,7 @@ pub fn render_compact_panel_window(ctx: &egui::Context, state: &mut UiState, i18
 
     // 1. Slim header with brand, live status summary, Plan quota bar, PC/RAM bar, Refresh & Expand buttons
     egui::TopBottomPanel::top("station_compact_panel_head")
+        .min_height(92.0)
         .frame(
             egui::Frame::NONE
                 .fill(BAR)
@@ -185,7 +186,9 @@ pub fn render_compact_panel_window(ctx: &egui::Context, state: &mut UiState, i18
                             state.lite_focus_search_req = false;
                             resp.request_focus();
                         }
-                        if resp.has_focus() && ui.input(|i| i.key_pressed(Key::Escape)) {
+                        if (resp.has_focus() || resp.lost_focus())
+                            && ui.input(|i| i.key_pressed(Key::Escape))
+                        {
                             state.lite_search.clear();
                             resp.surrender_focus();
                         }
@@ -201,6 +204,12 @@ pub fn render_compact_panel_window(ctx: &egui::Context, state: &mut UiState, i18
                 .id_salt("station_compact_panel_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    // Collapsible inline Plan quota breakdown (replaces wide 360px Burn drawer)
+                    if state.panel_quota_open {
+                        draw_compact_quota_section(ui, state, i18n);
+                        ui.add_space(8.0);
+                    }
+
                     // Section A: Needs you (pending permissions)
                     if !perms_snapshot.is_empty() {
                         let n_s = perms_snapshot.len().to_string();
@@ -302,7 +311,10 @@ fn draw_quota_bar_pill(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore)
         .fill(CARD)
         .corner_radius(CornerRadius::same(8))
         .inner_margin(Margin::symmetric(8, 5))
-        .stroke(Stroke::new(1.0_f32, LINE))
+        .stroke(Stroke::new(
+            1.0_f32,
+            if state.panel_quota_open { ACCENT } else { LINE },
+        ))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -321,8 +333,88 @@ fn draw_quota_bar_pill(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore)
         .response
         .interact(Sense::click());
     if resp.clicked() {
-        state.toggle_drawer(ActiveDrawer::Burn);
+        state.panel_quota_open = !state.panel_quota_open;
     }
+}
+
+fn draw_compact_quota_section(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
+    egui::Frame::NONE
+        .fill(CARD)
+        .corner_radius(CornerRadius::same(9))
+        .inner_margin(Margin::symmetric(10, 8))
+        .stroke(Stroke::new(1.0_f32, LINE_2))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(
+                    heading_bold(i18n.tr("ui.topBar.planLimits").to_uppercase(), 10.0).color(INK),
+                );
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    let close_btn = egui::Button::new(
+                        RichText::new(i18n.tr("common.close"))
+                            .size(9.5)
+                            .color(MUTED),
+                    )
+                    .fill(CARD_2)
+                    .stroke(Stroke::new(1.0_f32, LINE))
+                    .corner_radius(CornerRadius::same(6))
+                    .min_size(vec2(0.0, 20.0));
+                    if ui.add(close_btn).clicked() {
+                        state.panel_quota_open = false;
+                    }
+                });
+            });
+            ui.add_space(5.0);
+
+            let today_s = format!("${:.2}", state.burn.today_usd);
+            let month_s = format!("${:.2}", state.burn.month_usd);
+            ui.horizontal(|ui| {
+                ui.label(
+                    heading_bold(
+                        i18n.tr_vars("station.planSummary", &[("usd", today_s.as_str())]),
+                        11.5,
+                    )
+                    .color(INK),
+                );
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(
+                            i18n.tr_vars("station.planMonth", &[("usd", month_s.as_str())]),
+                        )
+                        .font(FontId::new(10.5, FontFamily::Monospace))
+                        .color(MUTED),
+                    );
+                });
+            });
+
+            if state.burn.per_model.is_empty() {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(i18n.tr("ui.topBar.planEmpty"))
+                        .size(10.5)
+                        .color(MUTED),
+                );
+            } else {
+                ui.add_space(6.0);
+                let max_usd = state
+                    .burn
+                    .per_model
+                    .iter()
+                    .map(|(_, c)| *c)
+                    .fold(0.01_f64, f64::max);
+                for (model, cost) in &state.burn.per_model {
+                    let ratio = (*cost / max_usd).clamp(0.0, 1.0) as f32;
+                    draw_meter_row(
+                        ui,
+                        &clip_chars(model, 24),
+                        &format!("${cost:.2}"),
+                        ratio,
+                        level_color(ratio * 0.85),
+                    );
+                    ui.add_space(3.0);
+                }
+            }
+        });
 }
 
 fn draw_ram_bar_pill(ui: &mut egui::Ui, state: &mut UiState, i18n: &I18nStore) {
@@ -482,6 +574,8 @@ fn draw_compact_session_card(
     };
 
     let mut steer_input_focused = false;
+    let mut header_hovered = false;
+    let mut header_clicked = false;
     let card = egui::Frame::NONE
         .fill(CARD)
         .corner_radius(CornerRadius::same(9))
@@ -490,98 +584,111 @@ fn draw_compact_session_card(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
 
-            // Top line: status dot + project + age
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let (d, _) = ui.allocate_exact_size(vec2(9.0, 9.0), Sense::hover());
-                if is_work {
-                    ui.painter().circle_filled(d.center(), 4.8, GREEN_SOFT);
-                } else if is_wait {
-                    ui.painter().circle_filled(d.center(), 4.8, AMBER_SOFT);
-                }
-                ui.painter().circle_filled(d.center(), 3.2, dot_col);
-                ui.label(heading_bold(clip_chars(&sess.project, 24), 12.0));
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if !sess.age_label.is_empty() {
-                        ui.label(
-                            RichText::new(&sess.age_label)
-                                .font(FontId::new(10.0, FontFamily::Monospace))
-                                .color(FAINT),
-                        );
+            // Non-interactive summary region owns click-to-toggle steer so clicks inside the
+            // steer TextEdit or Send button below are NEVER stolen by reverse hit-testing.
+            let header = egui::Frame::NONE.show(ui, |ui| {
+                ui.set_width(ui.available_width());
+
+                // Top line: status dot + project + age
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let (d, _) = ui.allocate_exact_size(vec2(9.0, 9.0), Sense::hover());
+                    if is_work {
+                        ui.painter().circle_filled(d.center(), 4.8, GREEN_SOFT);
+                    } else if is_wait {
+                        ui.painter().circle_filled(d.center(), 4.8, AMBER_SOFT);
                     }
-                    if sess.ctx_pct > 0.005 {
-                        let pct = (sess.ctx_pct.clamp(0.0, 1.0) * 100.0).round() as u32;
-                        let col = if pct >= 85 {
-                            RED
-                        } else if pct >= 60 {
-                            AMBER
-                        } else {
-                            BLUE
-                        };
-                        ui.label(
-                            RichText::new(format!("{pct}%"))
-                                .font(FontId::new(10.0, FontFamily::Monospace))
-                                .color(col),
-                        );
-                    }
+                    ui.painter().circle_filled(d.center(), 3.2, dot_col);
+                    ui.label(heading_bold(clip_chars(&sess.project, 24), 12.0));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        if !sess.age_label.is_empty() {
+                            ui.label(
+                                RichText::new(&sess.age_label)
+                                    .font(FontId::new(10.0, FontFamily::Monospace))
+                                    .color(FAINT),
+                            );
+                        }
+                        if sess.ctx_pct > 0.005 {
+                            let pct = (sess.ctx_pct.clamp(0.0, 1.0) * 100.0).round() as u32;
+                            let col = if pct >= 85 {
+                                RED
+                            } else if pct >= 60 {
+                                AMBER
+                            } else {
+                                BLUE
+                            };
+                            ui.label(
+                                RichText::new(format!("{pct}%"))
+                                    .font(FontId::new(10.0, FontFamily::Monospace))
+                                    .color(col),
+                            );
+                        }
+                    });
                 });
-            });
 
-            // Where line: agent · branch · cache
-            let mut where_bits: Vec<String> = Vec::new();
-            where_bits.push(sess.agent.clone());
-            if let Some(branch) = &sess.git_branch
-                && !branch.is_empty()
-            {
-                if sess.git_dirty > 0 {
-                    where_bits.push(format!("{} •{}", clip_chars(branch, 16), sess.git_dirty));
-                } else {
-                    where_bits.push(clip_chars(branch, 16));
+                // Where line: agent · branch · cache
+                let mut where_bits: Vec<String> = Vec::new();
+                where_bits.push(sess.agent.clone());
+                if let Some(branch) = &sess.git_branch
+                    && !branch.is_empty()
+                {
+                    if sess.git_dirty > 0 {
+                        where_bits.push(format!("{} •{}", clip_chars(branch, 16), sess.git_dirty));
+                    } else {
+                        where_bits.push(clip_chars(branch, 16));
+                    }
                 }
-            }
-            match sess.cache_warmth {
-                CacheWarmth::Warm(m) => {
-                    let ms = m.max(1).to_string();
-                    let raw = i18n.tr_vars("lite.cacheWarm", &[("n", ms.as_str())]);
-                    where_bits.push(strip_coffee(&raw).to_owned());
+                match sess.cache_warmth {
+                    CacheWarmth::Warm(m) => {
+                        let ms = m.max(1).to_string();
+                        let raw = i18n.tr_vars("lite.cacheWarm", &[("n", ms.as_str())]);
+                        where_bits.push(strip_coffee(&raw).to_owned());
+                    }
+                    CacheWarmth::Cold => {
+                        where_bits.push(strip_coffee(&i18n.tr("lite.cacheCold")).to_owned());
+                    }
+                    CacheWarmth::Unknown => {}
                 }
-                CacheWarmth::Cold => {
-                    where_bits.push(strip_coffee(&i18n.tr("lite.cacheCold")).to_owned());
-                }
-                CacheWarmth::Unknown => {}
-            }
-            ui.label(
-                RichText::new(where_bits.join(" · "))
-                    .font(FontId::new(10.0, FontFamily::Monospace))
-                    .color(FAINT),
-            );
-
-            // What line
-            let what = if state.streamer_mode {
-                i18n.tr("station.streamerRedacted")
-            } else if is_wait {
-                i18n.tr("panel.status.wait")
-            } else if is_work {
-                sess.tool
-                    .as_deref()
-                    .map(|t| clip_chars(t, 44))
-                    .unwrap_or_else(|| i18n.tr("panel.status.work"))
-            } else if !sess.last_reply.is_empty() {
-                clip_chars(&sess.last_reply, 48)
-            } else {
-                i18n.tr("panel.status.rest")
-            };
-            ui.label(RichText::new(what).size(11.0).color(if is_wait { AMBER } else { MUTED }));
-
-            if is_work && !sess.subagents.is_empty() {
                 ui.label(
-                    RichText::new(i18n.tr_count("panel.subs", sess.subagents.len()))
-                        .size(10.0)
-                        .color(BLUE),
+                    RichText::new(where_bits.join(" · "))
+                        .font(FontId::new(10.0, FontFamily::Monospace))
+                        .color(FAINT),
                 );
-            }
 
-            // Quick prompt steer composer when this card is expanded
+                // What line
+                let what = if state.streamer_mode {
+                    i18n.tr("station.streamerRedacted")
+                } else if is_wait {
+                    i18n.tr("panel.status.wait")
+                } else if is_work {
+                    sess.tool
+                        .as_deref()
+                        .map(|t| clip_chars(t, 44))
+                        .unwrap_or_else(|| i18n.tr("panel.status.work"))
+                } else if !sess.last_reply.is_empty() {
+                    clip_chars(&sess.last_reply, 48)
+                } else {
+                    i18n.tr("panel.status.rest")
+                };
+                ui.label(
+                    RichText::new(what)
+                        .size(11.0)
+                        .color(if is_wait { AMBER } else { MUTED }),
+                );
+
+                if is_work && !sess.subagents.is_empty() {
+                    ui.label(
+                        RichText::new(i18n.tr_count("panel.subs", sess.subagents.len()))
+                            .size(10.0)
+                            .color(BLUE),
+                    );
+                }
+            });
+            let h_click = header.response.interact(Sense::click());
+            header_hovered = h_click.hovered();
+            header_clicked = h_click.clicked();
+
+            // Quick prompt steer composer when this card is expanded (outside `h_click`!)
             if steer_open {
                 ui.add_space(5.0);
                 ui.horizontal(|ui| {
@@ -619,8 +726,7 @@ fn draw_compact_session_card(
             }
         });
 
-    let click = card.response.interact(Sense::click());
-    if click.hovered() && !selected {
+    if header_hovered && !selected {
         ui.painter().rect_stroke(
             card.response.rect,
             CornerRadius::same(9),
@@ -628,7 +734,7 @@ fn draw_compact_session_card(
             StrokeKind::Inside,
         );
     }
-    if click.clicked() {
+    if header_clicked {
         state.selected_session = Some(sess.id.clone());
         state.panel_steer_session = if steer_open {
             None
@@ -848,5 +954,247 @@ mod tests {
             },
         );
         assert!(state.pending_perms.is_empty(), "Y must approve pending perm");
+    }
+
+    fn panel_pointer_click(pos: egui::Pos2) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Modifiers::NONE,
+            },
+        ]
+    }
+
+    fn find_text_in_shape(shape: &egui::Shape, needle: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Text(ts) => {
+                let normalized = ts.galley.text().replace('\n', " ");
+                if normalized.contains(needle) {
+                    let rect = Rect::from_min_size(ts.pos, ts.galley.size());
+                    return Some(rect.center());
+                }
+                None
+            }
+            egui::Shape::Vec(list) => list.iter().find_map(|s| find_text_in_shape(s, needle)),
+            _ => None,
+        }
+    }
+
+    fn panel_find_text_center(
+        shapes: &[egui::epaint::ClippedShape],
+        needle: &str,
+    ) -> Option<egui::Pos2> {
+        shapes
+            .iter()
+            .find_map(|clipped| find_text_in_shape(&clipped.shape, needle))
+    }
+
+    #[test]
+    fn pointer_clicking_steer_input_and_send_works_without_closing_composer() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 640.0));
+
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.view_mode = ViewMode::PanelCompact;
+        state.pending_perms.clear();
+        state.panel_steer_session = Some("sess-claude-1".to_owned());
+
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+        let raw0 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw0.clone(), |_| {});
+        let out1 = ctx.run(raw0.clone(), |ctx| {
+            render_compact_panel_window(ctx, &mut state, &i18n);
+        });
+        let input_pos = panel_find_text_center(&out1.shapes, "Your note")
+            .expect("expected steer TextEdit placeholder in compact panel");
+
+        // 1. Clicking steer TextEdit must focus it AND keep composer open
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: panel_pointer_click(input_pos),
+                ..Default::default()
+            },
+            |ctx| {
+                render_compact_panel_window(ctx, &mut state, &i18n);
+            },
+        );
+        assert_eq!(
+            state.panel_steer_session.as_deref(),
+            Some("sess-claude-1"),
+            "clicking steer TextEdit must NOT toggle/close panel_steer_session"
+        );
+        assert!(
+            ctx.wants_keyboard_input(),
+            "clicking steer TextEdit must focus the text input"
+        );
+
+        // 2. Clicking Send must emit SendPrompt and keep composer open
+        state.panel_steer_draft = "Focus on tests".to_owned();
+        let out2 = ctx.run(raw0, |ctx| {
+            render_compact_panel_window(ctx, &mut state, &i18n);
+        });
+        let send_pos = panel_find_text_center(&out2.shapes, "Send")
+            .expect("expected Send button in steer composer");
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: panel_pointer_click(send_pos),
+                ..Default::default()
+            },
+            |ctx| {
+                render_compact_panel_window(ctx, &mut state, &i18n);
+            },
+        );
+        assert_eq!(
+            state.panel_steer_session.as_deref(),
+            Some("sess-claude-1"),
+            "clicking Send must NOT close composer via stolen card click"
+        );
+        assert!(state.panel_steer_draft.is_empty());
+        let actions = state.drain_actions();
+        assert!(matches!(
+            actions.as_slice(),
+            [UiAction::SendPrompt { session_id, text }]
+                if session_id == "sess-claude-1" && text == "Focus on tests"
+        ));
+    }
+
+    #[test]
+    fn escape_inside_panel_search_clears_query_and_surrenders_focus() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 640.0));
+
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.view_mode = ViewMode::PanelCompact;
+        state.lite_search = "claude".to_owned();
+        state.lite_focus_search_req = true;
+
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+        let raw0 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw0.clone(), |_| {});
+        let _ = ctx.run(raw0, |ctx| {
+            render_compact_panel_window(ctx, &mut state, &i18n);
+        });
+        assert!(ctx.wants_keyboard_input());
+
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::Key {
+                    key: Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ctx| {
+                render_compact_panel_window(ctx, &mut state, &i18n);
+            },
+        );
+        assert!(
+            state.lite_search.is_empty(),
+            "Esc in compact panel search must clear state.lite_search"
+        );
+        assert!(!ctx.wants_keyboard_input());
+    }
+
+    #[test]
+    fn clicking_plan_pill_in_compact_panel_toggles_inline_quota_instead_of_wide_burn_drawer() {
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bundle = crate::fonts::load_font_bundle(&assets).expect("load_font_bundle");
+        let i18n = I18nStore::load_from_assets(&assets, "en");
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(420.0, 640.0));
+
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.view_mode = ViewMode::PanelCompact;
+        state.active_drawer = ActiveDrawer::None;
+        state.panel_quota_open = false;
+
+        let ctx = egui::Context::default();
+        crate::install_egui_fonts(&ctx, &bundle);
+        let raw0 = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let _ = ctx.run(raw0.clone(), |_| {});
+        let _ = ctx.run(raw0.clone(), |ctx| {
+            render_compact_panel_window(ctx, &mut state, &i18n);
+        });
+        let out = ctx.run(raw0, |ctx| {
+            render_compact_panel_window(ctx, &mut state, &i18n);
+        });
+        let plan_pos = panel_find_text_center(&out.shapes, "Claude plan")
+            .expect("expected Claude plan pill in compact panel header");
+
+        let out_after = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: panel_pointer_click(plan_pos),
+                ..Default::default()
+            },
+            |ctx| {
+                render_compact_panel_window(ctx, &mut state, &i18n);
+            },
+        );
+        assert!(
+            state.panel_quota_open,
+            "clicking Plan pill must toggle inline panel_quota_open"
+        );
+        assert_eq!(
+            state.active_drawer,
+            ActiveDrawer::None,
+            "clicking Plan pill in 420px panel must NOT open 360px ActiveDrawer::Burn overlay"
+        );
+        // Next frame renders the inline quota breakdown inside the 420px panel
+        let out_expanded = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                render_compact_panel_window(ctx, &mut state, &i18n);
+            },
+        );
+        let _ = out_after;
+        assert!(
+            panel_find_text_center(&out_expanded.shapes, "CLAUDE PLAN USAGE LIMITS").is_some(),
+            "expanding Plan pill must render inline quota breakdown section"
+        );
     }
 }
