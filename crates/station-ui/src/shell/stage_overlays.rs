@@ -537,7 +537,10 @@ pub fn draw_photo_bar(
     state: &mut UiState,
     i18n: &I18nStore,
 ) {
-    if stage_rect.width() < 260.0 || stage_rect.height() < 120.0 {
+    if state.photo_capture_hide_frames > 0
+        || stage_rect.width() < 260.0
+        || stage_rect.height() < 120.0
+    {
         return;
     }
 
@@ -609,7 +612,9 @@ pub fn draw_photo_bar(
                                             state.night = true;
                                             state.push_action(UiAction::ToggleNight(true));
                                         }
-                                        PhotoTimeMode::Auto => {}
+                                        PhotoTimeMode::Auto => {
+                                            state.push_action(UiAction::SetPhotoTimeAuto);
+                                        }
                                     }
                                 }
                             }
@@ -1105,10 +1110,20 @@ mod tests {
             // 2. Photo mode bar
             state.photo_mode = true;
             let full = Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0));
-            let out_photo = ctx.run(raw, |ctx| {
+            let out_photo = ctx.run(raw.clone(), |ctx| {
                 draw_stage_overlays(ctx, full, &mut state, &i18n);
             });
             assert!(!out_photo.shapes.is_empty(), "photo bar emitted no shapes");
+
+            // 3. While shutter capture hides PhotoBar, zero HUD shapes are emitted over the photo.
+            state.photo_capture_hide_frames = 1;
+            let out_hidden = ctx.run(raw, |ctx| {
+                draw_stage_overlays(ctx, full, &mut state, &i18n);
+            });
+            assert!(
+                out_hidden.shapes.is_empty(),
+                "PhotoBar must hide cleanly on capture frames"
+            );
         }
     }
 }

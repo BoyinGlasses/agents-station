@@ -203,6 +203,25 @@ impl PhotoSize {
             Self::Uhd4k => "3840x2160",
         }
     }
+
+    /// Computes output `(width, height)` preserving source aspect ratio matching `photo.js:83`.
+    pub fn target_dimensions(self, src_w: u32, src_h: u32) -> (u32, u32) {
+        let sw = src_w.max(1);
+        let sh = src_h.max(1);
+        match self {
+            Self::Screen => (sw, sh),
+            Self::Fhd => {
+                let w = 1920_u32;
+                let h = ((w as f64 * sh as f64) / sw as f64).round().max(1.0) as u32;
+                (w, h)
+            }
+            Self::Uhd4k => {
+                let w = 3840_u32;
+                let h = ((w as f64 * sh as f64) / sw as f64).round().max(1.0) as u32;
+                (w, h)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -288,6 +307,7 @@ pub enum UiAction {
     ResetCameraZoom,
     ToggleFullscreenStage,
     SetPhotoMode(bool),
+    SetPhotoTimeAuto,
     CapturePhoto {
         size: PhotoSize,
         show_names: bool,
@@ -377,6 +397,7 @@ pub struct UiState {
     pub photo_show_names: bool,
     pub photo_show_mark: bool,
     pub photo_time_mode: PhotoTimeMode,
+    pub photo_capture_hide_frames: u8,
     pub clip_shape: ClipShape,
     pub clip_music: bool,
     pub replay_active: bool,
@@ -466,6 +487,7 @@ impl UiState {
             photo_show_names: true,
             photo_show_mark: true,
             photo_time_mode: PhotoTimeMode::Auto,
+            photo_capture_hide_frames: 0,
             clip_shape: ClipShape::Square,
             clip_music: true,
             replay_active: false,
@@ -732,6 +754,7 @@ impl UiState {
             photo_show_names: true,
             photo_show_mark: true,
             photo_time_mode: PhotoTimeMode::Auto,
+            photo_capture_hide_frames: 0,
             clip_shape: ClipShape::Square,
             clip_music: true,
             replay_active: false,
