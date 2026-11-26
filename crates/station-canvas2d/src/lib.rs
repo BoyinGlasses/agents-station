@@ -4,6 +4,7 @@ pub mod canvas;
 pub mod office_surfaces;
 pub mod street_surfaces;
 pub mod text;
+pub mod tv_games;
 pub mod wrapped_card;
 
 pub use boards_and_social::{
@@ -14,6 +15,10 @@ pub use canvas::{Canvas2d, RgbaSurface, hex, hex_rgba};
 pub use office_surfaces::{ALL_SCREEN_KINDS, ScreenKind, TvStatsInput};
 pub use street_surfaces::{SignalColor, draw_qr_block, render_qr_rgba};
 pub use text::{FontEngine, TextAlign};
+pub use tv_games::{
+    ARCADE_BUF_LEN, ARCADE_H, ARCADE_W, ArcadeScreenSim, PadInput, TV_BUF_LEN, TV_H, TV_W,
+    TvGameKind, TvGamesSim,
+};
 pub use wrapped_card::{
     PhotoNameTag, WRAPPED_HEIGHT, WRAPPED_WIDTH, WrappedCardInput, draw_wrapped_card,
     encode_rgba_to_png, encode_wrapped_png, paint_photo_overlays,
