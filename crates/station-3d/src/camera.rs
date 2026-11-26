@@ -1,8 +1,17 @@
-use crate::layout::LayoutSpec;
+use crate::layout::{LayoutSpec, OfficeLayout};
 use crate::palette::WorldEntity;
 use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CameraPreset {
+    #[default]
+    Home,
+    Desks,
+    Meeting,
+    Server,
+}
 
 #[derive(Component)]
 pub struct MainOfficeCamera;
@@ -31,8 +40,10 @@ pub struct CameraRig {
     pub pitch: f32,
     pub distance: f32,
     pub viewport_height: f32,
+    pub base_viewport_height: f32,
     pub min_height: f32,
     pub max_height: f32,
+    pub active_preset: CameraPreset,
     pub first_person: bool,
     pub fp_pos: Vec3,
     pub fp_yaw: f32,
@@ -50,11 +61,80 @@ impl CameraRig {
             pitch,
             distance: dist,
             viewport_height: spec.viewport_height,
+            base_viewport_height: spec.viewport_height,
             min_height: 5.5,
             max_height: if spec.layout.is_hq() { 38.0 } else { 28.0 },
+            active_preset: CameraPreset::Home,
             first_person: false,
             fp_pos: Vec3::new(spec.home.x, 1.65, spec.home.z + 3.0),
             fp_yaw: 0.0,
+        }
+    }
+
+    pub fn zoom_pct(&self) -> u32 {
+        if self.viewport_height <= 0.0 || self.base_viewport_height <= 0.0 {
+            return 100;
+        }
+        ((self.base_viewport_height / self.viewport_height) * 100.0)
+            .round()
+            .clamp(25.0, 500.0) as u32
+    }
+
+    /// Applies an office camera preset matching `my-station/src/office/ui/camera-bar.js:25-27`.
+    pub fn apply_preset(&mut self, preset: CameraPreset, layout: OfficeLayout) {
+        let (target, zoom_factor) = match (layout, preset) {
+            (OfficeLayout::Hq, CameraPreset::Home) => (Vec3::new(3.0, 0.3, 9.0), 1.0_f32),
+            (OfficeLayout::Hq, CameraPreset::Desks) => (Vec3::new(3.0, 0.6, 18.2), 1.6),
+            (OfficeLayout::Hq, CameraPreset::Meeting) => (Vec3::new(-1.2, 0.6, -5.4), 2.8),
+            (OfficeLayout::Hq, CameraPreset::Server) => (Vec3::new(-5.6, 1.0, -0.6), 3.3),
+            (OfficeLayout::Pro, CameraPreset::Home) => (Vec3::new(3.0, 0.3, 0.7), 1.0),
+            (OfficeLayout::Pro, CameraPreset::Desks) => (Vec3::new(2.3, 0.6, 3.6), 1.9),
+            (OfficeLayout::Pro, CameraPreset::Meeting) => (Vec3::new(-1.2, 0.6, -5.4), 2.0),
+            (OfficeLayout::Pro, CameraPreset::Server) => (Vec3::new(-5.6, 1.0, -0.6), 2.4),
+            (OfficeLayout::Cozy, CameraPreset::Home) => (Vec3::new(0.0, 0.3, 0.2), 1.0),
+            (OfficeLayout::Cozy, CameraPreset::Desks) => (Vec3::new(0.0, 0.6, 0.4), 1.75),
+            (OfficeLayout::Cozy, CameraPreset::Meeting) => (Vec3::new(5.2, 0.6, 2.4), 2.3),
+            (OfficeLayout::Cozy, CameraPreset::Server) => (Vec3::new(5.4, 1.0, -4.4), 2.2),
+        };
+        self.target = target;
+        self.viewport_height = (self.base_viewport_height / zoom_factor)
+            .clamp(self.min_height, self.max_height);
+        self.first_person = false;
+        self.active_preset = preset;
+    }
+
+    /// Zooms by `factor` (`> 1.0` zooms in, `< 1.0` zooms out), clamped inside `[min_height, max_height]`.
+    pub fn zoom_by(&mut self, factor: f32) {
+        if !factor.is_finite() || factor <= 0.0 {
+            return;
+        }
+        self.viewport_height =
+            (self.viewport_height / factor).clamp(self.min_height, self.max_height);
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.viewport_height = self
+            .base_viewport_height
+            .clamp(self.min_height, self.max_height);
+    }
+
+    pub fn projection(&self) -> Projection {
+        if self.first_person {
+            Projection::Perspective(PerspectiveProjection {
+                fov: 70.0_f32.to_radians(),
+                near: 0.05,
+                far: 240.0,
+                ..default()
+            })
+        } else {
+            Projection::Orthographic(OrthographicProjection {
+                scaling_mode: ScalingMode::FixedVertical {
+                    viewport_height: self.viewport_height,
+                },
+                near: -80.0,
+                far: 180.0,
+                ..OrthographicProjection::default_3d()
+            })
         }
     }
 
@@ -136,23 +216,10 @@ pub fn camera_control_system(
 
     if !block_keyboard && keys.just_pressed(KeyCode::KeyF) {
         rig.first_person = !rig.first_person;
-        if rig.first_person {
-            *proj = Projection::Perspective(PerspectiveProjection {
-                fov: 70.0_f32.to_radians(),
-                near: 0.05,
-                far: 240.0,
-                ..default()
-            });
-        } else {
-            *proj = Projection::Orthographic(OrthographicProjection {
-                scaling_mode: ScalingMode::FixedVertical {
-                    viewport_height: rig.viewport_height,
-                },
-                near: -80.0,
-                far: 180.0,
-                ..OrthographicProjection::default_3d()
-            });
-        }
+        *proj = rig.projection();
+    } else if !block_keyboard && rig.first_person && keys.just_pressed(KeyCode::Escape) {
+        rig.first_person = false;
+        *proj = rig.projection();
     }
 
     let mut delta = Vec2::ZERO;
@@ -313,5 +380,40 @@ mod tests {
             .press(KeyCode::KeyF);
         app.update();
         assert!(app.world().resource::<CameraRig>().first_person);
+
+        // 4. Esc exits first-person mode cleanly.
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .reset_all();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::Escape);
+        app.update();
+        assert!(!app.world().resource::<CameraRig>().first_person);
+    }
+
+    #[test]
+    fn camera_presets_and_zoom_update_target_and_percentage_cleanly() {
+        let spec = LayoutSpec::for_layout(OfficeLayout::Pro);
+        let mut rig = CameraRig::from_layout(&spec);
+        assert_eq!(rig.zoom_pct(), 100);
+        assert_eq!(rig.active_preset, CameraPreset::Home);
+
+        rig.first_person = true;
+        rig.apply_preset(CameraPreset::Server, OfficeLayout::Pro);
+        assert!(!rig.first_person);
+        assert_eq!(rig.active_preset, CameraPreset::Server);
+        assert!((rig.target - Vec3::new(-5.6, 1.0, -0.6)).length() < 1e-4);
+        assert!(rig.zoom_pct() >= 200);
+
+        rig.apply_preset(CameraPreset::Home, OfficeLayout::Pro);
+        assert_eq!(rig.zoom_pct(), 100);
+
+        rig.zoom_by(1.2);
+        assert!(rig.zoom_pct() > 110);
+        rig.reset_zoom();
+        assert_eq!(rig.zoom_pct(), 100);
+        rig.zoom_by(0.8);
+        assert!(rig.zoom_pct() < 90);
     }
 }

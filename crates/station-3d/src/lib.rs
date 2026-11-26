@@ -19,7 +19,7 @@ pub mod rooms;
 use bevy::prelude::*;
 pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
-pub use camera::{CameraControlSet, Lite2dCamera, UiInputCapture};
+pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
 pub use chibi::ChibiLook;
 pub use desks::DeskScreen;
 pub use interact::WorkerSelected;
