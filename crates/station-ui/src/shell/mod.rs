@@ -1,4 +1,5 @@
 pub mod activity_panel;
+pub mod camera_toolbar;
 pub mod session_rail;
 pub mod topbar;
 
