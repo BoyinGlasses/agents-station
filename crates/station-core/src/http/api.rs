@@ -1871,8 +1871,18 @@ pub async fn post_pin_update(
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
-    let pin = body.get("pin").and_then(Value::as_str).unwrap_or("");
-    let valid = !crate::auth::pin_weak(pin);
+    let raw_pin = body
+        .get("pin")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if raw_pin.is_empty() && body.get("pin").is_none() {
+        return match state.auth.regenerate_pin() {
+            Ok(pin) => Ok(Json(json!({ "ok": true, "pin": pin }))),
+            Err(_) => Ok(Json(json!({ "ok": false, "pin": state.auth.current_pin() }))),
+        };
+    }
+    let valid = !crate::auth::pin_weak(raw_pin);
     let ip = if via_tunnel {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     } else {
@@ -1887,7 +1897,7 @@ pub async fn post_pin_update(
         limiter.check_and_record(ip, now_ms(), valid)?;
     }
     let ok = if valid {
-        state.auth.set_pin(pin).unwrap_or(false)
+        state.auth.set_pin(raw_pin).unwrap_or(false)
     } else {
         false
     };
@@ -2256,6 +2266,48 @@ pub async fn post_push(
         now_ms(),
     );
     Ok(Json(json!({ "ok": ok, "count": push.count() })))
+}
+
+pub async fn post_push_test(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+    enforce_same_origin_post_with_transport(
+        &headers,
+        state.allowed_tunnel_host().as_deref(),
+        via_tunnel,
+    )?;
+    let _ = require_auth(&state, peer, via_tunnel, &headers, &q)?;
+    let msg = crate::store::push::PushMessage {
+        title: "Agents Station".to_owned(),
+        body: "Test notification from Agents Station".to_owned(),
+        tag: Some("station-test".to_owned()),
+        url: "/phone".to_owned(),
+        urgent: false,
+    };
+    let deliveries = state
+        .push
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .prepare_deliveries(&msg, now_ms() / 1000);
+    let sent = deliveries.len();
+    if !deliveries.is_empty() {
+        let state_bg = Arc::clone(&state);
+        tokio::spawn(async move {
+            let dead = crate::store::push::deliver_prepared(deliveries).await;
+            if !dead.is_empty()
+                && let Ok(mut push) = state_bg.push.lock()
+            {
+                for ep in dead {
+                    push.remove(&ep);
+                }
+            }
+        });
+    }
+    Ok(Json(json!({ "ok": true, "sent": sent })))
 }
 
 pub async fn post_prompt_rewrite(
@@ -2681,11 +2733,25 @@ pub async fn get_accounts(
     if !local {
         return Err(StatusCode::FORBIDDEN);
     }
-    let view = state
+    let mut view = state
         .claude_accounts
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .view();
+    let codex_view = state
+        .codex_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    let ag_view = state
+        .ag_accounts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .view();
+    if let Some(obj) = view.as_object_mut() {
+        obj.insert("codex".to_owned(), codex_view);
+        obj.insert("ag".to_owned(), ag_view);
+    }
     Ok(Json(view))
 }
 
@@ -2737,8 +2803,18 @@ fn is_valid_tunnel_hostname(host: &str) -> bool {
     })
 }
 
+/// Best-effort private RFC-1918 LAN IPv4 detection via OS routing table (zero network packets sent).
+pub fn detect_private_lan_ipv4() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(v4) if v4.is_private() => Some(v4.to_string()),
+        _ => None,
+    }
+}
+
 fn tunnel_status_json(state: &AppState) -> Value {
-    let (on, domain, tasks, rc) = {
+    let (on, domain, tasks, rc, lan_on, phone_approve) = {
         let prefs = state.prefs.lock().unwrap_or_else(|e| e.into_inner());
         let on = prefs
             .get("tunnel")
@@ -2757,7 +2833,15 @@ fn tunnel_status_json(state: &AppState) -> Value {
             .get("rcAtStartup")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        (on, domain, tasks, rc)
+        let lan_on = prefs
+            .get("lan")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let phone_approve = prefs
+            .get("phoneApprove")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        (on, domain, tasks, rc, lan_on, phone_approve)
     };
     let bg = state
         .tasks
@@ -2766,6 +2850,7 @@ fn tunnel_status_json(state: &AppState) -> Value {
         .bg_probe()
         .clone();
     let snap = state.tunnel.snapshot();
+    let lan_ip = detect_private_lan_ipv4();
     json!({
         "ok": true,
         "on": on,
@@ -2781,6 +2866,9 @@ fn tunnel_status_json(state: &AppState) -> Value {
         "rc": rc,
         "tasks": tasks,
         "bg": bg,
+        "lanOn": lan_on,
+        "phoneApprove": phone_approve,
+        "lanIp": lan_ip,
     })
 }
 
@@ -5243,5 +5331,97 @@ mod tests {
             state.tasks.lock().unwrap().get(&task_id).is_none(),
             "task must be stopped when targeted by session_id"
         );
+    }
+
+    #[tokio::test]
+    async fn phone_accounts_and_push_test_endpoints_support_full_drawer_contracts() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let app = build_router(state.clone());
+
+        // 1. POST /api/pin {} regenerates a fresh valid non-weak PIN
+        let pin_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pin")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pin_resp.status(), StatusCode::OK);
+        let pin_body: Value =
+            serde_json::from_slice(&to_bytes(pin_resp.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(pin_body["ok"], true, "empty POST /api/pin must regenerate PIN");
+        let new_pin = pin_body["pin"].as_str().unwrap_or("");
+        assert!(!crate::auth::pin_weak(new_pin), "regenerated PIN must not be weak: {new_pin}");
+
+        // 2. POST /api/push/test returns 200 OK with { ok: true, sent: 0 }
+        let push_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/push/test")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(push_resp.status(), StatusCode::OK);
+        let push_body: Value =
+            serde_json::from_slice(&to_bytes(push_resp.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(push_body["ok"], true);
+        assert_eq!(push_body["sent"], 0);
+
+        // 3. GET /api/accounts includes codex & ag views alongside Claude accounts
+        let acct_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/accounts")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(acct_resp.status(), StatusCode::OK);
+        let acct_body: Value =
+            serde_json::from_slice(&to_bytes(acct_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert!(acct_body.get("accounts").is_some());
+        assert!(acct_body.get("codex").is_some(), "/api/accounts missing `codex`");
+        assert!(acct_body.get("ag").is_some(), "/api/accounts missing `ag`");
+
+        // 4. GET /api/tunnel includes lanOn, phoneApprove, lanIp
+        let tun_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tunnel")
+                    .header("host", "127.0.0.1:4310")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tun_resp.status(), StatusCode::OK);
+        let tun_body: Value =
+            serde_json::from_slice(&to_bytes(tun_resp.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert!(tun_body.get("lanOn").is_some(), "/api/tunnel missing `lanOn`");
+        assert!(tun_body.get("phoneApprove").is_some(), "/api/tunnel missing `phoneApprove`");
+        assert!(tun_body.get("lanIp").is_some(), "/api/tunnel missing `lanIp`");
     }
 }

@@ -159,6 +159,22 @@ impl AuthStore {
         Ok(true)
     }
 
+    pub fn regenerate_pin(&self) -> Result<String> {
+        let prev = self.current_pin();
+        let mut rng = rand::rng();
+        for _ in 0..64 {
+            let n: u32 = rng.random_range(0..1_000_000);
+            let pin = format!("{n:06}");
+            if !pin_weak(&pin) && pin != prev {
+                write_bytes_atomic(&self.pin_file, pin.as_bytes())?;
+                return Ok(pin);
+            }
+        }
+        let fallback = "492817".to_owned();
+        write_bytes_atomic(&self.pin_file, fallback.as_bytes())?;
+        Ok(fallback)
+    }
+
     fn sign(&self, exp_ms: u64, kind: &str, pin: &str) -> String {
         let mut mac =
             HmacSha256::new_from_slice(self.token.as_bytes()).expect("HMAC accepts any key size");

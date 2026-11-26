@@ -278,6 +278,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/quick", get(api::get_quick).post(api::post_quick))
         .route("/api/claude-version", get(api::get_claude_version))
         .route("/api/push", get(api::get_push).post(api::post_push))
+        .route("/api/push/test", post(api::post_push_test))
         .route("/api/image", get(api::get_image))
         .route("/api/macapprove", get(api::get_macapprove).post(api::post_macapprove))
         .route("/api/tunnel", get(api::get_tunnel_status).post(api::post_tunnel_toggle))
