@@ -16,7 +16,7 @@ pub use street_surfaces::SignalColor;
 pub use text::{FontEngine, TextAlign};
 pub use wrapped_card::{
     PhotoNameTag, WRAPPED_HEIGHT, WRAPPED_WIDTH, WrappedCardInput, draw_wrapped_card,
-    encode_wrapped_png, paint_photo_overlays,
+    encode_rgba_to_png, encode_wrapped_png, paint_photo_overlays,
 };
 
 pub fn canvas2d_ready() -> bool {

@@ -218,9 +218,8 @@ pub fn draw_wrapped_card(input: &WrappedCardInput, fonts: &mut FontEngine) -> Rg
     c.into_surface()
 }
 
-/// Encodes the 1080x1350 Wrapped card directly to PNG bytes and drops the pixel buffer immediately.
-pub fn encode_wrapped_png(input: &WrappedCardInput, fonts: &mut FontEngine) -> Result<Vec<u8>> {
-    let surf = draw_wrapped_card(input, fonts);
+/// Encodes a straight RGBA8 surface directly to PNG bytes.
+pub fn encode_rgba_to_png(surf: &RgbaSurface) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(256 * 1024);
     let enc = PngEncoder::new(&mut out);
     enc.write_image(
@@ -230,6 +229,13 @@ pub fn encode_wrapped_png(input: &WrappedCardInput, fonts: &mut FontEngine) -> R
         image::ExtendedColorType::Rgba8,
     )
     .context("encode wrapped PNG")?;
+    Ok(out)
+}
+
+/// Encodes the 1080x1350 Wrapped card directly to PNG bytes and drops the pixel buffer immediately.
+pub fn encode_wrapped_png(input: &WrappedCardInput, fonts: &mut FontEngine) -> Result<Vec<u8>> {
+    let surf = draw_wrapped_card(input, fonts);
+    let out = encode_rgba_to_png(&surf)?;
     drop(surf);
     Ok(out)
 }
