@@ -35,6 +35,11 @@ pub fn redact(input: &str) -> String {
     out
 }
 
+pub const TOOL_INPUT_WIRE_MAX_STR_CHARS: usize = 16_000;
+const MAX_JSON_ARRAY_ITEMS: usize = 64;
+const MAX_JSON_OBJECT_KEYS: usize = 64;
+const MAX_JSON_DEPTH: usize = 8;
+
 pub fn redact_json_value(v: &Value) -> Value {
     match v {
         Value::String(s) => Value::String(redact(s)),
@@ -46,6 +51,54 @@ pub fn redact_json_value(v: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+fn clip_chars(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let mut iter = s.chars();
+    let head: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        let mut trimmed: String = head.chars().take(max_chars.saturating_sub(1)).collect();
+        trimmed.push('…');
+        trimmed
+    } else {
+        head
+    }
+}
+
+fn redact_and_clip_inner(v: &Value, max_str_chars: usize, depth: usize) -> Value {
+    if depth >= MAX_JSON_DEPTH {
+        return Value::String("…".to_owned());
+    }
+    match v {
+        Value::String(s) => Value::String(clip_chars(&redact(s), max_str_chars)),
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .take(MAX_JSON_ARRAY_ITEMS)
+                .map(|item| redact_and_clip_inner(item, max_str_chars, depth + 1))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .take(MAX_JSON_OBJECT_KEYS)
+                .map(|(k, val)| {
+                    (
+                        k.clone(),
+                        redact_and_clip_inner(val, max_str_chars, depth + 1),
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Recursively redacts secrets and bounds string lengths / container fan-out so wire snapshots
+/// and UI state cannot leak credentials or exceed SSE line budgets.
+pub fn redact_and_clip_json_value(v: &Value, max_str_chars: usize) -> Value {
+    redact_and_clip_inner(v, max_str_chars, 0)
 }
 
 #[cfg(test)]
@@ -96,5 +149,24 @@ mod tests {
         assert!(!s.contains("ghp_1234567890abcdef"));
         assert!(!s.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(s.contains("plain"));
+    }
+
+    #[test]
+    fn redact_and_clip_json_value_masks_secrets_and_caps_huge_strings() {
+        let huge = format!(
+            "plan header {} {}",
+            "plan step line\n".repeat(200),
+            "sk-ant-api03-secret9999"
+        );
+        let raw = serde_json::json!({
+            "plan": huge,
+            "nested": { "token": "ghp_1234567890abcdef" }
+        });
+        let safe = redact_and_clip_json_value(&raw, 1024);
+        let plan_str = safe["plan"].as_str().expect("plan string");
+        assert!(plan_str.chars().count() <= 1024);
+        assert!(plan_str.ends_with('…'));
+        assert!(!safe.to_string().contains("sk-ant-api03-secret9999"));
+        assert!(!safe.to_string().contains("ghp_1234567890abcdef"));
     }
 }

@@ -332,10 +332,27 @@ pub struct OfficeState {
     tx: broadcast::Sender<Value>,
 }
 
-fn perm_wire_json(perm: &PendingPerm, tool_input: Option<&Value>) -> Value {
+fn perm_wire_json(perm: &PendingPerm, tool_input: Option<&Value>, meta: Option<&Value>) -> Value {
     let mut val = json!(perm);
-    if let (Some(obj), Some(ti)) = (val.as_object_mut(), tool_input) {
-        obj.insert("tool_input".to_owned(), crate::redact::redact_json_value(ti));
+    if let Some(obj) = val.as_object_mut() {
+        if let Some(ti) = tool_input {
+            obj.insert(
+                "tool_input".to_owned(),
+                crate::redact::redact_and_clip_json_value(
+                    ti,
+                    crate::redact::TOOL_INPUT_WIRE_MAX_STR_CHARS,
+                ),
+            );
+        }
+        if let Some(m) = meta {
+            obj.insert(
+                "meta".to_owned(),
+                crate::redact::redact_and_clip_json_value(
+                    m,
+                    crate::redact::TOOL_INPUT_WIRE_MAX_STR_CHARS,
+                ),
+            );
+        }
     }
     val
 }
@@ -408,7 +425,12 @@ impl OfficeState {
     ) {
         let id = perm.id.clone();
         let sess_id = perm.sess.clone();
-        let wire_perm = perm_wire_json(&perm, tool_input.as_ref());
+        let deny_meta = if perm.kind == "denied" {
+            self.chat.by_id(&id).and_then(|m| m.deny.as_ref())
+        } else {
+            None
+        };
+        let wire_perm = perm_wire_json(&perm, tool_input.as_ref(), deny_meta);
         let entry = HoldEntry {
             tx,
             kind: perm.kind.clone(),
@@ -817,7 +839,31 @@ impl OfficeState {
         let perms: Vec<Value> = self
             .pending_perms
             .values()
-            .map(|p| perm_wire_json(p, self.hold_tool_input(&p.id)))
+            .map(|p| {
+                let meta = if p.kind == "denied" {
+                    self.chat.by_id(&p.id).and_then(|m| m.deny.as_ref())
+                } else {
+                    None
+                };
+                perm_wire_json(p, self.hold_tool_input(&p.id), meta)
+            })
+            .collect();
+        let stuck: Vec<Value> = self
+            .sessions
+            .values()
+            .filter_map(|s| {
+                let st = self.loops.stuck_of(&s.id)?;
+                Some(json!({
+                    "id": format!("stuck:{}", s.id),
+                    "sess": s.id,
+                    "name": s.name,
+                    "kind": st.kind,
+                    "label": st.label,
+                    "n": st.n,
+                    "mins": st.mins,
+                    "usd": st.usd,
+                }))
+            })
             .collect();
         let feed: Vec<&FeedItem> = self.feed.iter().collect();
         json!({
@@ -827,6 +873,7 @@ impl OfficeState {
             "local": local,
             "sessions": sessions,
             "perms": perms,
+            "stuck": stuck,
             "feed": feed,
             "stats": self.stats,
             "todos": self.todos,
@@ -1202,5 +1249,111 @@ mod tests {
             }
         }
         assert!(saw_work_sess, "cancel_hold must broadcast updated sess status=work");
+    }
+
+    #[test]
+    fn snapshot_json_redacts_clips_tool_input_attaches_denied_meta_and_stuck_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = OfficeState::new(dir.path().to_path_buf());
+        let ts = now_ms();
+        st.ingest_raw_event(json!({
+            "session_id": "s-wire",
+            "hook_event_name": "UserPromptSubmit",
+            "cwd": "D:/repo/app",
+            "prompt": "work"
+        }))
+        .unwrap();
+
+        // Trigger a stuck repeat loop on s-wire (3 identical failures + next PreToolUse retry)
+        for i in 0..3 {
+            st.loops.on_event(
+                &json!({
+                    "session_id": "s-wire",
+                    "hook_event_name": "PostToolUseFailure",
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "cargo test" },
+                    "error": "exit 101"
+                }),
+                ts + i * 1000,
+            );
+        }
+        let _ = st.loops.check(
+            &json!({
+                "session_id": "s-wire",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": { "command": "cargo test" }
+            }),
+            ts + 4000,
+        );
+
+        // Register a plan hold with secret + huge plan (> 16k chars)
+        let (tx_plan, _rx_plan) = oneshot::channel();
+        let huge_plan = format!(
+            "secret sk-ant-api03-leak123456 {}",
+            "step item details\n".repeat(1200)
+        );
+        st.register_hold_with_input(
+            PendingPerm {
+                id: "plan-wire".into(),
+                sess: "s-wire".into(),
+                name: "app".into(),
+                kind: "plan".into(),
+                tool_type: "plan".into(),
+                label: "Plan".into(),
+                detail: "Plan".into(),
+                danger: None,
+                created_at: ts,
+            },
+            tx_plan,
+            Some(json!({ "plan": huge_plan })),
+        );
+
+        // Register a denied hold with matching deny chat card containing reason
+        let card = st.chat.deny_card(
+            "s-wire",
+            "app",
+            json!({ "reason": "Protected branch", "state": "held" }),
+            ts,
+        );
+        let (tx_den, _rx_den) = oneshot::channel();
+        st.register_hold(
+            PendingPerm {
+                id: card.id.clone(),
+                sess: "s-wire".into(),
+                name: "app".into(),
+                kind: "denied".into(),
+                tool_type: "bash".into(),
+                label: "git push".into(),
+                detail: "git push".into(),
+                danger: None,
+                created_at: ts,
+            },
+            tx_den,
+        );
+
+        let snap = st.snapshot_json(true, "en");
+        let perms = snap["perms"].as_array().unwrap();
+
+        let plan_p = perms.iter().find(|p| p["id"] == "plan-wire").unwrap();
+        let plan_str = plan_p["tool_input"]["plan"].as_str().unwrap();
+        assert!(!plan_str.contains("sk-ant-api03-leak123456"));
+        assert!(plan_str.chars().count() <= crate::redact::TOOL_INPUT_WIRE_MAX_STR_CHARS);
+        // Raw HoldEntry.tool_input must remain unclipped for hook decision round-trip
+        assert!(
+            st.hold_tool_input("plan-wire").unwrap()["plan"]
+                .as_str()
+                .unwrap()
+                .len()
+                > 20_000
+        );
+
+        let den_p = perms.iter().find(|p| p["id"] == card.id).unwrap();
+        assert_eq!(den_p["meta"]["reason"], "Protected branch");
+
+        let stuck = snap["stuck"].as_array().unwrap();
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0]["sess"], "s-wire");
+        assert_eq!(stuck[0]["kind"], "repeat");
     }
 }

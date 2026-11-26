@@ -1585,11 +1585,14 @@ pub async fn post_tasks_stop(
     let local = require_auth(&state, peer, via_tunnel, &headers, &q)?;
     require_task_permission(&state, local)?;
     let id = body.get("id").and_then(Value::as_str).unwrap_or("");
-    let ok = state
-        .tasks
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .stop(id);
+    let ok = {
+        let mut tasks = state.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let target = tasks
+            .of_sid(id)
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| id.to_owned());
+        tasks.stop(&target)
+    };
     Ok(Json(json!({ "ok": ok })))
 }
 
@@ -5192,5 +5195,52 @@ mod tests {
         for key in ["auto", "ide", "open", "rules"] {
             assert!(sys.get(key).is_some(), "/api/sys missing `{key}`");
         }
+    }
+
+    #[tokio::test]
+    async fn post_tasks_stop_resolves_running_task_by_session_id() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        let task_id = {
+            let mut tasks = state.tasks.lock().unwrap();
+            let started = tasks.validate_and_register(
+                crate::state::tasks::TaskStartRequest {
+                    dir: dir.path().to_string_lossy().into_owned(),
+                    text: "run task".to_owned(),
+                    agent: "claude".to_owned(),
+                    model: String::new(),
+                    fork: false,
+                },
+                crate::state::sessions::now_ms(),
+            );
+            let tid = started["task"]["id"].as_str().unwrap().to_owned();
+            tasks.bind(&tid, "sess-stop-via-sid", "");
+            tid
+        };
+
+        let app = build_router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/tasks/stop")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "id": "sess-stop-via-sid" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(resp.into_body(), 16 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert!(
+            state.tasks.lock().unwrap().get(&task_id).is_none(),
+            "task must be stopped when targeted by session_id"
+        );
     }
 }
