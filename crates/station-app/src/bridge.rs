@@ -3,9 +3,10 @@ use crate::tray::{TrayState, notify_parent_hold_alert, notify_parent_in_tray};
 use bevy::app::AppExit;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use bevy::render::camera::ScalingMode;
+use bevy::render::camera::{RenderTarget, ScalingMode, Viewport};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::window::PrimaryWindow;
+use bevy_egui::egui;
 use chrono::{Local, TimeZone};
 use serde_json::{Value, json};
 use station_3d::{BackdropAssets, BackdropEntity, SfxKind, WorldEntity, WorldPalette};
@@ -18,7 +19,7 @@ use station_ui::state::{
     BurnSnapshot, ChatMessage, FeedEntry, HarnessDockItem, PendingPermCard, SessionCard,
     SysSnapshot, UiAction, normalize_status,
 };
-use station_ui::{ActiveDrawer, I18nStore, UiState, ViewMode};
+use station_ui::{ActiveDrawer, I18nStore, StageViewportRect, UiState, ViewMode};
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -1400,6 +1401,94 @@ pub struct LiveServerBridgePlugin {
     pub host: String,
     pub port: u16,
     pub start_http: bool,
+}
+
+/// Converts a logical `egui::Rect` into a physical `Viewport` safely clamped within `target_phys`.
+/// Returns `None` when the target or resulting stage rect is smaller than 4x4 physical pixels.
+pub fn compute_camera_viewport(
+    logical: egui::Rect,
+    scale_factor: f32,
+    target_phys: UVec2,
+) -> Option<Viewport> {
+    if target_phys.x < 4 || target_phys.y < 4 {
+        return None;
+    }
+    if !scale_factor.is_finite()
+        || scale_factor <= 0.0
+        || !logical.min.x.is_finite()
+        || !logical.min.y.is_finite()
+        || !logical.max.x.is_finite()
+        || !logical.max.y.is_finite()
+    {
+        return None;
+    }
+    let max_x = target_phys.x as f32;
+    let max_y = target_phys.y as f32;
+    let x0 = (logical.min.x * scale_factor).floor().clamp(0.0, max_x) as u32;
+    let y0 = (logical.min.y * scale_factor).floor().clamp(0.0, max_y) as u32;
+    let x1 = (logical.max.x * scale_factor).ceil().clamp(0.0, max_x) as u32;
+    let y1 = (logical.max.y * scale_factor).ceil().clamp(0.0, max_y) as u32;
+    let w = x1.saturating_sub(x0);
+    let h = y1.saturating_sub(y0);
+    if w < 4 || h < 4 {
+        return None;
+    }
+    Some(Viewport {
+        physical_position: UVec2::new(x0, y0),
+        physical_size: UVec2::new(w, h),
+        ..default()
+    })
+}
+
+/// Synchronizes the main 3D office camera viewport to the central stage rect reported by `station-ui`.
+pub fn sync_camera_viewport_to_stage(
+    stage_rect: Res<StageViewportRect>,
+    windows: Query<&Window>,
+    mut cams: Query<&mut Camera, With<station_3d::camera::MainOfficeCamera>>,
+) {
+    let win = windows.iter().next();
+    for mut cam in &mut cams {
+        let (scale, target_phys) = match &cam.target {
+            RenderTarget::Image(_) => (
+                1.0_f32,
+                cam.physical_target_size().unwrap_or(UVec2::new(1280, 720)),
+            ),
+            _ => match win {
+                Some(w) => (
+                    w.scale_factor(),
+                    UVec2::new(w.physical_width(), w.physical_height()),
+                ),
+                None => match cam.physical_target_size() {
+                    Some(sz) => (1.0_f32, sz),
+                    None => {
+                        cam.is_active = false;
+                        continue;
+                    }
+                },
+            },
+        };
+
+        if target_phys.x < 4 || target_phys.y < 4 {
+            cam.is_active = false;
+            continue;
+        }
+
+        match stage_rect.0 {
+            Some(rect) => match compute_camera_viewport(rect, scale, target_phys) {
+                Some(vp) => {
+                    cam.viewport = Some(vp);
+                    cam.is_active = true;
+                }
+                None => {
+                    cam.is_active = false;
+                }
+            },
+            None => {
+                cam.viewport = None;
+                cam.is_active = true;
+            }
+        }
+    }
 }
 
 impl Plugin for LiveServerBridgePlugin {
@@ -4604,5 +4693,81 @@ mod tests {
         drop(app);
         let _ = handle.shutdown.send(true);
         drop(rt);
+    }
+
+    #[test]
+    fn stage_viewport_clamps_normal_1280x720_and_hidpi_1_5x_and_oob_and_minimized_0x0() {
+        // 1. Normal 1280x720 at 1.0 scale
+        let stage = egui::Rect::from_min_max(egui::pos2(300.0, 56.0), egui::pos2(950.0, 720.0));
+        let vp = compute_camera_viewport(stage, 1.0, UVec2::new(1280, 720))
+            .expect("normal 1280x720 viewport must be Some");
+        assert_eq!(vp.physical_position, UVec2::new(300, 56));
+        assert_eq!(vp.physical_size, UVec2::new(650, 664));
+
+        // 2. HiDPI 1.5x (1280x720 logical -> 1920x1080 physical)
+        let vp_hi = compute_camera_viewport(stage, 1.5, UVec2::new(1920, 1080))
+            .expect("HiDPI 1.5x viewport must be Some");
+        assert_eq!(vp_hi.physical_position, UVec2::new(450, 84));
+        assert_eq!(vp_hi.physical_size, UVec2::new(975, 996));
+        assert!(vp_hi.physical_position.x + vp_hi.physical_size.x <= 1920);
+        assert!(vp_hi.physical_position.y + vp_hi.physical_size.y <= 1080);
+
+        // 3. Out-of-bounds logical rect gets strictly clamped inside physical bounds
+        let oob = egui::Rect::from_min_max(egui::pos2(-40.0, -12.0), egui::pos2(2000.0, 1500.0));
+        let vp_oob = compute_camera_viewport(oob, 1.0, UVec2::new(1280, 720))
+            .expect("clamped OOB viewport must be Some");
+        assert_eq!(vp_oob.physical_position, UVec2::new(0, 0));
+        assert_eq!(vp_oob.physical_size, UVec2::new(1280, 720));
+
+        // 4. Minimized 0x0 window returns None so wgpu never panics
+        assert!(compute_camera_viewport(stage, 1.0, UVec2::new(0, 0)).is_none());
+        // 5. Degenerate < 4px stage rect returns None
+        let tiny = egui::Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(102.0, 102.0));
+        assert!(compute_camera_viewport(tiny, 1.0, UVec2::new(1280, 720)).is_none());
+    }
+
+    #[test]
+    fn sync_camera_viewport_system_updates_camera_and_deactivates_on_minimized_window() {
+        let mut app = App::new();
+        app.insert_resource(StageViewportRect(Some(egui::Rect::from_min_max(
+            egui::pos2(300.0, 56.0),
+            egui::pos2(950.0, 720.0),
+        ))))
+        .add_systems(Update, sync_camera_viewport_to_stage);
+
+        let mut res = bevy::window::WindowResolution::new(1280.0, 720.0)
+            .with_scale_factor_override(1.5);
+        res.set_physical_resolution(1920, 1080);
+        let win_entity = app
+            .world_mut()
+            .spawn(Window {
+                resolution: res,
+                ..default()
+            })
+            .id();
+        let cam_entity = app
+            .world_mut()
+            .spawn((station_3d::camera::MainOfficeCamera, Camera::default()))
+            .id();
+
+        app.update();
+        let cam = app.world().get::<Camera>(cam_entity).unwrap();
+        assert!(cam.is_active);
+        let vp = cam.viewport.as_ref().expect("viewport must be synced");
+        assert_eq!(vp.physical_position, UVec2::new(450, 84));
+        assert_eq!(vp.physical_size, UVec2::new(975, 996));
+
+        // Minimize window to 0x0 -> camera must be deactivated so wgpu never panics
+        app.world_mut()
+            .get_mut::<Window>(win_entity)
+            .unwrap()
+            .resolution
+            .set_physical_resolution(0, 0);
+        app.update();
+        let cam_min = app.world().get::<Camera>(cam_entity).unwrap();
+        assert!(
+            !cam_min.is_active,
+            "camera must deactivate when window physical size is 0x0"
+        );
     }
 }

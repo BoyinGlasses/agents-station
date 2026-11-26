@@ -125,7 +125,13 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     .add_plugins(fps::AdaptiveFpsPlugin { capture_mode })
     .add_plugins(tray::TrayPlugin)
     .insert_resource(bridge::GuiWorkerMode(cli.gui_worker))
-    .add_systems(Update, handle_window_close_requests);
+    .add_systems(Update, handle_window_close_requests)
+    .add_systems(
+        PostUpdate,
+        bridge::sync_camera_viewport_to_stage
+            .after(bevy_egui::EguiPostUpdateSet::EndPass)
+            .run_if(resource_exists::<station_ui::StageViewportRect>),
+    );
 
     let assets_dir = resolve_assets_dir();
     let scene = cli.capture_scene.as_deref();
