@@ -4,6 +4,7 @@ pub mod i18n;
 pub mod icons;
 pub mod labels3d;
 pub mod lite_view;
+pub mod panel_view;
 pub mod shell;
 pub mod state;
 pub mod theme;
@@ -116,9 +117,13 @@ fn draw_full_station_ui(
         ViewMode::Mode3D => {
             stage_viewport.0 = Some(shell::draw_shell(ctx, state, i18n));
         }
-        ViewMode::Lite2D | ViewMode::PanelCompact => {
+        ViewMode::Lite2D => {
+            let _ = shell::draw_shell(ctx, state, i18n);
             stage_viewport.0 = None;
-            lite_view::draw_lite_2d_view(ctx, state, i18n);
+        }
+        ViewMode::PanelCompact => {
+            stage_viewport.0 = None;
+            panel_view::render_compact_panel_window(ctx, state, i18n);
         }
     }
     draw_server_banner(ctx, state, i18n);

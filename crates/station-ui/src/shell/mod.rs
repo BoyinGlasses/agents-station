@@ -6,8 +6,8 @@ pub mod topbar;
 
 use crate::i18n::I18nStore;
 use crate::labels3d::{self, LabelClick};
-use crate::state::{ActiveDrawer, UiAction, UiState};
-use crate::theme::{ACCENT, CARD, MUTED, heading_bold};
+use crate::state::{ActiveDrawer, UiAction, UiState, ViewMode};
+use crate::theme::{ACCENT, BG, CARD, MUTED, heading_bold};
 use bevy_egui::egui::{self, CornerRadius, Margin, Rect, RichText, Stroke, pos2};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -114,8 +114,20 @@ pub fn draw_shell(ctx: &egui::Context, state: &mut UiState, i18n: &I18nStore) ->
         activity_panel::draw_activity_panel(ctx, state, i18n, &layout);
     }
 
-    // Central stage stays transparent so Bevy's cropped 3D camera paints directly inside `stage_rect`.
+    // Central stage: in 2D Lite mode render the grouped 2D Lite board directly inside the center
+    // column while keeping TopBar, SessionRail, and ActivityPanel visible. In 3D mode keep the
+    // stage transparent so Bevy's cropped 3D camera paints inside `stage_rect`.
     let stage_rect = ctx.available_rect();
+
+    if state.view_mode == ViewMode::Lite2D {
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(BG).inner_margin(Margin::symmetric(16, 12)))
+            .show(ctx, |ui| {
+                crate::lite_view::render_lite_stage_center(ui, state, i18n);
+            });
+        draw_stage_toasts(ctx, stage_rect, state);
+        return stage_rect;
+    }
 
     // 3D projected labels render strictly clipped inside `stage_rect` underneath floating HUD bars.
     let (label_clicks, hovered_id) = labels3d::draw_projected_labels(
