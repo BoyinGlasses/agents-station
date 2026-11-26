@@ -1,7 +1,7 @@
 use crate::drawers::markdown::render_markdown;
 use crate::i18n::I18nStore;
 use crate::state::{
-    ActiveDrawer, CacheWarmth, SessionCard, SessionDrawerTab, UiAction, UiState,
+    ActiveDrawer, CacheWarmth, SessionCard, SessionDrawerTab, SessionUndoView, UiAction, UiState,
 };
 use crate::theme::{
     ACCENT, AMBER, BG, BLUE, CARD, CARD_2, CARD_3, FAINT, GREEN, INK, LINE, LINE_2, MUTED, RED,
@@ -68,27 +68,45 @@ pub fn draw_session_drawer(ctx: &egui::Context, state: &mut UiState, i18n: &I18n
         .or_else(|| state.sessions.first())
         .cloned();
 
-    // Auto-trigger log fetch once when switching to a session on Chat tab.
+    // Esc closes the drawer even when no session is selected; `O` opens the selected session window.
+    if !ctx.wants_keyboard_input() {
+        let (pressed_o, pressed_esc) = ctx.input(|inp| {
+            let no_mods = !inp.modifiers.ctrl && !inp.modifiers.command && !inp.modifiers.alt;
+            (
+                no_mods && inp.key_pressed(egui::Key::O),
+                inp.key_pressed(egui::Key::Escape),
+            )
+        });
+        if pressed_esc {
+            state.active_drawer = ActiveDrawer::None;
+            state.undo_armed_session = None;
+            return;
+        }
+        if pressed_o && let Some(sess) = &selected {
+            state.push_action(UiAction::OpenSessionWindow(sess.id.clone()));
+        }
+    }
+
+    // Auto-trigger log fetch and Undo plan fetch when switching sessions.
     if let Some(sess) = &selected {
         if state.session_log_loaded_for.as_deref() != Some(sess.id.as_str()) {
             state.session_log_loaded_for = Some(sess.id.clone());
+            state.undo_armed_session = None;
             state.push_action(UiAction::FetchSessionLog(sess.id.clone()));
         }
-        // Global `O` hotkey opens the session's IDE/terminal window when no text input has focus.
-        if !ctx.wants_keyboard_input() {
-            let (pressed_o, pressed_esc) = ctx.input(|inp| {
-                let no_mods = !inp.modifiers.ctrl && !inp.modifiers.command && !inp.modifiers.alt;
-                (
-                    no_mods && inp.key_pressed(egui::Key::O),
-                    inp.key_pressed(egui::Key::Escape),
-                )
+        if state.session_tab == SessionDrawerTab::Undo
+            && state
+                .session_undo
+                .as_ref()
+                .is_none_or(|u| u.session_id != sess.id)
+        {
+            state.undo_armed_session = None;
+            state.session_undo = Some(SessionUndoView {
+                session_id: sess.id.clone(),
+                loading: true,
+                ..Default::default()
             });
-            if pressed_o {
-                state.push_action(UiAction::OpenSessionWindow(sess.id.clone()));
-            } else if pressed_esc {
-                state.active_drawer = ActiveDrawer::None;
-                return;
-            }
+            state.push_action(UiAction::FetchSessionUndo(sess.id.clone()));
         }
     }
 
@@ -907,56 +925,80 @@ fn draw_undo_tab(
     }
 
     let mut selected_files = Vec::new();
+    let mut selection_changed = false;
     for entry in &mut undo.files {
         let can_undo = entry.is_undoable();
-        egui::Frame::NONE
-            .fill(CARD)
-            .corner_radius(CornerRadius::same(9))
-            .inner_margin(Margin::symmetric(9, 6))
-            .stroke(Stroke::new(1.0_f32, LINE))
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if can_undo {
-                        ui.checkbox(&mut entry.selected, "");
-                    }
-                    ui.label(
-                        RichText::new(file_basename(&entry.file))
-                            .font(FontId::new(11.0, FontFamily::Monospace))
-                            .color(if can_undo { INK } else { MUTED }),
-                    )
-                    .on_hover_text(&entry.file);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let act_col = match entry.action.as_str() {
-                            "restore" => GREEN,
-                            "delete" => AMBER,
-                            _ => MUTED,
-                        };
+        ui.push_id(&entry.file, |ui| {
+            egui::Frame::NONE
+                .fill(CARD)
+                .corner_radius(CornerRadius::same(9))
+                .inner_margin(Margin::symmetric(9, 6))
+                .stroke(Stroke::new(1.0_f32, LINE))
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        if can_undo && ui.checkbox(&mut entry.selected, "").changed() {
+                            selection_changed = true;
+                        }
                         ui.label(
-                            RichText::new(i18n.tr(&format!("drawer.undo.act.{}", entry.action)))
-                                .size(10.0)
-                                .color(act_col),
-                        );
+                            RichText::new(file_basename(&entry.file))
+                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                .color(if can_undo { INK } else { MUTED }),
+                        )
+                        .on_hover_text(&entry.file);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let act_col = match entry.action.as_str() {
+                                "restore" => GREEN,
+                                "delete" => AMBER,
+                                _ => MUTED,
+                            };
+                            ui.label(
+                                RichText::new(i18n.tr(&format!("drawer.undo.act.{}", entry.action)))
+                                    .size(10.0)
+                                    .color(act_col),
+                            );
+                        });
                     });
                 });
-            });
+        });
         ui.add_space(4.0);
         if can_undo && entry.selected {
             selected_files.push(entry.file.clone());
         }
     }
 
+    if selection_changed {
+        state.undo_armed_session = None;
+    }
+
     ui.add_space(6.0);
     let n = selected_files.len();
-    let go_label = i18n.tr_count("drawer.undo.go", n);
+    let armed = state.undo_armed_session.as_deref() == Some(sess.id.as_str());
+    let go_label = if armed && n > 0 {
+        i18n.tr("drawer.undo.sure")
+    } else {
+        i18n.tr_count("drawer.undo.go", n)
+    };
     let go_btn = egui::Button::new(heading_bold(go_label, 11.5).color(Color32::WHITE))
-        .fill(if n > 0 { RED } else { CARD_3 })
+        .fill(if n == 0 {
+            CARD_3
+        } else if armed {
+            RED
+        } else {
+            CARD_2
+        })
+        .stroke(Stroke::new(1.0_f32, if n > 0 { RED } else { LINE }))
         .corner_radius(CornerRadius::same(8));
     if ui.add_enabled(n > 0, go_btn).clicked() {
-        state.push_action(UiAction::ApplySessionUndo {
-            session_id: sess.id.clone(),
-            files: selected_files,
-        });
+        if !armed {
+            state.undo_armed_session = Some(sess.id.clone());
+        } else {
+            state.undo_armed_session = None;
+            state.push_action(UiAction::ApplySessionUndo {
+                session_id: sess.id.clone(),
+                files: selected_files,
+            });
+        }
     }
 }
 
@@ -1277,7 +1319,7 @@ mod tests {
             "expected RemoveSessionPin, got {actions:?}"
         );
 
-        // 5. Switch to Undo tab with 2 files, only 1 selected -> emits ApplySessionUndo with ONLY selected file
+        // 5. Switch to Undo tab with 2 files, only 1 selected -> 1st click arms (drawer.undo.sure), 2nd emits ApplySessionUndo
         state.session_tab = SessionDrawerTab::Undo;
         state.session_undo = Some(SessionUndoView {
             session_id: "sess-claude-1".to_owned(),
@@ -1303,6 +1345,14 @@ mod tests {
         let undo_pos = find_text_center(&out_undo.shapes, &undo_btn_label)
             .expect("expected Undo 1 file button");
         click_at(&ctx, undo_pos, |c| draw_session_drawer(c, &mut state, &i18n));
+        assert!(
+            state.drain_actions().is_empty(),
+            "first click on destructive Undo must arm confirmation without reverting yet"
+        );
+        let out_armed = ctx.run(base.clone(), |c| draw_session_drawer(c, &mut state, &i18n));
+        let sure_pos = find_text_center(&out_armed.shapes, &i18n.tr("drawer.undo.sure"))
+            .expect("expected armed Click again to undo button");
+        click_at(&ctx, sure_pos, |c| draw_session_drawer(c, &mut state, &i18n));
         let actions = state.drain_actions();
         assert!(
             actions.iter().any(|a| matches!(
@@ -1396,6 +1446,68 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, UiAction::StopSessionTask { session_id } if session_id == "sess-claude-1")),
             "expected StopSessionTask, got {actions:?}"
+        );
+    }
+
+    #[test]
+    fn switching_session_on_undo_tab_auto_fetches_undo_and_esc_closes_empty_drawer() {
+        let ctx = setup_ctx();
+        let i18n = load_i18n("en");
+        let mut state = UiState::with_demo_seed(
+            station_3d::OfficeLayout::Pro,
+            station_3d::BackdropKind::City,
+            false,
+        );
+        state.active_drawer = ActiveDrawer::Session;
+        state.session_tab = SessionDrawerTab::Undo;
+        state.selected_session = Some("sess-claude-1".to_owned());
+        state.session_undo = Some(SessionUndoView {
+            session_id: "sess-claude-1".to_owned(),
+            loading: false,
+            ..Default::default()
+        });
+
+        let base = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1280.0, 720.0))),
+            ..Default::default()
+        };
+        let _ = ctx.run(base.clone(), |c| draw_session_drawer(c, &mut state, &i18n));
+        state.drain_actions();
+
+        // Switch selected session while staying on Undo tab -> must auto-fetch Undo for new session
+        state.selected_session = Some("sess-codex-2".to_owned());
+        let _ = ctx.run(base.clone(), |c| draw_session_drawer(c, &mut state, &i18n));
+        let actions = state.drain_actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UiAction::FetchSessionUndo(sid) if sid == "sess-codex-2")),
+            "switching sessions while on Undo tab must auto-emit FetchSessionUndo, got {actions:?}"
+        );
+        assert!(
+            state
+                .session_undo
+                .as_ref()
+                .is_some_and(|u| u.session_id == "sess-codex-2" && u.loading),
+            "session_undo must transition to loading for the new session"
+        );
+
+        // Esc closes the drawer even when no sessions exist
+        state.sessions.clear();
+        state.selected_session = None;
+        let mut esc = base;
+        esc.events = vec![Event::Key {
+            key: Key::Escape,
+            physical_key: Some(Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }];
+        let _ = ctx.run(esc, |c| draw_session_drawer(c, &mut state, &i18n));
+        assert_eq!(
+            state.active_drawer,
+            ActiveDrawer::None,
+            "Esc must close an empty SessionDrawer"
         );
     }
 }

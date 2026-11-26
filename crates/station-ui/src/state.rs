@@ -612,6 +612,7 @@ pub struct UiState {
     pub session_pins: HashMap<String, Vec<String>>,
     pub pin_draft: String,
     pub session_undo: Option<SessionUndoView>,
+    pub undo_armed_session: Option<String>,
     pub session_todos: Vec<TodoItem>,
     pub accounts: Vec<AccountOption>,
     pub account_menu_open: bool,
@@ -725,6 +726,7 @@ impl UiState {
             session_pins: HashMap::new(),
             pin_draft: String::new(),
             session_undo: None,
+            undo_armed_session: None,
             session_todos: Vec::new(),
             accounts: Vec::new(),
             account_menu_open: false,
@@ -1066,6 +1068,7 @@ impl UiState {
             )]),
             pin_draft: String::new(),
             session_undo: None,
+            undo_armed_session: None,
             session_todos: vec![
                 TodoItem {
                     text: "Implement 6 interactive perm cards".to_owned(),

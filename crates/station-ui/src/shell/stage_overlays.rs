@@ -213,14 +213,14 @@ pub fn draw_perm_stack(
                 .show(ui, |ui| {
                     let perms = state.pending_perms.clone();
                     for p in perms {
-                        match p.kind.as_str() {
+                        ui.push_id(&p.id, |ui| match p.kind.as_str() {
                             "ask" => draw_ask_card(ui, &p, state, i18n),
                             "plan" => draw_plan_card(ui, &p, state, i18n),
                             "denied" => draw_denied_card(ui, &p, state, i18n),
                             "stuck" => draw_stuck_card(ui, &p, state, i18n),
                             "ci" => draw_ci_card(ui, &p, state, i18n),
                             _ => draw_permission_card(ui, &p, state, i18n),
-                        }
+                        });
                         ui.add_space(6.0);
                     }
                 });
