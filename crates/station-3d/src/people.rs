@@ -1,7 +1,9 @@
 use crate::chibi::{
-    ChibiConfig, ChibiLook, ChibiWorker, StatusHalo, WorkerAnim, halo_material_for_anim,
-    spawn_chibi,
+    ChibiConfig, ChibiDims, ChibiLook, ChibiRig, ChibiWorker, OutfitKind, StatusHalo, WorkerAnim,
+    compute_chibi_pose, halo_material_for_anim, spawn_chibi,
 };
+use crate::chibi_meshes::{ChibiMeshCache, HairStyle};
+use crate::chibi_props::{PropKind, set_active_prop};
 use crate::desks::{DeskScreen, ScreenMaterials, screen_kind_for_session};
 use crate::layout::{LayoutSpec, OfficeLayout};
 use crate::palette::WorldPalette;
@@ -75,30 +77,34 @@ pub const TEAM_CHAT_LINES: [&str; 6] = [
 /// Spawns the active agent cast seated at desks + office NPCs (director, HR, lounge gamers, karaoke singer).
 pub fn spawn_office_cast(
     commands: &mut Commands,
+    chibi_cache: &ChibiMeshCache,
     palette: &mut WorldPalette,
     materials: &mut Assets<StandardMaterial>,
     spec: &LayoutSpec,
     look: ChibiLook,
 ) {
     let cast = [
-        ("claude", "Claude", WorkerAnim::Work),
-        ("codex", "Codex", WorkerAnim::Work),
-        ("opencode", "OpenCode", WorkerAnim::Work),
-        ("zcode", "ZCode", WorkerAnim::Wait),
-        ("antigravity", "Antigravity", WorkerAnim::Work),
-        ("claude", "Mai", WorkerAnim::Rest),
+        ("claude", "Claude", WorkerAnim::Work, HairStyle::Bob, OutfitKind::Hoodie),
+        ("codex", "Codex", WorkerAnim::Work, HairStyle::Spiky, OutfitKind::Shirt),
+        ("opencode", "OpenCode", WorkerAnim::Work, HairStyle::Plain, OutfitKind::Hoodie),
+        ("zcode", "ZCode", WorkerAnim::Wait, HairStyle::Ponytail, OutfitKind::Shirt),
+        ("antigravity", "Antigravity", WorkerAnim::Work, HairStyle::Curly, OutfitKind::Hoodie),
+        ("claude", "Mai", WorkerAnim::Rest, HairStyle::Bun, OutfitKind::Shirt),
     ];
 
-    for (i, (agent, name, anim)) in cast.iter().enumerate() {
+    for (i, (agent, name, anim, hair_style, outfit)) in cast.iter().enumerate() {
         let Some(desk) = spec.desks.get(i) else {
             break;
         };
         let mut cfg = ChibiConfig::for_agent(agent, name, i);
         cfg.look = look;
+        cfg.hair_style = *hair_style;
+        cfg.outfit = *outfit;
         let rot = Quat::from_rotation_y(desk.ry);
         let seat_pos = Vec3::new(desk.x, 0.0, desk.z) + rot * Vec3::new(0.0, 0.0, -0.62);
         let ent = spawn_chibi(
             commands,
+            chibi_cache,
             palette,
             materials,
             &cfg,
@@ -108,40 +114,121 @@ pub fn spawn_office_cast(
             i as f32 * 0.9,
             true,
         );
+        if *anim == WorkerAnim::Rest {
+            set_active_prop(
+                commands,
+                chibi_cache,
+                palette,
+                materials,
+                ent,
+                Some(PropKind::Mug),
+            );
+        }
         commands.entity(ent).insert(PreviewCastWorker);
     }
 
-    // Pro / HQ office NPCs: Director in walnut office, HR/Accountant walking corridor, Lounge gamer, Karaoke singer
+    // Pro / HQ office NPCs: Director in walnut office (Suit), HR walking corridor, Lounge gamer, Karaoke singer
     if spec.layout.is_pro() {
         let mut dir_cfg = ChibiConfig::for_agent("npc", "Giám đốc", 10);
         dir_cfg.shirt = "#2C3E50";
+        dir_cfg.outfit = OutfitKind::Suit;
+        dir_cfg.hair_style = HairStyle::Plain;
         dir_cfg.accessory = Some("glasses");
         dir_cfg.look = look;
-        spawn_chibi(commands, palette, materials, &dir_cfg, Vec3::new(-5.4, 0.0, -6.55), 0.0, WorkerAnim::Work, 0.5, true);
+        spawn_chibi(
+            commands,
+            chibi_cache,
+            palette,
+            materials,
+            &dir_cfg,
+            Vec3::new(-5.4, 0.0, -6.55),
+            0.0,
+            WorkerAnim::Work,
+            0.5,
+            true,
+        );
 
         let mut hr_cfg = ChibiConfig::for_agent("npc", "HR Lan", 11);
         hr_cfg.shirt = "#D96B90";
+        hr_cfg.hair_style = HairStyle::Ponytail;
+        hr_cfg.outfit = OutfitKind::Shirt;
+        hr_cfg.accessory = None;
+        hr_cfg.has_lanyard = true;
         hr_cfg.look = look;
-        let hr_ent = spawn_chibi(commands, palette, materials, &hr_cfg, Vec3::new(-1.5, 0.0, -2.3), PI * 0.5, WorkerAnim::Walk, 1.4, false);
+        let hr_ent = spawn_chibi(
+            commands,
+            chibi_cache,
+            palette,
+            materials,
+            &hr_cfg,
+            Vec3::new(-1.5, 0.0, -2.3),
+            PI * 0.5,
+            WorkerAnim::Walk,
+            1.4,
+            false,
+        );
         commands.entity(hr_ent).insert(PatrolPath {
             a: Vec3::new(-2.8, 0.0, -2.3),
             b: Vec3::new(7.5, 0.0, -2.3),
             speed: 0.75,
         });
 
-        // Lounge gamer on sofa
+        // Lounge gamer on sofa with lazy Gamepad prop
         let mut gamer_cfg = ChibiConfig::for_agent("npc", "Huy", 12);
         gamer_cfg.shirt = "#3F7CC4";
+        gamer_cfg.hair_style = HairStyle::Spiky;
+        gamer_cfg.outfit = OutfitKind::Hoodie;
         gamer_cfg.accessory = Some("headphones");
         gamer_cfg.look = look;
-        spawn_chibi(commands, palette, materials, &gamer_cfg, Vec3::new(10.7, 0.0, 3.85), PI, WorkerAnim::Rest, 2.2, true);
+        let gamer_ent = spawn_chibi(
+            commands,
+            chibi_cache,
+            palette,
+            materials,
+            &gamer_cfg,
+            Vec3::new(10.7, 0.0, 3.85),
+            PI,
+            WorkerAnim::Rest,
+            2.2,
+            true,
+        );
+        set_active_prop(
+            commands,
+            chibi_cache,
+            palette,
+            materials,
+            gamer_ent,
+            Some(PropKind::Gamepad),
+        );
 
-        // Karaoke singer inside booth
+        // Karaoke singer inside booth with lazy Mic prop
         if let Some([kx, kz, kry]) = spec.ktv {
             let mut sing_cfg = ChibiConfig::for_agent("npc", "An", 13);
             sing_cfg.shirt = "#FF5F9E";
+            sing_cfg.hair_style = HairStyle::Bun;
+            sing_cfg.outfit = OutfitKind::Shirt;
+            sing_cfg.accessory = None;
             sing_cfg.look = look;
-            spawn_chibi(commands, palette, materials, &sing_cfg, Vec3::new(kx, 0.08, kz), kry + PI, WorkerAnim::Sing, 3.1, false);
+            let sing_ent = spawn_chibi(
+                commands,
+                chibi_cache,
+                palette,
+                materials,
+                &sing_cfg,
+                Vec3::new(kx, 0.08, kz),
+                kry + PI,
+                WorkerAnim::Sing,
+                3.1,
+                false,
+            );
+            set_active_prop(
+                commands,
+                chibi_cache,
+                palette,
+                materials,
+                sing_ent,
+                Some(PropKind::Mic),
+            );
         }
     }
 }
@@ -159,6 +246,7 @@ pub struct PatrolPath {
 #[allow(clippy::too_many_arguments)]
 pub fn sync_live_workers_and_screens(
     commands: &mut Commands,
+    chibi_cache: &ChibiMeshCache,
     palette: &mut WorldPalette,
     materials: &mut Assets<StandardMaterial>,
     screen_mats: &ScreenMaterials,
@@ -258,6 +346,7 @@ pub fn sync_live_workers_and_screens(
         let anim = anim_for_status(&spec.status);
         let root = spawn_chibi(
             commands,
+            chibi_cache,
             palette,
             materials,
             &cfg,
@@ -299,6 +388,7 @@ pub fn sync_live_workers_in_world(world: &mut World, specs: &[LiveWorkerSpec], l
 
     let mut state: SystemState<(
         Commands,
+        Option<Res<ChibiMeshCache>>,
         Option<ResMut<WorldPalette>>,
         ResMut<Assets<StandardMaterial>>,
         Option<Res<ScreenMaterials>>,
@@ -312,6 +402,7 @@ pub fn sync_live_workers_in_world(world: &mut World, specs: &[LiveWorkerSpec], l
     {
         let (
             mut commands,
+            chibi_cache,
             pal,
             mut mats,
             scr_mats,
@@ -321,10 +412,11 @@ pub fn sync_live_workers_in_world(world: &mut World, specs: &[LiveWorkerSpec], l
             mut halo_q,
             mut screens_q,
         ) = state.get_mut(world);
-        if let (Some(mut pal), Some(scr_mats)) = (pal, scr_mats) {
+        if let (Some(cache), Some(mut pal), Some(scr_mats)) = (chibi_cache, pal, scr_mats) {
             let lay = layout.map(|l| *l).unwrap_or(OfficeLayout::Pro);
             sync_live_workers_and_screens(
                 &mut commands,
+                &cache,
                 &mut pal,
                 &mut mats,
                 &scr_mats,
@@ -342,42 +434,149 @@ pub fn sync_live_workers_in_world(world: &mut World, specs: &[LiveWorkerSpec], l
     world.flush();
 }
 
-/// Smoothly animates seated workers (typing/waiting/sleeping bob) and patrolling NPCs.
+/// Smoothly animates rigged Chibi characters: 2-bone arm IK for typing/resting/singing,
+/// walking leg & arm swing, natural periodic blinking, breathing, and mouth expressions.
 pub fn animate_chibis_system(
     time: Res<Time>,
-    mut q: Query<(&ChibiWorker, Option<&PatrolPath>, &mut Transform)>,
+    workers: Query<(
+        Entity,
+        &ChibiWorker,
+        Option<&ChibiRig>,
+        Option<&PatrolPath>,
+        Option<&crate::chibi_props::ActivePropEntity>,
+    )>,
+    mut transforms: Query<&mut Transform>,
+    mut visibilities: Query<&mut Visibility>,
 ) {
     let t = time.elapsed_secs();
-    for (w, patrol, mut tf) in &mut q {
-        if let Some(p) = patrol {
-            let u = ((t * p.speed + w.phase).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-            let next = p.a.lerp(p.b, u);
-            let dir = if (t * p.speed + w.phase).cos() >= 0.0 {
-                p.b - p.a
+    for (root, w, rig, patrol, active_prop) in &workers {
+        let ph = t + w.phase;
+        let blink_cycle = (t + w.phase * 1.7).rem_euclid(3.8);
+        let blink = if blink_cycle < 0.14 {
+            (blink_cycle / 0.14 * PI).sin()
+        } else {
+            0.0
+        };
+
+        let anim = if patrol.is_some() {
+            WorkerAnim::Walk
+        } else {
+            w.anim
+        };
+        let look = rig.map(|r| r.look).unwrap_or(ChibiLook::Pixar);
+        let pose = compute_chibi_pose(look, anim, w.sitting && patrol.is_none(), ph, blink);
+
+        if let Ok(mut root_tf) = transforms.get_mut(root) {
+            if let Some(p) = patrol {
+                let u = ((t * p.speed + w.phase).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+                let next = p.a.lerp(p.b, u);
+                let dir = if (t * p.speed + w.phase).cos() >= 0.0 {
+                    p.b - p.a
+                } else {
+                    p.a - p.b
+                };
+                root_tf.translation = next + Vec3::Y * pose.root_y_offset;
+                root_tf.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
             } else {
-                p.a - p.b
-            };
-            tf.translation = next + Vec3::Y * ((t * 7.0 + w.phase).sin().abs() * 0.04);
-            tf.rotation = Quat::from_rotation_y(dir.x.atan2(dir.z));
-            continue;
+                root_tf.translation = w.base_pos + Vec3::Y * pose.root_y_offset;
+                let extra_yaw = if anim == WorkerAnim::Sing {
+                    (t * 2.2 + w.phase).sin() * 0.18
+                } else {
+                    0.0
+                };
+                root_tf.rotation = Quat::from_rotation_y(w.base_yaw + extra_yaw);
+            }
         }
-        match w.anim {
-            WorkerAnim::Work => {
-                tf.translation.y = w.base_pos.y + (t * 6.0 + w.phase).sin().abs() * 0.018;
+
+        let Some(rig) = rig else {
+            continue;
+        };
+        let d = ChibiDims::for_look(rig.look);
+        let k_eye = (d.r * 0.21) / 0.068;
+
+        if let Ok(mut tf) = transforms.get_mut(rig.hip_l) {
+            tf.rotation = Quat::from_rotation_x(pose.hip_l);
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.hip_r) {
+            tf.rotation = Quat::from_rotation_x(pose.hip_r);
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.knee_l) {
+            tf.rotation = Quat::from_rotation_x(pose.knee_l);
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.knee_r) {
+            tf.rotation = Quat::from_rotation_x(pose.knee_r);
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.spine) {
+            tf.rotation = pose.spine_rot;
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.torso) {
+            tf.scale.y = pose.breathe;
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.head) {
+            tf.rotation = pose.head_rot;
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.shoulder_l) {
+            tf.rotation = pose.upper_l;
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.elbow_l) {
+            tf.rotation = pose.fore_l;
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.shoulder_r) {
+            tf.rotation = pose.upper_r;
+        }
+        if let Ok(mut tf) = transforms.get_mut(rig.elbow_r) {
+            tf.rotation = pose.fore_r;
+        }
+        // Keep hand-held props (mug, cup, noodle, paddle, mic, bags) upright against arm IK rotations.
+        if let Some(ap) = active_prop {
+            match ap.kind.mount() {
+                crate::chibi_props::PropMount::RightHand => {
+                    if let Ok(mut tf) = transforms.get_mut(ap.entity) {
+                        tf.rotation = (pose.spine_rot * pose.upper_r * pose.fore_r).inverse();
+                    }
+                }
+                crate::chibi_props::PropMount::LeftHand => {
+                    if let Ok(mut tf) = transforms.get_mut(ap.entity) {
+                        tf.rotation = (pose.spine_rot * pose.upper_l * pose.fore_l).inverse();
+                    }
+                }
+                _ => {}
             }
-            WorkerAnim::Wait => {
-                tf.translation.y = w.base_pos.y + (t * 4.5 + w.phase).sin().abs() * 0.055;
+        }
+
+        for ball in [rig.eye_ball_l, rig.eye_ball_r] {
+            if let Ok(mut tf) = transforms.get_mut(ball) {
+                tf.scale.y = 1.0 - 0.9 * pose.lid;
             }
-            WorkerAnim::Sing => {
-                tf.translation.y = w.base_pos.y + (t * 5.0 + w.phase).sin().abs() * 0.04;
-                tf.rotation = Quat::from_rotation_y(w.base_yaw + (t * 2.5 + w.phase).sin() * 0.25);
+        }
+        for lash_opt in [rig.lash_l, rig.lash_r] {
+            if let Some(lash) = lash_opt
+                && let Ok(mut tf) = transforms.get_mut(lash)
+            {
+                tf.translation.y = -0.02 * k_eye * pose.lid;
+                tf.scale.y = 0.07 * k_eye * 1.06 * (1.0 - 0.58 * pose.lid);
             }
-            WorkerAnim::Sleep => {
-                tf.translation.y = w.base_pos.y + (t * 1.4 + w.phase).sin() * 0.01;
-            }
-            WorkerAnim::Rest | WorkerAnim::Walk => {
-                tf.translation.y = w.base_pos.y + (t * 2.2 + w.phase).sin() * 0.012;
-            }
+        }
+        if let Ok(mut v) = visibilities.get_mut(rig.mouth_smile) {
+            *v = if pose.mouth_o {
+                Visibility::Hidden
+            } else {
+                Visibility::Visible
+            };
+        }
+        if let Ok(mut v) = visibilities.get_mut(rig.mouth_o) {
+            *v = if pose.mouth_o {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
+        }
+        if let Ok(mut v) = visibilities.get_mut(rig.shadow) {
+            *v = if pose.shadow_visible {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
         }
     }
 }

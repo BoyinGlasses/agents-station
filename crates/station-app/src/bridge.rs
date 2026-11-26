@@ -4966,6 +4966,7 @@ fn sync_live_sessions_to_3d(
     ui: Res<UiState>,
     mut rack_telemetry: Option<ResMut<station_3d::ServerRackTelemetry>>,
     mut props_telemetry: Option<ResMut<station_3d::PropsLiveTelemetry>>,
+    chibi_cache: Option<Res<station_3d::ChibiMeshCache>>,
     pal: Option<ResMut<WorldPalette>>,
     materials: Option<ResMut<Assets<StandardMaterial>>>,
     screen_mats: Option<Res<station_3d::desks::ScreenMaterials>>,
@@ -5031,7 +5032,9 @@ fn sync_live_sessions_to_3d(
             });
         }
     }
-    let (Some(mut pal), Some(mut mats), Some(scr_mats)) = (pal, materials, screen_mats) else {
+    let (Some(chibi_cache), Some(mut pal), Some(mut mats), Some(scr_mats)) =
+        (chibi_cache, pal, materials, screen_mats)
+    else {
         return;
     };
     let lay = layout.map(|l| *l).unwrap_or(ui.layout);
@@ -5051,6 +5054,7 @@ fn sync_live_sessions_to_3d(
         .collect();
     station_3d::people::sync_live_workers_and_screens(
         &mut commands,
+        &chibi_cache,
         &mut pal,
         &mut mats,
         &scr_mats,
@@ -5187,6 +5191,7 @@ struct WorldActionParams<'w, 's> {
     pal: Option<ResMut<'w, WorldPalette>>,
     backdrop_assets: Option<ResMut<'w, BackdropAssets>>,
     ibl: Option<Res<'w, station_3d::OfficeIbl>>,
+    chibi_meshes: Option<Res<'w, station_3d::ChibiMeshCache>>,
     meshes: Option<ResMut<'w, Assets<Mesh>>>,
     materials: Option<ResMut<'w, Assets<StandardMaterial>>>,
     images: Option<ResMut<'w, Assets<Image>>>,
@@ -5780,6 +5785,7 @@ fn unload_world_if_possible(commands: &mut Commands, wp: &mut WorldActionParams<
             wp.pal.as_deref_mut(),
             wp.backdrop_assets.as_deref_mut(),
             wp.ibl.as_deref(),
+            wp.chibi_meshes.as_deref(),
             meshes,
             mats,
             imgs,
@@ -5815,6 +5821,7 @@ fn rebuild_3d_office_world(
                 wp.pal.as_deref_mut(),
                 wp.backdrop_assets.as_deref_mut(),
                 wp.ibl.as_deref(),
+                wp.chibi_meshes.as_deref(),
                 meshes,
                 mats,
                 imgs,

@@ -2,6 +2,8 @@ pub mod audio;
 pub mod backdrops;
 pub mod camera;
 pub mod chibi;
+pub mod chibi_meshes;
+pub mod chibi_props;
 pub mod demo;
 pub mod desks;
 pub mod entrance;
@@ -24,7 +26,9 @@ use bevy::prelude::*;
 pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
 pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
-pub use chibi::ChibiLook;
+pub use chibi::{ChibiLook, ChibiRig, OutfitKind, solve_two_bone_ik};
+pub use chibi_meshes::{ChibiMeshCache, HairStyle};
+pub use chibi_props::{ActivePropEntity, HeldPropRoot, PropKind, set_active_prop};
 pub use desks::{DeskBedding, DeskKit, DeskMess, DeskScreen, LaptopLid};
 pub use entrance::{ElevatorDoors, Stairwell};
 pub use furniture::{DeployRocket, NeonSign, RocketLaunchQueue, ServerRackTelemetry, WallClock};
@@ -154,6 +158,7 @@ pub fn spawn_full_office_world(
 ) {
     let spec = LayoutSpec::for_layout(layout);
     let mut pal = WorldPalette::new(meshes);
+    let chibi_cache = ChibiMeshCache::build(meshes, materials, images);
     let mut brands = BrandRegistry::new(assets_dir.to_path_buf());
     let mut backdrop_assets = BackdropAssets::default();
     let life_state = life::OfficeLifeState::default();
@@ -175,7 +180,7 @@ pub fn spawn_full_office_world(
     let scr_mats = desks::spawn_desks(commands, &mut pal, materials, images, fonts, &spec);
     furniture::spawn_furniture(commands, &mut pal, materials, images, fonts, &spec);
     props::spawn_all_props(commands, &mut pal, materials, images, fonts, &spec);
-    people::spawn_office_cast(commands, &mut pal, materials, &spec, look);
+    people::spawn_office_cast(commands, &chibi_cache, &mut pal, materials, &spec, look);
     life::spawn_life_elements(
         commands,
         &mut pal,
@@ -205,12 +210,14 @@ pub fn spawn_full_office_world(
     commands.insert_resource(ibl);
     commands.insert_resource(scr_mats);
     commands.insert_resource(backdrop_assets);
+    commands.insert_resource(chibi_cache);
     commands.insert_resource(pal);
 }
 
 /// True Unload helper: despawns every `WorldEntity` and purges every `WorldPalette`
-/// mesh/material/image, `BackdropAssets` material/image, and `OfficeIbl` cubemap
-/// so switching `3D -> 2D Lite`, rebuilding layouts, or minimizing to System Tray leaks zero GPU/CPU assets.
+/// mesh/material/image, `ChibiMeshCache` mesh/material/image, `BackdropAssets` material/image,
+/// and `OfficeIbl` cubemap so switching `3D -> 2D Lite`, rebuilding layouts, or minimizing to
+/// System Tray leaks zero GPU/CPU assets.
 #[allow(clippy::too_many_arguments)]
 pub fn unload_full_office_world(
     commands: &mut Commands,
@@ -218,6 +225,7 @@ pub fn unload_full_office_world(
     pal: Option<&mut WorldPalette>,
     backdrop_assets: Option<&mut BackdropAssets>,
     ibl: Option<&OfficeIbl>,
+    chibi_meshes: Option<&ChibiMeshCache>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -234,9 +242,13 @@ pub fn unload_full_office_world(
     if let Some(env_ibl) = ibl {
         env_ibl.purge(images);
     }
+    if let Some(cm) = chibi_meshes {
+        cm.purge(meshes, materials, images);
+    }
     commands.remove_resource::<WorldPalette>();
     commands.remove_resource::<BackdropAssets>();
     commands.remove_resource::<OfficeIbl>();
+    commands.remove_resource::<ChibiMeshCache>();
     commands.remove_resource::<desks::ScreenMaterials>();
     commands.remove_resource::<camera::CameraRig>();
 }
@@ -308,6 +320,244 @@ impl Plugin for SmokeScenePlugin {
             })
             .add_systems(Startup, setup_smoke_scene);
     }
+}
+
+/// Studio close-up showcase scene for `--capture-scene chibi-closeup`, displaying all 6 sculpted
+/// hairstyles, Pixar & Toy proportions, layered eyes, Hoodie/Suit/Shirt outfits, lazy held props,
+/// and a foreground seated desk worker in 2-bone arm IK typing pose.
+pub struct ChibiCloseupPlugin;
+
+impl Plugin for ChibiCloseupPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(ClearColor(Color::srgb(0.93, 0.90, 0.84)))
+            .insert_resource(AmbientLight {
+                color: Color::srgb(1.0, 0.96, 0.90),
+                brightness: 520.0,
+                ..default()
+            })
+            .add_systems(Startup, setup_chibi_closeup_scene)
+            .add_systems(Update, people::animate_chibis_system);
+    }
+}
+
+fn setup_chibi_closeup_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    use bevy::core_pipeline::bloom::Bloom;
+    use bevy::core_pipeline::tonemapping::Tonemapping;
+    use std::f32::consts::FRAC_PI_4;
+
+    let mut pal = WorldPalette::new(&mut meshes);
+    let cache = ChibiMeshCache::build(&mut meshes, &mut materials, &mut images);
+    let ibl = ibl::OfficeIbl::generate(&mut images);
+
+    // Warm oak plank floor + light cream studio backdrop wall
+    let floor_mat = pal.tiled_mat(
+        &mut images,
+        &mut materials,
+        station_canvas2d::office_surfaces::draw_plank_tile(),
+        Vec2::new(6.0, 4.0),
+        "#EFE6D8",
+        0.72,
+    );
+    palette::spawn_floor_quad(&mut commands, &pal, floor_mat, Vec3::ZERO, Vec2::new(14.0, 10.0));
+
+    let wall_mat = pal.matte(&mut materials, "#F4EFE6");
+    palette::spawn_box(
+        &mut commands,
+        &pal,
+        wall_mat,
+        Vec3::new(0.0, 2.5, -2.6),
+        Vec3::new(14.0, 5.0, 0.2),
+    );
+
+    // 3-point warm studio lighting + IBL
+    commands.spawn((
+        WorldEntity,
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.96, 0.90),
+            illuminance: 16_000.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(3.5, 5.5, 4.5).looking_at(Vec3::new(0.0, 0.9, 0.0), Vec3::Y),
+    ));
+    commands.spawn((
+        WorldEntity,
+        PointLight {
+            color: Color::srgb(0.95, 0.97, 1.0),
+            intensity: 45_000.0,
+            range: 14.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(-3.8, 2.6, 3.2),
+    ));
+    commands.spawn((
+        WorldEntity,
+        PointLight {
+            color: Color::srgb(1.0, 0.93, 0.82),
+            intensity: 35_000.0,
+            range: 12.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::from_xyz(0.5, 2.4, -2.0),
+    ));
+
+    // Back showcase arc: all 6 hairstyles, all 3 outfits, Pixar + Toy looks, and lazy held props
+    // Arranged cleanly so ALL 6 standing chibis + foreground seated typing IK chibi are 100% unobstructed.
+    let lineup: [(&str, ChibiLook, HairStyle, OutfitKind, Option<&str>, &str, &str, chibi::WorkerAnim, Option<PropKind>, Vec3, f32); 6] = [
+        ("Bob", ChibiLook::Pixar, HairStyle::Bob, OutfitKind::Hoodie, None, "#D97757", "#3B2618", chibi::WorkerAnim::Rest, Some(PropKind::Mug), Vec3::new(-2.70, 0.0, -0.55), 0.28),
+        ("Director", ChibiLook::Pixar, HairStyle::Plain, OutfitKind::Suit, Some("glasses"), "#2C3E50", "#1E1E24", chibi::WorkerAnim::Rest, Some(PropKind::Folder), Vec3::new(-1.82, 0.0, -0.88), 0.18),
+        ("Spiky", ChibiLook::Pixar, HairStyle::Spiky, OutfitKind::Shirt, Some("headphones"), "#3E9B74", "#232836", chibi::WorkerAnim::Rest, Some(PropKind::Noodle), Vec3::new(-0.96, 0.0, -1.08), 0.10),
+        ("Ponytail", ChibiLook::Pixar, HairStyle::Ponytail, OutfitKind::Hoodie, None, "#5F8FD8", "#5A3A2A", chibi::WorkerAnim::Rest, Some(PropKind::Paddle), Vec3::new(0.96, 0.0, -1.08), -0.68),
+        ("Bun", ChibiLook::Pixar, HairStyle::Bun, OutfitKind::Shirt, None, "#E06D94", "#2C2228", chibi::WorkerAnim::Sing, Some(PropKind::Mic), Vec3::new(1.82, 0.0, -0.88), -0.18),
+        ("ToyCurly", ChibiLook::Toy, HairStyle::Curly, OutfitKind::Hoodie, None, "#E09A3E", "#6B4A33", chibi::WorkerAnim::Rest, Some(PropKind::Boba), Vec3::new(2.70, 0.0, -0.55), -0.28),
+    ];
+
+    for (i, (name, look, hair_style, outfit, acc, shirt, hair, anim, prop, pos, yaw)) in
+        lineup.into_iter().enumerate()
+    {
+        let mut cfg = chibi::ChibiConfig::for_agent("claude", name, i + 1);
+        cfg.look = look;
+        cfg.hair_style = hair_style;
+        cfg.outfit = outfit;
+        cfg.accessory = acc;
+        cfg.shirt = shirt;
+        cfg.hair = hair;
+        cfg.has_lanyard = name == "Bun";
+        let ent = chibi::spawn_chibi(
+            &mut commands,
+            &cache,
+            &mut pal,
+            &mut materials,
+            &cfg,
+            pos,
+            yaw,
+            anim,
+            i as f32 * 0.7,
+            false,
+        );
+        if prop.is_some() {
+            set_active_prop(&mut commands, &cache, &mut pal, &mut materials, ent, prop);
+        }
+    }
+
+    // Foreground desk + laptop + chair + seated Pixar chibi demonstrating 2-bone arm IK typing pose
+    let desk_pos = Vec3::new(0.18, 0.0, 1.15);
+    let desk_yaw = FRAC_PI_4 * 0.95;
+    let desk_rot = Quat::from_rotation_y(desk_yaw);
+    let at = |lx: f32, ly: f32, lz: f32| desk_pos + desk_rot * Vec3::new(lx, ly, lz);
+
+    let top_m = pal.mat(&mut materials, "#D5B184", 0.65, 0.0);
+    let leg_m = pal.mat(&mut materials, "#2E333C", 0.45, 0.35);
+    let laptop_m = pal.mat(&mut materials, "#C9CED6", 0.35, 0.50);
+    let screen_m = pal.emissive(&mut materials, "#4EA8DE", 0.85);
+    let chair_m = pal.mat(&mut materials, "#596170", 0.85, 0.0);
+
+    palette::spawn_box_rot(
+        &mut commands,
+        &pal,
+        top_m,
+        at(0.0, 0.76, 0.0),
+        Vec3::new(1.15, 0.04, 0.62),
+        desk_rot,
+    );
+    for (lx, lz) in [(-0.52, -0.25), (0.52, -0.25), (-0.52, 0.25), (0.52, 0.25)] {
+        palette::spawn_box_rot(
+            &mut commands,
+            &pal,
+            leg_m.clone(),
+            at(lx, 0.37, lz),
+            Vec3::new(0.045, 0.74, 0.045),
+            desk_rot,
+        );
+    }
+    // Laptop base + tilted lid on desk
+    palette::spawn_box_rot(
+        &mut commands,
+        &pal,
+        laptop_m.clone(),
+        at(0.0, 0.795, -0.04),
+        Vec3::new(0.46, 0.024, 0.32),
+        desk_rot,
+    );
+    let lid_rot = desk_rot * Quat::from_rotation_x(0.28);
+    palette::spawn_box_rot(
+        &mut commands,
+        &pal,
+        laptop_m,
+        at(0.0, 0.93, 0.14),
+        Vec3::new(0.46, 0.30, 0.018),
+        lid_rot,
+    );
+    palette::spawn_box_rot(
+        &mut commands,
+        &pal,
+        screen_m,
+        at(0.0, 0.93, 0.129),
+        Vec3::new(0.42, 0.26, 0.004),
+        lid_rot,
+    );
+    // Chair cushion & backrest
+    let seat_pos = at(0.0, 0.0, -0.62);
+    desks::spawn_office_chair(
+        &mut commands,
+        &mut pal,
+        &mut materials,
+        seat_pos,
+        desk_yaw,
+        chair_m,
+        None,
+    );
+
+    let mut typer_cfg = chibi::ChibiConfig::for_agent("claude", "Claude", 0);
+    typer_cfg.look = ChibiLook::Pixar;
+    typer_cfg.hair_style = HairStyle::Plain;
+    typer_cfg.outfit = OutfitKind::Hoodie;
+    typer_cfg.accessory = Some("glasses");
+    typer_cfg.shirt = "#D97757";
+    typer_cfg.hair = "#3B2618";
+    chibi::spawn_chibi(
+        &mut commands,
+        &cache,
+        &mut pal,
+        &mut materials,
+        &typer_cfg,
+        seat_pos,
+        desk_yaw,
+        chibi::WorkerAnim::Work,
+        0.4,
+        true,
+    );
+
+    // Tight studio camera framing all 6 standing chibis + foreground seated typing IK chibi
+    commands.spawn((
+        WorldEntity,
+        Camera3d::default(),
+        Projection::Perspective(PerspectiveProjection {
+            fov: 35.0_f32.to_radians(),
+            ..default()
+        }),
+        Msaa::Sample4,
+        Tonemapping::AcesFitted,
+        Bloom::NATURAL,
+        EnvironmentMapLight {
+            diffuse_map: ibl.day_diffuse.clone(),
+            specular_map: ibl.day_specular.clone(),
+            intensity: 750.0,
+            ..default()
+        },
+        Transform::from_xyz(0.0, 1.88, 5.55).looking_at(Vec3::new(0.0, 0.92, -0.25), Vec3::Y),
+    ));
+
+    commands.insert_resource(ibl);
+    commands.insert_resource(cache);
+    commands.insert_resource(pal);
 }
 
 fn setup_smoke_scene(
@@ -459,6 +709,7 @@ mod tests {
                     let mut pal = world.remove_resource::<WorldPalette>();
                     let mut ba = world.remove_resource::<BackdropAssets>();
                     let ibl = world.remove_resource::<OfficeIbl>();
+                    let cm = world.remove_resource::<ChibiMeshCache>();
                     let mut cmds = world.commands();
                     unload_full_office_world(
                         &mut cmds,
@@ -466,6 +717,7 @@ mod tests {
                         pal.as_mut(),
                         ba.as_mut(),
                         ibl.as_ref(),
+                        cm.as_ref(),
                         &mut meshes,
                         &mut mats,
                         &mut imgs,
@@ -710,6 +962,7 @@ mod tests {
                     let mut pal = world.remove_resource::<WorldPalette>();
                     let mut ba = world.remove_resource::<BackdropAssets>();
                     let ibl = world.remove_resource::<OfficeIbl>();
+                    let cm = world.remove_resource::<ChibiMeshCache>();
                     let mut cmds = world.commands();
                     unload_full_office_world(
                         &mut cmds,
@@ -717,6 +970,7 @@ mod tests {
                         pal.as_mut(),
                         ba.as_mut(),
                         ibl.as_ref(),
+                        cm.as_ref(),
                         &mut meshes,
                         &mut mats,
                         &mut imgs,
@@ -787,6 +1041,7 @@ mod tests {
                     let mut pal = world.remove_resource::<WorldPalette>();
                     let mut ba = world.remove_resource::<BackdropAssets>();
                     let ibl = world.remove_resource::<OfficeIbl>();
+                    let cm = world.remove_resource::<ChibiMeshCache>();
                     let mut cmds = world.commands();
                     unload_full_office_world(
                         &mut cmds,
@@ -794,6 +1049,7 @@ mod tests {
                         pal.as_mut(),
                         ba.as_mut(),
                         ibl.as_ref(),
+                        cm.as_ref(),
                         &mut meshes,
                         &mut mats,
                         &mut imgs,

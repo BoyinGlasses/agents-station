@@ -1926,6 +1926,7 @@ mod tests {
                         let mut pal = world.remove_resource::<WorldPalette>();
                         let mut ba = world.remove_resource::<BackdropAssets>();
                         let ibl = world.remove_resource::<OfficeIbl>();
+                        let cm = world.remove_resource::<crate::ChibiMeshCache>();
                         let mut cmds = world.commands();
                         unload_full_office_world(
                             &mut cmds,
@@ -1933,6 +1934,7 @@ mod tests {
                             pal.as_mut(),
                             ba.as_mut(),
                             ibl.as_ref(),
+                            cm.as_ref(),
                             &mut meshes,
                             &mut mats,
                             &mut imgs,
@@ -2282,6 +2284,7 @@ mod tests {
                         let mut pal = world.remove_resource::<WorldPalette>();
                         let mut ba = world.remove_resource::<BackdropAssets>();
                         let ibl = world.remove_resource::<OfficeIbl>();
+                        let cm = world.remove_resource::<crate::ChibiMeshCache>();
                         let mut cmds = world.commands();
                         unload_full_office_world(
                             &mut cmds,
@@ -2289,6 +2292,7 @@ mod tests {
                             pal.as_mut(),
                             ba.as_mut(),
                             ibl.as_ref(),
+                            cm.as_ref(),
                             &mut meshes,
                             &mut mats,
                             &mut imgs,
