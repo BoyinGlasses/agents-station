@@ -148,8 +148,14 @@ pub fn spawn_eat_com(
     let solid_mat = ba.mat(materials, "#FFFFFF", 0.62, 0.15);
     b.spawn(commands, meshes, ba, solid_mat);
 
-    // Upload single shared 1024×512 cơm bình dân atlas and mount UV-cropped quads!
-    let com_mat = ba.textured(images, materials, draw_com_binh_dan_atlas(fonts), false, 0.50);
+    // Upload single shared half-res (512×256) cơm bình dân atlas and mount UV-cropped quads!
+    let com_mat = ba.textured(
+        images,
+        materials,
+        draw_com_binh_dan_atlas(fonts).downsample_half(),
+        false,
+        0.50,
+    );
 
     // Overhead sign [0, 0, 512, 160]
     spawn_backdrop_uv_quad(

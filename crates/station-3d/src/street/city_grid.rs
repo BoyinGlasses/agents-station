@@ -1097,11 +1097,15 @@ pub fn spawn_city_grid(
         },
     );
     if let Some(e) = slabs.spawn(commands, meshes, ba, slab_mat) {
-        commands.entity(e).insert(CityNightSidewalk);
+        commands
+            .entity(e)
+            .insert((CityNightSidewalk, bevy::pbr::NotShadowCaster));
     }
 
     let lane_mat = ba.mat_unlit(materials, "#FFFFFF");
-    lanes.spawn(commands, meshes, ba, lane_mat);
+    if let Some(e) = lanes.spawn(commands, meshes, ba, lane_mat) {
+        commands.entity(e).insert(bevy::pbr::NotShadowCaster);
+    }
 
     let shop_strip_img = ba.upload_image(images, draw_generic_shop_strip());
     let em_shop = if night { 0.85 } else { 0.0 };
@@ -1154,12 +1158,15 @@ pub fn spawn_city_grid(
     if let Some(e) = pool_geo.spawn(commands, meshes, ba, pool_mat) {
         commands.entity(e).insert((
             CityNightLampPool,
+            bevy::pbr::NotShadowCaster,
             if night { Visibility::Inherited } else { Visibility::Hidden },
         ));
     }
 
     let vmat_wires = ba.mat(materials, "#FFFFFF", 0.85, 0.0);
-    wires.spawn(commands, meshes, ba, vmat_wires);
+    if let Some(e) = wires.spawn(commands, meshes, ba, vmat_wires) {
+        commands.entity(e).insert(bevy::pbr::NotShadowCaster);
+    }
 
     // 11. Spawn rooftop aviation beacons (pulsing red dots)
     if !beacon_positions.is_empty() {

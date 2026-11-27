@@ -434,6 +434,8 @@ pub fn spawn_backdrop(
             );
         }
     }
+    brands.clear();
+    fonts.trim_cache();
 }
 
 pub fn animate_backdrop_traffic_system(

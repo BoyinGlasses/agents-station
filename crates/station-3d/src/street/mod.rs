@@ -500,10 +500,11 @@ impl StreetMeshBuilder {
     }
 
     pub fn build(self) -> Mesh {
-        let mut mesh = Mesh::new(
-            PrimitiveTopology::TriangleList,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-        );
+        #[cfg(test)]
+        let usages = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
+        #[cfg(not(test))]
+        let usages = RenderAssetUsages::RENDER_WORLD;
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usages);
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);

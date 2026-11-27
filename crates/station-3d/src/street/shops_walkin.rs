@@ -505,7 +505,7 @@ pub fn spawn_walkin_shops(
         let shop_mat = shop_mats
             .entry(chain)
             .or_insert_with(|| {
-                let surf = draw_shop_cell(chain, brands, fonts);
+                let surf = draw_shop_cell(chain, brands, fonts).downsample_half();
                 let img = ba.upload_image(images, surf);
                 let em = if night { 0.42 } else { 0.08 };
                 ba.add_material(

@@ -167,8 +167,14 @@ pub fn spawn_street_scenes_a(
         solid.push_cyl(f.at(1.32, 0.25, 1.10), 0.03, 0.03, 2.20, 8, "#5E6670");
         solid.push_box_rot(f.at(1.32, 0.25, 1.88), Vec3::new(0.54, 0.68, 0.04), rot, "#1F5FB4");
 
-        // UV-cropped 1024×640 V-Green EV cabinet atlas (Front [0,0,512,640], Sides [512,0,256,640], LEZ [768,0,256,320])
-        let ev_mat = ba.textured(images, materials, draw_ev_cabinet_atlas(fonts), night, 0.38);
+        // UV-cropped V-Green EV cabinet atlas (downsampled 2x for lean VRAM/RAM; UVs stay normalized)
+        let ev_mat = ba.textured(
+            images,
+            materials,
+            draw_ev_cabinet_atlas(fonts).downsample_half(),
+            night,
+            0.38,
+        );
         spawn_backdrop_uv_quad(
             commands, meshes, ba, ev_mat.clone(), 1024.0, 640.0, [0.0, 0.0, 512.0, 640.0],
             f.at(0.0, cd * 0.5 + 0.012, 0.08 + ch * 0.5), Vec2::new(cw - 0.04, ch - 0.04), rot,
@@ -281,8 +287,14 @@ pub fn spawn_street_scenes_a(
         solid.push_cyl(f.at(1.25, -0.75, fl + 0.88), 0.20, 0.16, 0.16, 10, "#C9A86A");
         solid.push_box_rot(f.at(2.15, 1.55, 0.56), Vec3::new(0.76, 1.06, 0.06), rot * Quat::from_rotation_x(-0.15), "#E8327A");
 
-        // UV-cropped 1024×512 Korean Photo Studio atlas!
-        let photo_mat = ba.textured(images, materials, draw_photo_studio_atlas(fonts), true, 0.35);
+        // UV-cropped Korean Photo Studio atlas (downsampled 2x for lean VRAM/RAM; UVs stay normalized)
+        let photo_mat = ba.textured(
+            images,
+            materials,
+            draw_photo_studio_atlas(fonts).downsample_half(),
+            true,
+            0.35,
+        );
         // Neon sign [0, 0, 1024, 192]
         spawn_backdrop_uv_quad(
             commands, meshes, ba, photo_mat.clone(), 1024.0, 512.0, [0.0, 0.0, 1024.0, 192.0],
@@ -368,8 +380,14 @@ pub fn spawn_street_scenes_a(
             push_figure(&mut solid, pt(px, PB_TOP + 0.02, pz), py, sh, pa, "#241E1A");
         }
 
-        // UV-cropped 1024×512 Pickleball windscreen banners [0,0,1024,128] & gate board [0,128,512,384]
-        let pb_mat = ba.textured(images, materials, draw_pickleball_atlas(fonts), false, 0.55);
+        // UV-cropped Pickleball windscreen banners [0,0,1024,128] & gate board [0,128,512,384]
+        let pb_mat = ba.textured(
+            images,
+            materials,
+            draw_pickleball_atlas(fonts).downsample_half(),
+            false,
+            0.55,
+        );
         for s in [-1.0_f32, 1.0] {
             spawn_backdrop_uv_quad(
                 commands, meshes, ba, pb_mat.clone(), 1024.0, 512.0, [0.0, 0.0, 1024.0, 128.0],

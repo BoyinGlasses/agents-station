@@ -298,10 +298,11 @@ fn append_wheel_to_rest(
 
 fn decoded_to_mesh(sub: DecodedSubMesh) -> Mesh {
     let uvs = vec![[0.0_f32, 0.0_f32]; sub.positions.len()];
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
+    #[cfg(test)]
+    let usages = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
+    #[cfg(not(test))]
+    let usages = RenderAssetUsages::RENDER_WORLD;
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, usages);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, sub.positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, sub.normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
