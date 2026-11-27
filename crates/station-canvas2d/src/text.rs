@@ -157,6 +157,17 @@ impl FontEngine {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
+    /// Drops cached rasterized glyph bitmaps (`SwashCache`) after bulk texture synthesis so
+    /// large street-fascia glyphs do not linger in resident RAM.
+    pub fn trim_cache(&mut self) {
+        let mut inner = self.inner.lock().expect("FontEngine lock poisoned");
+        inner.swash_cache = SwashCache::new();
+        let mut fresh = Buffer::new(&mut inner.font_system, Metrics::new(16.0, 19.0));
+        fresh.set_wrap(&mut inner.font_system, Wrap::None);
+        fresh.set_size(&mut inner.font_system, None, None);
+        inner.scratch = fresh;
+    }
+
     /// Shapes a single line and returns positioned glyph metadata for diagnostics/tests.
     pub fn shape_line(&mut self, text: &str, size_px: f32, bold: bool, mono: bool) -> Vec<ShapedGlyphInfo> {
         if text.is_empty() {

@@ -44,6 +44,40 @@ impl RgbaSurface {
             .count();
         diff as f32 / total as f32
     }
+
+    /// 2x2 box-filtered half-resolution copy (4x smaller GPU & staging footprint while keeping
+    /// normalized UV rects identical and improving isometric anti-aliasing).
+    pub fn downsample_half(&self) -> Self {
+        let nw = (self.width / 2).max(1);
+        let nh = (self.height / 2).max(1);
+        let sw = self.width as usize;
+        let sh = self.height as usize;
+        let mut out = vec![0u8; (nw as usize) * (nh as usize) * 4];
+        for y in 0..nh as usize {
+            let sy0 = (y * 2).min(sh.saturating_sub(1));
+            let sy1 = (sy0 + 1).min(sh.saturating_sub(1));
+            for x in 0..nw as usize {
+                let sx0 = (x * 2).min(sw.saturating_sub(1));
+                let sx1 = (sx0 + 1).min(sw.saturating_sub(1));
+                let idx = [
+                    (sy0 * sw + sx0) * 4,
+                    (sy0 * sw + sx1) * 4,
+                    (sy1 * sw + sx0) * 4,
+                    (sy1 * sw + sx1) * 4,
+                ];
+                let dst = (y * nw as usize + x) * 4;
+                for c in 0..4 {
+                    let sum: u32 = idx.iter().map(|&i| self.rgba[i + c] as u32).sum();
+                    out[dst + c] = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+        Self {
+            width: nw,
+            height: nh,
+            rgba: out,
+        }
+    }
 }
 
 pub fn hex_rgba(hex: &str, alpha: u8) -> [u8; 4] {
