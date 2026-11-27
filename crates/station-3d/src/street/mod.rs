@@ -73,6 +73,7 @@ pub struct StreetMeshBuilder {
     positions: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
+    uvs_1: Vec<[f32; 2]>,
     colors: Vec<[f32; 4]>,
     indices: Vec<u32>,
 }
@@ -102,6 +103,22 @@ impl StreetMeshBuilder {
         }
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_quad_uv1(
+        &mut self,
+        v0: Vec3,
+        v1: Vec3,
+        v2: Vec3,
+        v3: Vec3,
+        normal: Vec3,
+        uvs: [[f32; 2]; 4],
+        uvs_1: [[f32; 2]; 4],
+        color: [f32; 4],
+    ) {
+        self.push_quad(v0, v1, v2, v3, normal, uvs, color);
+        self.uvs_1.extend_from_slice(&uvs_1);
     }
 
     /// Appends an axis-aligned or rotated box centered at `center` with extents `size`.
@@ -181,7 +198,8 @@ impl StreetMeshBuilder {
     }
 
     /// Appends a building volume with per-bay & per-floor repeating UVs on vertical sides
-    /// (matching `city.js:132-140` `addBox`) and neutral top/bottom UVs.
+    /// (`UV_0` for 1×1 day tile, `UV_1` scaled by `(1/16, 1/32)` for the 16×32 night emissive atlas,
+    /// and descending V so upper notched shop walls align seamlessly with full-height floors).
     #[allow(clippy::too_many_arguments)]
     pub fn push_facade_box(
         &mut self,
@@ -204,66 +222,82 @@ impl StreetMeshBuilder {
         let yt = yb + h;
         let bays_x = (w / bay_w).round().max(1.0);
         let bays_z = (d / bay_w).round().max(1.0);
-        let v0 = off_v + y0 / floor_h;
-        let v1 = v0 + h / floor_h;
+        let v_bot = off_v - y0 / floor_h;
+        let v_top = off_v - (y0 + h) / floor_h;
         let side_uv = |bays: f32| {
             [
-                [off_u, v1],
-                [off_u + bays, v1],
-                [off_u + bays, v0],
-                [off_u, v0],
+                [off_u, v_bot],
+                [off_u + bays, v_bot],
+                [off_u + bays, v_top],
+                [off_u, v_top],
+            ]
+        };
+        let to_uv1 = |uvs: [[f32; 2]; 4]| {
+            [
+                [uvs[0][0] / 16.0, uvs[0][1] / 32.0],
+                [uvs[1][0] / 16.0, uvs[1][1] / 32.0],
+                [uvs[2][0] / 16.0, uvs[2][1] / 32.0],
+                [uvs[3][0] / 16.0, uvs[3][1] / 32.0],
             ]
         };
         let cap_uv = [[0.02, 0.02]; 4];
+        let cap_uv1 = [[0.02 / 16.0, 0.02 / 32.0]; 4];
+        let uvx = side_uv(bays_x);
+        let uvz = side_uv(bays_z);
 
         // +Z
-        self.push_quad(
+        self.push_quad_uv1(
             Vec3::new(cx - hx, yb, cz + hz),
             Vec3::new(cx + hx, yb, cz + hz),
             Vec3::new(cx + hx, yt, cz + hz),
             Vec3::new(cx - hx, yt, cz + hz),
             Vec3::Z,
-            side_uv(bays_x),
+            uvx,
+            to_uv1(uvx),
             col,
         );
         // -Z
-        self.push_quad(
+        self.push_quad_uv1(
             Vec3::new(cx + hx, yb, cz - hz),
             Vec3::new(cx - hx, yb, cz - hz),
             Vec3::new(cx - hx, yt, cz - hz),
             Vec3::new(cx + hx, yt, cz - hz),
             Vec3::NEG_Z,
-            side_uv(bays_x),
+            uvx,
+            to_uv1(uvx),
             col,
         );
         // +X
-        self.push_quad(
+        self.push_quad_uv1(
             Vec3::new(cx + hx, yb, cz + hz),
             Vec3::new(cx + hx, yb, cz - hz),
             Vec3::new(cx + hx, yt, cz - hz),
             Vec3::new(cx + hx, yt, cz + hz),
             Vec3::X,
-            side_uv(bays_z),
+            uvz,
+            to_uv1(uvz),
             col,
         );
         // -X
-        self.push_quad(
+        self.push_quad_uv1(
             Vec3::new(cx - hx, yb, cz - hz),
             Vec3::new(cx - hx, yb, cz + hz),
             Vec3::new(cx - hx, yt, cz + hz),
             Vec3::new(cx - hx, yt, cz - hz),
             Vec3::NEG_X,
-            side_uv(bays_z),
+            uvz,
+            to_uv1(uvz),
             col,
         );
         // +Y top
-        self.push_quad(
+        self.push_quad_uv1(
             Vec3::new(cx - hx, yt, cz + hz),
             Vec3::new(cx + hx, yt, cz + hz),
             Vec3::new(cx + hx, yt, cz - hz),
             Vec3::new(cx - hx, yt, cz - hz),
             Vec3::Y,
             cap_uv,
+            cap_uv1,
             col,
         );
     }
@@ -297,11 +331,12 @@ impl StreetMeshBuilder {
             let t0 = xform(Vec3::new(c0 * r_top, hh, s0 * r_top));
             let am = (a0 + a1) * 0.5;
             let side_n = nrm(Vec3::new(am.cos(), 0.0, am.sin()));
+            // Counter-clockwise winding viewed from outside (+side_n outward!)
             self.push_quad(
-                b0,
                 b1,
-                t1,
+                b0,
                 t0,
+                t1,
                 side_n,
                 [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
                 col,
@@ -412,6 +447,9 @@ impl StreetMeshBuilder {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        if !self.uvs_1.is_empty() {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, self.uvs_1);
+        }
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
         mesh.insert_indices(Indices::U32(self.indices));
         mesh
@@ -785,5 +823,76 @@ pub fn animate_city_signals_and_night_system(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::render::mesh::VertexAttributeValues;
+
+    #[test]
+    fn push_cyl_rot_emits_outward_wound_triangles_for_sides_and_cap() {
+        let mut b = StreetMeshBuilder::default();
+        b.push_cyl_rot(
+            Vec3::new(1.0, 2.0, -3.0),
+            0.35,
+            0.50,
+            1.6,
+            12,
+            Quat::from_euler(EulerRot::YXZ, 0.4, 0.25, -0.15),
+            "#AABBCC",
+        );
+        let mesh = b.build();
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(v)) => v,
+            other => panic!("expected Float32x3 positions, got {other:?}"),
+        };
+        let normals = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+            Some(VertexAttributeValues::Float32x3(v)) => v,
+            other => panic!("expected Float32x3 normals, got {other:?}"),
+        };
+        let indices: Vec<usize> = match mesh.indices() {
+            Some(Indices::U32(v)) => v.iter().map(|&i| i as usize).collect(),
+            other => panic!("expected U32 indices, got {other:?}"),
+        };
+        assert!(!indices.is_empty());
+        for (tri_idx, tri) in indices.chunks_exact(3).enumerate() {
+            let p0 = Vec3::from_array(positions[tri[0]]);
+            let p1 = Vec3::from_array(positions[tri[1]]);
+            let p2 = Vec3::from_array(positions[tri[2]]);
+            let n = Vec3::from_array(normals[tri[0]]);
+            let cross = (p1 - p0).cross(p2 - p0);
+            assert!(
+                cross.dot(n) > 0.0,
+                "triangle {tri_idx} has inverted winding: cross={cross:?}, normal={n:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_facade_box_populates_uv1_scaled_1_16_by_1_32_and_aligns_notched_v_seam() {
+        let mut b = StreetMeshBuilder::default();
+        b.push_facade_box(0.0, 0.0, 7.6, 5.7, 2.75, 6.25, "#CFC8BC", 3.0, 7.0, 1.9, 3.0);
+        let mesh = b.build();
+
+        let uv0 = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+            Some(VertexAttributeValues::Float32x2(v)) => v,
+            other => panic!("expected UV_0, got {other:?}"),
+        };
+        let uv1 = match mesh.attribute(Mesh::ATTRIBUTE_UV_1) {
+            Some(VertexAttributeValues::Float32x2(v)) => v,
+            other => panic!("expected UV_1 on facade mesh, got {other:?}"),
+        };
+        assert_eq!(uv0.len(), uv1.len());
+        for (a, c) in uv0.iter().zip(uv1.iter()) {
+            assert!((c[0] - a[0] / 16.0).abs() < 1e-5, "UV_1.u mismatch: {a:?} vs {c:?}");
+            assert!((c[1] - a[1] / 32.0).abs() < 1e-5, "UV_1.v mismatch: {a:?} vs {c:?}");
+        }
+        // Bottom V of upper notched piece at y0=2.75 must equal off_v - 2.75/3.0
+        let expected_v_bot = 7.0 - 2.75 / 3.0;
+        let expected_v_top = 7.0 - (2.75 + 6.25) / 3.0;
+        assert!((uv0[0][1] - expected_v_bot).abs() < 1e-5);
+        assert!((uv0[2][1] - expected_v_top).abs() < 1e-5);
     }
 }

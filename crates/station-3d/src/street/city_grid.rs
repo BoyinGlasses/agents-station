@@ -321,6 +321,7 @@ pub fn spawn_city_grid(
                 base_color_texture: Some(day_img),
                 emissive: LinearRgba::new(em, em, em, 1.0),
                 emissive_texture: Some(night_img),
+                emissive_channel: bevy::pbr::UvChannel::Uv1,
                 perceptual_roughness: rough,
                 metallic: metal,
                 ..default()
