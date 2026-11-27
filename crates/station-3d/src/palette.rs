@@ -332,6 +332,27 @@ impl WorldPalette {
         handle
     }
 
+    /// Replaces a previously owned GPU `Image` handle in-place, removing the old handle from BOTH
+    /// `Assets<Image>` and `self.owned_images` so repeated dynamic uploads never leak VRAM/RAM.
+    pub fn replace_owned_image(
+        &mut self,
+        images: &mut Assets<Image>,
+        old: Option<&Handle<Image>>,
+        surface: RgbaSurface,
+    ) -> Handle<Image> {
+        if let Some(old_h) = old {
+            self.remove_owned_image(images, old_h);
+        }
+        self.upload_surface(images, surface)
+    }
+
+    /// Removes a single previously owned GPU `Image` handle from BOTH `Assets<Image>` and `self.owned_images`.
+    pub fn remove_owned_image(&mut self, images: &mut Assets<Image>, old: &Handle<Image>) {
+        let old_id = old.id();
+        images.remove(old_id);
+        self.owned_images.retain(|h| h.id() != old_id);
+    }
+
     pub fn textured_unlit(
         &mut self,
         images: &mut Assets<Image>,
