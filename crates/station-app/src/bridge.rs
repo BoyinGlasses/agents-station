@@ -8,7 +8,7 @@ use bevy::render::camera::{RenderTarget, Viewport};
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
 use bevy::window::PrimaryWindow;
 use bevy_egui::egui;
-use chrono::{Local, TimeZone, Timelike};
+use chrono::{Datelike, Local, TimeZone, Timelike};
 use serde_json::{Value, json};
 use station_3d::{BackdropAssets, BackdropEntity, LayoutSpec, SfxKind, WorldEntity, WorldPalette};
 use station_canvas2d::BrandRegistry;
@@ -5593,55 +5593,142 @@ fn apply_weather_to_state(
     ui.weather_desc = weather_desc_for_code(code).to_owned();
 }
 
+struct WeatherInFlightGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for WeatherInFlightGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Non-blocking Open-Meteo fetch (5s timeout, offline-safe, zero `powershell.exe` spawns).
-fn spawn_open_meteo_fetch(city_code: String, tx: mpsc::Sender<BridgeAsyncResult>) {
+/// Deduplicates concurrent requests with an `AtomicBool` in-flight guard and reuses the
+/// existing `tokio::runtime::Handle` when running `InProcess`.
+fn spawn_open_meteo_fetch(
+    city_code: String,
+    tx: mpsc::Sender<BridgeAsyncResult>,
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
+    runtime_handle: Option<tokio::runtime::Handle>,
+) -> bool {
     let coords = station_3d::life::VN_WEATHER_CITIES
         .iter()
         .find(|(code, _, _, _)| code.eq_ignore_ascii_case(&city_code))
         .map(|(_, _, lat, lon)| (*lat, *lon));
     let Some((lat, lon)) = coords else {
-        return;
+        return false;
     };
-    let _ = std::thread::Builder::new()
-        .name("station-open-meteo".to_owned())
-        .spawn(move || {
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
-            rt.block_on(async move {
-                let Ok(client) = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(5))
+    if in_flight
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+
+    let fut = async move {
+        let _guard = WeatherInFlightGuard(in_flight);
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+        else {
+            return;
+        };
+        let url = format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code&timezone=auto"
+        );
+        let Ok(resp) = client.get(url).send().await else {
+            return;
+        };
+        let Ok(val) = resp.json::<Value>().await else {
+            return;
+        };
+        let Some(cur) = val.get("current") else {
+            return;
+        };
+        let Some(code) = cur.get("weather_code").and_then(Value::as_u64) else {
+            return;
+        };
+        let Some(temp) = cur.get("temperature_2m").and_then(Value::as_f64) else {
+            return;
+        };
+        let _ = tx.try_send(BridgeAsyncResult::WeatherFetched {
+            code: code as u32,
+            temp_c: temp as f32,
+        });
+    };
+
+    if let Some(rt) = runtime_handle {
+        rt.spawn(fut);
+        true
+    } else {
+        let spawned = std::thread::Builder::new()
+            .name("station-open-meteo".to_owned())
+            .spawn(move || {
+                let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
                     .build()
                 else {
+                    drop(fut);
                     return;
                 };
-                let url = format!(
-                    "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code&timezone=auto"
-                );
-                let Ok(resp) = client.get(url).send().await else {
-                    return;
-                };
-                let Ok(val) = resp.json::<Value>().await else {
-                    return;
-                };
-                let Some(cur) = val.get("current") else {
-                    return;
-                };
-                let Some(code) = cur.get("weather_code").and_then(Value::as_u64) else {
-                    return;
-                };
-                let Some(temp) = cur.get("temperature_2m").and_then(Value::as_f64) else {
-                    return;
-                };
-                let _ = tx.try_send(BridgeAsyncResult::WeatherFetched {
-                    code: code as u32,
-                    temp_c: temp as f32,
-                });
+                rt.block_on(fut);
             });
-        });
+        spawned.is_ok()
+    }
+}
+
+fn is_last_weekday_of_month(date: chrono::NaiveDate) -> bool {
+    let wd = date.weekday().num_days_from_sunday();
+    if wd == 0 || wd == 6 {
+        return false;
+    }
+    let month = date.month();
+    let mut cur = date;
+    while let Some(next) = cur.succ_opt() {
+        if next.month() != month {
+            break;
+        }
+        let nwd = next.weekday().num_days_from_sunday();
+        if (1..=5).contains(&nwd) {
+            return false;
+        }
+        cur = next;
+    }
+    true
+}
+
+fn sync_wall_clock_to_cast_and_altar(
+    now: chrono::NaiveDateTime,
+    clock: Option<&mut station_3d::CastClock>,
+    staff: Option<&mut station_3d::StaffCastState>,
+    altar: Option<&mut station_3d::AltarState>,
+) {
+    let date = now.date();
+    let minutes = now.hour() * 60 + now.minute();
+    let weekday = date.weekday().num_days_from_sunday() as u8;
+    let day_of_month = date.day() as u8;
+    let last_wd = is_last_weekday_of_month(date);
+    let workday = station_3d::life_systems::is_workday(date.year(), date.month(), date.day());
+    let day_index = date.num_days_from_ce().max(1) as u32;
+
+    if let Some(c) = clock {
+        c.minutes = minutes;
+        c.weekday = weekday;
+        c.day_of_month = day_of_month;
+        c.is_last_weekday_of_month = last_wd;
+        c.is_workday = workday;
+        c.day_index = day_index;
+    }
+    if let Some(st) = staff {
+        st.clock_minutes = minutes;
+    }
+    if let Some(al) = altar {
+        al.date_ymd = (date.year(), date.month(), date.day());
+    }
 }
 
 fn apply_replay_snapshot_to_ui(rep: &station_3d::replay::ReplayState, ui: &mut UiState) {
@@ -5822,36 +5909,101 @@ fn step_demo_simulation_system(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(SystemParam)]
+struct LifeWorldDataParams<'w, 's> {
+    ui: Option<Res<'w, UiState>>,
+    life: Option<Res<'w, station_3d::life::OfficeLifeState>>,
+    cast_clock: Option<ResMut<'w, station_3d::CastClock>>,
+    staff_cast: Option<ResMut<'w, station_3d::StaffCastState>>,
+    altar: Option<ResMut<'w, station_3d::AltarState>>,
+    trophies: Option<ResMut<'w, station_3d::TrophiesShelfState>>,
+    strips: Option<ResMut<'w, station_3d::PhotostripsState>>,
+    pal: Option<ResMut<'w, WorldPalette>>,
+    images: Option<ResMut<'w, Assets<Image>>>,
+    materials: Option<ResMut<'w, Assets<StandardMaterial>>>,
+    q_strips: Query<'w, 's, (&'static station_3d::PhotostripSlot, &'static mut Visibility)>,
+}
+
+const WEATHER_POLL_INTERVAL_SECS: f32 = 900.0; // 15 minutes
+
 fn sync_life_world_data_system(
     time: Res<Time>,
     bridge: Res<LiveServerBridge>,
-    mut trophies: Option<ResMut<station_3d::TrophiesShelfState>>,
-    mut strips: Option<ResMut<station_3d::PhotostripsState>>,
-    mut pal: Option<ResMut<WorldPalette>>,
-    mut images: Option<ResMut<Assets<Image>>>,
-    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut q_strips: Query<(&station_3d::PhotostripSlot, &mut Visibility)>,
+    mut params: LifeWorldDataParams,
     mut elapsed: bevy::prelude::Local<f32>,
     mut initialized: bevy::prelude::Local<bool>,
+    mut weather_elapsed: bevy::prelude::Local<f32>,
+    mut weather_started: bevy::prelude::Local<bool>,
 ) {
-    *elapsed += time.delta_secs();
-    if *initialized && *elapsed < 5.0 {
+    let dt = time.delta_secs();
+    let live_net = bridge.is_live_net();
+
+    // Startup + 15-minute Open-Meteo weather refresh (strictly gated on live_net)
+    if live_net {
+        *weather_elapsed += dt;
+        if !*weather_started || *weather_elapsed >= WEATHER_POLL_INTERVAL_SECS {
+            let city_code = params
+                .life
+                .as_deref()
+                .map(|l| l.weather_city.clone())
+                .or_else(|| {
+                    params
+                        .ui
+                        .as_deref()
+                        .map(|u| station_3d::life::weather_city_display(&u.weather_city).0)
+                })
+                .unwrap_or_else(|| "hcm".to_owned());
+            if spawn_open_meteo_fetch(
+                city_code,
+                bridge.async_tx.clone(),
+                bridge.weather_fetch_in_flight.clone(),
+                bridge.runtime_handle(),
+            ) {
+                *weather_started = true;
+                *weather_elapsed = 0.0;
+            }
+        }
+    }
+
+    let world_rebuilt = params.pal.as_ref().is_some_and(|p| p.is_added());
+    if world_rebuilt {
+        if let Some(st) = params.strips.as_deref_mut() {
+            st.mark_world_rebuilt();
+        }
+        if let Some(tr) = params.trophies.as_deref_mut() {
+            tr.needs_sync = true;
+            tr.dirty = true;
+        }
+    }
+
+    *elapsed += dt;
+    if *initialized && !world_rebuilt && *elapsed < 5.0 {
         return;
     }
     *initialized = true;
     *elapsed = 0.0;
 
-    if let Some(tr) = trophies.as_deref_mut() {
+    // Throttled live wall-clock sync for CastClock, StaffCastState, and AltarState
+    let in_replay = params.ui.as_deref().is_some_and(|u| u.replay_active);
+    if live_net && !in_replay {
+        sync_wall_clock_to_cast_and_altar(
+            Local::now().naive_local(),
+            params.cast_clock.as_deref_mut(),
+            params.staff_cast.as_deref_mut(),
+            params.altar.as_deref_mut(),
+        );
+    }
+
+    if let Some(tr) = params.trophies.as_deref_mut() {
         let totals_path = bridge.data_dir.join("totals.json");
         tr.load_from_totals_json(&totals_path);
     }
-    if let Some(st) = strips.as_deref_mut() {
+    if let Some(st) = params.strips.as_deref_mut() {
         let shots_dir = bridge.data_dir.join("shots");
         if let (Some(pal), Some(imgs), Some(mats)) = (
-            pal.as_deref_mut(),
-            images.as_deref_mut(),
-            materials.as_deref_mut(),
+            params.pal.as_deref_mut(),
+            params.images.as_deref_mut(),
+            params.materials.as_deref_mut(),
         ) {
             station_3d::sync_photostrips_from_shots_dir(
                 &shots_dir,
@@ -5859,7 +6011,7 @@ fn sync_life_world_data_system(
                 pal,
                 imgs,
                 mats,
-                &mut q_strips,
+                &mut params.q_strips,
             );
         } else {
             st.scan_shots_dir(&shots_dir);
@@ -7618,15 +7770,13 @@ fn process_ui_actions(
                 if let Some(life) = aux.life.as_deref_mut() {
                     life.weather_city = code.clone();
                 }
-                let live_net = matches!(
-                    &bridge.backend,
-                    BridgeBackend::InProcess {
-                        runtime_handle: Some(_),
-                        ..
-                    } | BridgeBackend::AttachedHttp { .. }
-                );
-                if live_net {
-                    spawn_open_meteo_fetch(code.clone(), bridge.async_tx.clone());
+                if bridge.is_live_net() {
+                    spawn_open_meteo_fetch(
+                        code.clone(),
+                        bridge.async_tx.clone(),
+                        bridge.weather_fetch_in_flight.clone(),
+                        bridge.runtime_handle(),
+                    );
                 }
                 persist_pref(&bridge, "weatherCity", json!(code));
                 ui.push_toast(
@@ -13591,5 +13741,143 @@ mod tests {
                 .any(|id| id == "sess-1"),
             "work -> rest transition while unfocused must register in YourTurnState"
         );
+    }
+
+    #[test]
+    fn world_rebuild_resyncs_photostrips_and_trophies_immediately_while_offline_skips_clock_and_weather() {
+        let tmp = tempfile::tempdir().unwrap();
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        std::fs::write(
+            tmp.path().join("totals.json"),
+            r#"{"since":1700000000000,"live":{"prompts":200},"earned":{"open":1700000000000,"p100":1}}"#,
+        )
+        .unwrap();
+        let shots = tmp.path().join("shots");
+        std::fs::create_dir_all(&shots).unwrap();
+        image::RgbaImage::from_pixel(64, 96, image::Rgba([90, 140, 220, 255]))
+            .save(shots.join("s1.png"))
+            .unwrap();
+
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".into(),
+            0,
+            false,
+            false,
+        );
+        let mut app = App::new();
+        let mut clock = station_3d::CastClock::default();
+        clock.minutes = 42;
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(bridge)
+            .insert_resource(UiState::default())
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(station_3d::TrophiesShelfState::default())
+            .insert_resource(station_3d::PhotostripsState::default())
+            .insert_resource(clock)
+            .insert_resource(station_3d::StaffCastState::default())
+            .insert_resource(station_3d::AltarState::default())
+            .insert_resource(station_3d::life::OfficeLifeState::default())
+            .add_systems(Update, sync_life_world_data_system);
+
+        // First tick (no palette yet) initializes timer
+        app.update();
+        assert_eq!(app.world().resource::<station_3d::CastClock>().minutes, 42);
+        assert!(
+            !app.world()
+                .resource::<LiveServerBridge>()
+                .weather_fetch_in_flight
+                .load(std::sync::atomic::Ordering::Acquire),
+            "offline test bridge must never trigger Open-Meteo fetch"
+        );
+
+        // Simulate world rebuild: insert brand-new WorldPalette + PhotostripSlot and tick only 0.1s (< 5s)
+        let mat_h = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let slot_ent = app
+            .world_mut()
+            .spawn((
+                station_3d::PhotostripSlot {
+                    index: 0,
+                    mat: mat_h.clone(),
+                },
+                Visibility::Hidden,
+            ))
+            .id();
+        let pal = app.world_mut().resource_scope(|_w, mut meshes: Mut<Assets<Mesh>>| {
+            WorldPalette::new(&mut meshes)
+        });
+        app.world_mut().insert_resource(pal);
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_millis(100));
+        app.update();
+
+        assert_eq!(
+            *app.world().get::<Visibility>(slot_ent).unwrap(),
+            Visibility::Visible,
+            "newly added WorldPalette (world rebuild) must resync photostrips immediately without waiting 5s"
+        );
+        assert!(
+            app.world()
+                .resource::<Assets<StandardMaterial>>()
+                .get(&mat_h)
+                .unwrap()
+                .base_color_texture
+                .is_some(),
+            "photostrip slot material must receive uploaded texture immediately after rebuild"
+        );
+
+        // Wall-clock sync helper computes exact weekday, last-weekday-of-month, Vietnamese workday & altar date
+        let mut c = station_3d::CastClock::default();
+        let mut st = station_3d::StaffCastState::default();
+        let mut al = station_3d::AltarState::default();
+        let dt_last_wd = chrono::NaiveDate::from_ymd_opt(2026, 1, 30)
+            .unwrap()
+            .and_hms_opt(14, 35, 0)
+            .unwrap();
+        sync_wall_clock_to_cast_and_altar(dt_last_wd, Some(&mut c), Some(&mut st), Some(&mut al));
+        assert_eq!(c.minutes, 14 * 60 + 35);
+        assert_eq!(c.weekday, 5); // Friday
+        assert_eq!(c.day_of_month, 30);
+        assert!(c.is_last_weekday_of_month, "2026-01-30 (Fri) is last weekday of Jan 2026");
+        assert!(c.is_workday);
+        assert_eq!(st.clock_minutes, 14 * 60 + 35);
+        assert_eq!(al.date_ymd, (2026, 1, 30));
+
+        // 2026-01-02 is Vietnamese SwapOff -> is_workday == false
+        let dt_swap_off = chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
+            .unwrap()
+            .and_hms_opt(9, 15, 0)
+            .unwrap();
+        sync_wall_clock_to_cast_and_altar(dt_swap_off, Some(&mut c), None, None);
+        assert!(!c.is_workday);
+        assert!(!c.is_last_weekday_of_month);
+
+        // 2026-01-10 is Vietnamese MakeupSaturday -> is_workday == true
+        let dt_makeup = chrono::NaiveDate::from_ymd_opt(2026, 1, 10)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap();
+        sync_wall_clock_to_cast_and_altar(dt_makeup, Some(&mut c), None, None);
+        assert!(c.is_workday);
+
+        // Open-Meteo in-flight AtomicBool guard suppresses duplicate concurrent fetches
+        let (tx, _rx) = mpsc::channel(4);
+        let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(
+            !spawn_open_meteo_fetch("hcm".to_owned(), tx, in_flight.clone(), None),
+            "in-flight guard must suppress duplicate concurrent weather fetch"
+        );
+        // RAII guard resets flag cleanly on drop
+        {
+            let _g = WeatherInFlightGuard(in_flight.clone());
+        }
+        assert!(!in_flight.load(std::sync::atomic::Ordering::Acquire));
     }
 }
