@@ -149,7 +149,7 @@ impl FontEngine {
     }
 
     pub fn loaded_face_count(&self) -> usize {
-        let inner = self.inner.lock().expect("FontEngine lock poisoned");
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.font_system.db().len()
     }
 
@@ -160,7 +160,7 @@ impl FontEngine {
     /// Drops cached rasterized glyph bitmaps (`SwashCache`) after bulk texture synthesis so
     /// large street-fascia glyphs do not linger in resident RAM.
     pub fn trim_cache(&mut self) {
-        let mut inner = self.inner.lock().expect("FontEngine lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         inner.swash_cache = SwashCache::new();
         let mut fresh = Buffer::new(&mut inner.font_system, Metrics::new(16.0, 19.0));
         fresh.set_wrap(&mut inner.font_system, Wrap::None);
@@ -173,7 +173,7 @@ impl FontEngine {
         if text.is_empty() {
             return Vec::new();
         }
-        let mut inner = self.inner.lock().expect("FontEngine lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         shape_scratch(&mut inner, text, size_px, bold, mono);
         let mut out = Vec::new();
         for run in inner.scratch.layout_runs() {
@@ -195,7 +195,7 @@ impl FontEngine {
         if text.is_empty() {
             return 0.0;
         }
-        let mut inner = self.inner.lock().expect("FontEngine lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         shape_scratch(&mut inner, text, size_px, bold, mono);
         inner
             .scratch
@@ -223,7 +223,7 @@ impl FontEngine {
         if text.is_empty() || color[3] == 0 {
             return 0.0;
         }
-        let mut inner = self.inner.lock().expect("FontEngine lock poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut eff_size = size_px.max(6.0);
         shape_scratch(&mut inner, text, eff_size, bold, mono);
         let mut line_w = inner
