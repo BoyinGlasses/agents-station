@@ -609,6 +609,7 @@ pub fn update_drill_and_lift_system(
         ),
     >,
     mut q_doors: Query<&mut ElevatorDoors>,
+    mut q_door_leaves: Query<&mut Transform, (Without<DrillFlame>, Without<LiftTechPart>)>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.25);
     let in_replay = replay.as_deref().is_some_and(|r| r.active);
@@ -789,12 +790,22 @@ pub fn update_drill_and_lift_system(
 
         let mut doors_open = 0.0_f32;
         for mut d in &mut q_doors {
+            let prev = d.open;
             if svc.phase == LiftServicePhase::Work {
                 d.open = 0.42;
             } else if svc.phase == LiftServicePhase::Wrap && svc.new_build {
                 d.open = 1.0;
-            } else if svc.phase == LiftServicePhase::Done && d.open > 0.01 {
+            } else if svc.phase == LiftServicePhase::Done && d.open > 0.0 {
                 d.open = (d.open - dt * 1.5).max(0.0);
+            }
+            if (d.open - prev).abs() > 1e-5 {
+                let open = d.open.clamp(0.0, 1.0);
+                if let Ok(mut tf) = q_door_leaves.get_mut(d.left_door) {
+                    tf.translation.z = d.center_z - (0.25 + open * 0.46);
+                }
+                if let Ok(mut tf) = q_door_leaves.get_mut(d.right_door) {
+                    tf.translation.z = d.center_z + (0.25 + open * 0.46);
+                }
             }
             doors_open = d.open;
         }
@@ -899,15 +910,39 @@ mod tests {
             .add_systems(Update, update_drill_and_lift_system);
 
         let spec = LayoutSpec::for_layout(OfficeLayout::Pro);
-        app.world_mut().resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+        let (left_door, right_door) = app.world_mut().resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
                 world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
                     let mut pal = WorldPalette::new(&mut meshes);
                     let mut cmds = world.commands();
                     spawn_drill_and_lift_service(&mut cmds, &mut pal, &mut mats, &mut imgs, &mut fonts, &spec);
+                    let ld = cmds
+                        .spawn((
+                            WorldEntity,
+                            Transform::from_xyz(LIFT_FRONT - 0.06, 1.065, spec.door_z - 0.25),
+                        ))
+                        .id();
+                    let rd = cmds
+                        .spawn((
+                            WorldEntity,
+                            Transform::from_xyz(LIFT_FRONT - 0.06, 1.065, spec.door_z + 0.25),
+                        ))
+                        .id();
+                    let dm = pal.matte(&mut mats, "#15181E");
+                    cmds.spawn((
+                        WorldEntity,
+                        ElevatorDoors {
+                            left_door: ld,
+                            right_door: rd,
+                            display_mat: dm,
+                            center_z: spec.door_z,
+                            open: 0.0,
+                        },
+                    ));
                     world.insert_resource(pal);
-                });
-            });
+                    (ld, rd)
+                })
+            })
         });
         app.world_mut().flush();
 
@@ -917,6 +952,18 @@ mod tests {
 
         assert_eq!(app.world().resource::<LiftServiceState>().phase, LiftServicePhase::Work);
         assert!(app.world().resource::<OfficeLifeState>().lift_in_service);
+        let left_z_work = app.world().get::<Transform>(left_door).unwrap().translation.z;
+        let right_z_work = app.world().get::<Transform>(right_door).unwrap().translation.z;
+        let expect_left = spec.door_z - (0.25 + 0.42 * 0.46);
+        let expect_right = spec.door_z + (0.25 + 0.42 * 0.46);
+        assert!(
+            (left_z_work - expect_left).abs() < 1e-3,
+            "left elevator door ({left_z_work}) must slide to {expect_left} during Work"
+        );
+        assert!(
+            (right_z_work - expect_right).abs() < 1e-3,
+            "right elevator door ({right_z_work}) must slide to {expect_right} during Work"
+        );
         let vis_barriers = app
             .world_mut()
             .query_filtered::<&Visibility, With<LiftBarrierPart>>()
@@ -941,6 +988,16 @@ mod tests {
             .filter(|v| **v == Visibility::Visible)
             .count();
         assert_eq!(vis_barriers_after, 0);
+        let left_z_done = app.world().get::<Transform>(left_door).unwrap().translation.z;
+        let right_z_done = app.world().get::<Transform>(right_door).unwrap().translation.z;
+        assert!(
+            (left_z_done - (spec.door_z - 0.25)).abs() < 1e-2,
+            "left elevator door ({left_z_done}) must slide back closed after Done"
+        );
+        assert!(
+            (right_z_done - (spec.door_z + 0.25)).abs() < 1e-2,
+            "right elevator door ({right_z_done}) must slide back closed after Done"
+        );
 
         // Zero leak check
         let ents: Vec<Entity> = app.world_mut().query_filtered::<Entity, With<WorldEntity>>().iter(app.world()).collect();

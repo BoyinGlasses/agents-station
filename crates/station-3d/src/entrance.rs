@@ -300,3 +300,19 @@ pub fn spawn_entrance(
         open: 0.0,
     });
 }
+
+/// Slides `ElevatorDoors` left/right steel leaves along Z whenever `ElevatorDoors` changes.
+pub fn animate_elevator_doors_system(
+    q_doors: Query<&ElevatorDoors, Changed<ElevatorDoors>>,
+    mut q_tf: Query<&mut Transform>,
+) {
+    for d in &q_doors {
+        let open = d.open.clamp(0.0, 1.0);
+        if let Ok(mut tf) = q_tf.get_mut(d.left_door) {
+            tf.translation.z = d.center_z - (0.25 + open * 0.46);
+        }
+        if let Ok(mut tf) = q_tf.get_mut(d.right_door) {
+            tf.translation.z = d.center_z + (0.25 + open * 0.46);
+        }
+    }
+}

@@ -178,6 +178,7 @@ fn register_office_runtime(
             (
                 life_systems::update_altar_system,
                 life_systems::update_drill_and_lift_system,
+                entrance::animate_elevator_doors_system.after(life_systems::update_drill_and_lift_system),
                 life_systems::update_seasons_and_weather_system,
                 life_systems::update_workflow_life_system,
                 life_systems::update_nap_system,
