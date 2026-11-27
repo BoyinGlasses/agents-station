@@ -562,6 +562,7 @@ pub fn spawn_backdrop_uv_quad(
         .spawn((
             WorldEntity,
             BackdropEntity,
+            bevy::pbr::NotShadowCaster,
             Mesh3d(quad),
             MeshMaterial3d(mat),
             Transform::from_translation(pos)
@@ -877,7 +878,7 @@ pub fn animate_city_signals_and_night_system(
     mut pools: Query<&mut Visibility, (With<city_grid::CityNightLampPool>, Without<city_grid::TrafficSignalLamp>, Without<city_grid::RooftopBeacon>)>,
     added_city: Query<(), Added<city_grid::CityNightAsphalt>>,
     asphalt_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightAsphalt>>,
-    facade_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightFacade>>,
+    facade_q: Query<(&city_grid::CityNightFacade, &MeshMaterial3d<StandardMaterial>)>,
     slab_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightSidewalk>>,
     bulb_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightLampBulb>>,
     shop_lightbox_q: Query<&MeshMaterial3d<StandardMaterial>, With<shops_walkin::ShopLightboxNight>>,
@@ -930,9 +931,23 @@ pub fn animate_city_signals_and_night_system(
                     }
                 }
                 let em = if night { 0.9 } else { 0.0 };
-                for mh in &facade_q {
+                for (fac, mh) in &facade_q {
                     if let Some(m) = mats.get_mut(&mh.0) {
                         m.emissive = LinearRgba::new(em, em, em, 1.0);
+                        m.emissive_texture = if night {
+                            fac.night_tex
+                                .clone()
+                                .or_else(|| m.base_color_texture.clone())
+                        } else {
+                            None
+                        };
+                        if fac.use_uv1 {
+                            m.emissive_channel = if night {
+                                bevy::pbr::UvChannel::Uv1
+                            } else {
+                                bevy::pbr::UvChannel::Uv0
+                            };
+                        }
                     }
                 }
                 for mh in &slab_q {
@@ -955,10 +970,15 @@ pub fn animate_city_signals_and_night_system(
                         m.unlit = night;
                     }
                 }
-                let shop_em = if night { 0.42 } else { 0.08 };
+                let shop_em = if night { 0.42 } else { 0.0 };
                 for mh in &shop_lightbox_q {
                     if let Some(m) = mats.get_mut(&mh.0) {
                         m.emissive = LinearRgba::new(shop_em, shop_em, shop_em, 1.0);
+                        m.emissive_texture = if night {
+                            m.base_color_texture.clone()
+                        } else {
+                            None
+                        };
                     }
                 }
                 let nhau_lin = srgb_hex("#FFD47A").to_linear();
@@ -1186,7 +1206,10 @@ mod tests {
         app.update();
         let mats = app.world().resource::<Assets<StandardMaterial>>();
         for h in &shop_handles {
-            assert!((mats.get(h).unwrap().emissive.red - 0.08).abs() < 1e-4);
+            assert!(
+                mats.get(h).unwrap().emissive.red.abs() < 1e-4
+                    && mats.get(h).unwrap().emissive_texture.is_none()
+            );
         }
         let expected_day_bulb = srgb_hex("#FFD47A").to_linear().red * 0.4;
         for h in &nhau_handles {

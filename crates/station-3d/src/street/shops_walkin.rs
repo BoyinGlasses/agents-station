@@ -507,14 +507,14 @@ pub fn spawn_walkin_shops(
             .or_insert_with(|| {
                 let surf = draw_shop_cell(chain, brands, fonts).downsample_half();
                 let img = ba.upload_image(images, surf);
-                let em = if night { 0.42 } else { 0.08 };
+                let em = if night { 0.42 } else { 0.0 };
                 ba.add_material(
                     materials,
                     StandardMaterial {
                         base_color: Color::WHITE,
                         base_color_texture: Some(img.clone()),
                         emissive: LinearRgba::new(em, em, em, 1.0),
-                        emissive_texture: Some(img),
+                        emissive_texture: if night { Some(img) } else { None },
                         perceptual_roughness: 0.42,
                         ..default()
                     },

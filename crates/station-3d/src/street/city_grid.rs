@@ -113,7 +113,10 @@ impl CityGridData {
 #[derive(Component)]
 pub struct CityNightAsphalt;
 #[derive(Component)]
-pub struct CityNightFacade;
+pub struct CityNightFacade {
+    pub night_tex: Option<Handle<Image>>,
+    pub use_uv1: bool,
+}
 #[derive(Component)]
 pub struct CityNightSidewalk;
 #[derive(Component)]
@@ -331,9 +334,11 @@ pub fn spawn_city_grid(
         pickle.is_some_and(|p| x > p.x0 - m && x < p.x1 + m && z > p.z0 - m && z < p.z1 + m)
     };
 
-    // 4. Facade style materials (day tile + night lit window emissive atlas)
+    // 4. Facade style materials (day tile + lazy night lit-window emissive atlas so daytime skips
+    // compiling the UV_1 + emissive_texture Vulkan PBR pipeline until night mode is enabled).
     let style_specs = [(0.30_f32, 0.45_f32), (0.88, 0.0), (0.92, 0.0), (0.70, 0.05)];
     let mut style_mats = Vec::with_capacity(4);
+    let mut style_night_imgs = Vec::with_capacity(4);
     for (idx, &(rough, metal)) in style_specs.iter().enumerate() {
         let day_img = ba.upload_repeating_image(images, draw_facade_day_tile(idx));
         let night_img = ba.upload_repeating_image(images, draw_facade_night_atlas(idx));
@@ -344,14 +349,19 @@ pub fn spawn_city_grid(
                 base_color: Color::WHITE,
                 base_color_texture: Some(day_img),
                 emissive: LinearRgba::new(em, em, em, 1.0),
-                emissive_texture: Some(night_img),
-                emissive_channel: bevy::pbr::UvChannel::Uv1,
+                emissive_texture: if night { Some(night_img.clone()) } else { None },
+                emissive_channel: if night {
+                    bevy::pbr::UvChannel::Uv1
+                } else {
+                    bevy::pbr::UvChannel::Uv0
+                },
                 perceptual_roughness: rough,
                 metallic: metal,
                 ..default()
             },
         );
         style_mats.push(mat);
+        style_night_imgs.push(night_img);
     }
 
     let facade_tints: [&[&str]; 4] = [
@@ -1072,9 +1082,19 @@ pub fn spawn_city_grid(
     }
 
     // 10. Spawn merged static meshes into BackdropAssets
-    for (builder, mat) in facade_builders.into_iter().zip(style_mats) {
+    for ((builder, mat), night_img) in facade_builders
+        .into_iter()
+        .zip(style_mats)
+        .zip(style_night_imgs)
+    {
         if let Some(e) = builder.spawn(commands, meshes, ba, mat) {
-            commands.entity(e).insert(CityNightFacade);
+            commands.entity(e).insert((
+                CityNightFacade {
+                    night_tex: Some(night_img),
+                    use_uv1: true,
+                },
+                bevy::pbr::NotShadowCaster,
+            ));
         }
     }
     let vmat_roof = ba.mat(materials, "#FFFFFF", 0.90, 0.0);
@@ -1121,13 +1141,19 @@ pub fn spawn_city_grid(
             base_color: Color::WHITE,
             base_color_texture: Some(shop_strip_img.clone()),
             emissive: LinearRgba::new(em_shop, em_shop, em_shop, 1.0),
-            emissive_texture: Some(shop_strip_img),
+            emissive_texture: if night { Some(shop_strip_img) } else { None },
             perceptual_roughness: 0.6,
             ..default()
         },
     );
     if let Some(e) = plain_shops.spawn(commands, meshes, ba, shop_strip_mat) {
-        commands.entity(e).insert(CityNightFacade);
+        commands.entity(e).insert((
+            CityNightFacade {
+                night_tex: None,
+                use_uv1: false,
+            },
+            bevy::pbr::NotShadowCaster,
+        ));
     }
 
     let vmat_lamp = ba.mat(materials, "#FFFFFF", 0.45, 0.5);
@@ -1183,6 +1209,7 @@ pub fn spawn_city_grid(
                 WorldEntity,
                 BackdropEntity,
                 RooftopBeacon { phase: idx as f32 * 0.37 },
+                bevy::pbr::NotShadowCaster,
                 Mesh3d(beacon_mesh.clone()),
                 MeshMaterial3d(beacon_mat.clone()),
                 Transform::from_translation(pos),
@@ -1233,6 +1260,7 @@ pub fn spawn_city_grid(
                         axis_x: p.axis_x,
                         color: col,
                     },
+                    bevy::pbr::NotShadowCaster,
                     Mesh3d(lamp_mesh.clone()),
                     MeshMaterial3d(mat),
                     Transform::from_translation(lp),
@@ -1250,6 +1278,7 @@ pub fn spawn_city_grid(
                     last_frame: init_frame as u8,
                     frames: cd_frames.clone(),
                 },
+                bevy::pbr::NotShadowCaster,
                 Mesh3d(cd_frames[init_frame].clone()),
                 MeshMaterial3d(cd_atlas_mat.clone()),
                 Transform::from_translation(cd_pos + rot * Vec3::new(0.0, 0.0, 0.075))

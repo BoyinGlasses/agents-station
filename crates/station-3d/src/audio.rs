@@ -355,8 +355,6 @@ impl Default for SfxEngine {
 
 impl SfxEngine {
     pub fn new(enabled: bool) -> Self {
-        // Eagerly pre-bake all 27 RIFF/WAVE buffers once at startup.
-        let _ = prebaked_bank();
         Self {
             enabled,
             last_played: HashMap::new(),
