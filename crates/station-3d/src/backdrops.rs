@@ -439,6 +439,9 @@ pub fn spawn_backdrop(
     fonts: &mut FontEngine,
     spec: &LayoutSpec,
     kind: BackdropKind,
+    night: bool,
+    city: &str,
+    temp_c: f32,
 ) {
     const GY: f32 = -0.62;
     backdrop_assets.active = Some(kind);
@@ -455,9 +458,9 @@ pub fn spawn_backdrop(
                 brands,
                 fonts,
                 spec,
-                "hcm",
-                false,
-                34.0,
+                city,
+                night,
+                temp_c,
                 is_friday,
             );
         }
@@ -604,7 +607,7 @@ mod tests {
                         world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
                             world.resource_scope(|world, mut ba: Mut<BackdropAssets>| {
                                 let mut cmds = world.commands();
-                                spawn_backdrop(&mut cmds, &mut pal, &mut meshes, &mut mats, &mut imgs, &mut ba, &mut brands, &mut fonts, &spec, kind);
+                                spawn_backdrop(&mut cmds, &mut pal, &mut meshes, &mut mats, &mut imgs, &mut ba, &mut brands, &mut fonts, &spec, kind, false, "hcm", 31.0);
                             });
                         });
                     });
@@ -688,6 +691,9 @@ mod tests {
                                         &mut fonts,
                                         &spec,
                                         kind,
+                                        false,
+                                        "hcm",
+                                        31.0,
                                     );
                                 });
                             });

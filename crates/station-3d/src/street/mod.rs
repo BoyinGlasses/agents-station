@@ -723,22 +723,13 @@ pub fn animate_city_signals_and_night_system(
     mut countdowns: Query<(&mut city_grid::TrafficCountdownDisplay, &mut Mesh3d)>,
     mut beacons: Query<(&city_grid::RooftopBeacon, &mut Visibility), (Without<city_grid::TrafficSignalLamp>, Without<city_grid::CityNightLampPool>)>,
     mut pools: Query<&mut Visibility, (With<city_grid::CityNightLampPool>, Without<city_grid::TrafficSignalLamp>, Without<city_grid::RooftopBeacon>)>,
-    asphalt_q: Query<
-        &MeshMaterial3d<StandardMaterial>,
-        (With<city_grid::CityNightAsphalt>, Without<city_grid::TrafficCountdownDisplay>),
-    >,
-    facade_q: Query<
-        &MeshMaterial3d<StandardMaterial>,
-        (With<city_grid::CityNightFacade>, Without<city_grid::TrafficCountdownDisplay>),
-    >,
-    slab_q: Query<
-        &MeshMaterial3d<StandardMaterial>,
-        (With<city_grid::CityNightSidewalk>, Without<city_grid::TrafficCountdownDisplay>),
-    >,
-    bulb_q: Query<
-        &MeshMaterial3d<StandardMaterial>,
-        (With<city_grid::CityNightLampBulb>, Without<city_grid::TrafficCountdownDisplay>),
-    >,
+    added_city: Query<(), Added<city_grid::CityNightAsphalt>>,
+    asphalt_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightAsphalt>>,
+    facade_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightFacade>>,
+    slab_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightSidewalk>>,
+    bulb_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightLampBulb>>,
+    shop_lightbox_q: Query<&MeshMaterial3d<StandardMaterial>, With<shops_walkin::ShopLightboxNight>>,
+    nhau_bulb_q: Query<&MeshMaterial3d<StandardMaterial>, With<scenes_b::NhauBulbNight>>,
     mut last_night: Local<Option<bool>>,
 ) {
     let t = time.elapsed_secs();
@@ -771,7 +762,7 @@ pub fn animate_city_signals_and_night_system(
 
     if let Some(l) = lighting {
         let night = l.is_night();
-        if *last_night != Some(night) {
+        if *last_night != Some(night) || !added_city.is_empty() {
             *last_night = Some(night);
             for mut vis in &mut pools {
                 *vis = if night {
@@ -810,6 +801,24 @@ pub fn animate_city_signals_and_night_system(
                             LinearRgba::BLACK
                         };
                         m.unlit = night;
+                    }
+                }
+                let shop_em = if night { 0.42 } else { 0.08 };
+                for mh in &shop_lightbox_q {
+                    if let Some(m) = mats.get_mut(&mh.0) {
+                        m.emissive = LinearRgba::new(shop_em, shop_em, shop_em, 1.0);
+                    }
+                }
+                let nhau_lin = srgb_hex("#FFD47A").to_linear();
+                let nhau_str = if night { 2.6 } else { 0.4 };
+                for mh in &nhau_bulb_q {
+                    if let Some(m) = mats.get_mut(&mh.0) {
+                        m.emissive = LinearRgba::new(
+                            nhau_lin.red * nhau_str,
+                            nhau_lin.green * nhau_str,
+                            nhau_lin.blue * nhau_str,
+                            1.0,
+                        );
                     }
                 }
             }
@@ -885,5 +894,151 @@ mod tests {
         let expected_v_top = 7.0 - (2.75 + 6.25) / 3.0;
         assert!((uv0[0][1] - expected_v_bot).abs() < 1e-5);
         assert!((uv0[2][1] - expected_v_top).abs() < 1e-5);
+    }
+
+    #[test]
+    fn city_beach_city_cycle_while_night_on_applies_night_materials_and_toggles_live() {
+        use crate::backdrops::{BackdropKind, spawn_backdrop};
+        use crate::layout::OfficeLayout;
+        use crate::palette::WorldPalette;
+        use std::path::PathBuf;
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let spec = LayoutSpec::for_layout(OfficeLayout::Pro);
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+        let mut brands = BrandRegistry::new(assets_dir);
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default());
+        app.insert_resource(LightingState::new(true));
+        app.insert_resource(Assets::<Mesh>::default());
+        app.insert_resource(Assets::<StandardMaterial>::default());
+        app.insert_resource(Assets::<Image>::default());
+        app.insert_resource(BackdropAssets::default());
+        let pal = {
+            let mut meshes = app.world_mut().resource_mut::<Assets<Mesh>>();
+            WorldPalette::new(&mut meshes)
+        };
+        app.insert_resource(pal);
+        app.add_systems(Update, animate_city_signals_and_night_system);
+
+        let spawn_kind = |app: &mut App, kind: BackdropKind, pass_night: bool, brands: &mut BrandRegistry, fonts: &mut FontEngine| {
+            let w = app.world_mut();
+            let to_despawn: Vec<Entity> = w
+                .query_filtered::<Entity, With<BackdropEntity>>()
+                .iter(w)
+                .collect();
+            for e in to_despawn {
+                w.despawn(e);
+            }
+            w.resource_scope(|w, mut ba: Mut<BackdropAssets>| {
+                w.resource_scope(|w, mut meshes: Mut<Assets<Mesh>>| {
+                    w.resource_scope(|w, mut mats: Mut<Assets<StandardMaterial>>| {
+                        let mut imgs = w.resource_mut::<Assets<Image>>();
+                        ba.purge(&mut meshes, &mut mats, &mut imgs);
+                    });
+                });
+            });
+            w.resource_scope(|w, mut pal: Mut<WorldPalette>| {
+                w.resource_scope(|w, mut meshes: Mut<Assets<Mesh>>| {
+                    w.resource_scope(|w, mut mats: Mut<Assets<StandardMaterial>>| {
+                        w.resource_scope(|w, mut imgs: Mut<Assets<Image>>| {
+                            w.resource_scope(|w, mut ba: Mut<BackdropAssets>| {
+                                let mut cmds = w.commands();
+                                spawn_backdrop(
+                                    &mut cmds,
+                                    &mut pal,
+                                    &mut meshes,
+                                    &mut mats,
+                                    &mut imgs,
+                                    &mut ba,
+                                    brands,
+                                    fonts,
+                                    &spec,
+                                    kind,
+                                    pass_night,
+                                    "hcm",
+                                    31.0,
+                                );
+                            });
+                        });
+                    });
+                });
+            });
+            w.flush();
+        };
+
+        // 1. Spawn City while night=true -> run update (sets Local last_night = Some(true))
+        spawn_kind(&mut app, BackdropKind::City, true, &mut brands, &mut fonts);
+        app.update();
+
+        // 2. Switch to Beach while night=true
+        spawn_kind(&mut app, BackdropKind::Beach, true, &mut brands, &mut fonts);
+        app.update();
+
+        // 3. Switch back to City (even if initially spawned with day colors) while LightingState.night == true
+        spawn_kind(&mut app, BackdropKind::City, false, &mut brands, &mut fonts);
+        app.update();
+
+        // Verify Added<CityNightAsphalt> re-applied night mode to the newly spawned City!
+        let w = app.world_mut();
+        let asphalt_handles: Vec<_> = w
+            .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightAsphalt>>()
+            .iter(w)
+            .map(|m| m.0.clone())
+            .collect();
+        let facade_handles: Vec<_> = w
+            .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightFacade>>()
+            .iter(w)
+            .map(|m| m.0.clone())
+            .collect();
+        let pool_vis: Vec<_> = w
+            .query_filtered::<&Visibility, With<city_grid::CityNightLampPool>>()
+            .iter(w)
+            .copied()
+            .collect();
+        let shop_handles: Vec<_> = w
+            .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<shops_walkin::ShopLightboxNight>>()
+            .iter(w)
+            .map(|m| m.0.clone())
+            .collect();
+        let nhau_handles: Vec<_> = w
+            .query_filtered::<&MeshMaterial3d<StandardMaterial>, With<scenes_b::NhauBulbNight>>()
+            .iter(w)
+            .map(|m| m.0.clone())
+            .collect();
+
+        let mats = w.resource::<Assets<StandardMaterial>>();
+        assert!(!asphalt_handles.is_empty());
+        for h in &asphalt_handles {
+            assert_eq!(mats.get(h).unwrap().base_color, srgb_hex("#1B1F27"));
+        }
+        assert!(!facade_handles.is_empty());
+        for h in &facade_handles {
+            assert!((mats.get(h).unwrap().emissive.red - 0.9).abs() < 1e-4);
+        }
+        assert!(!pool_vis.is_empty());
+        assert!(pool_vis.iter().all(|&v| v == Visibility::Inherited));
+        assert!(!shop_handles.is_empty());
+        for h in &shop_handles {
+            assert!((mats.get(h).unwrap().emissive.red - 0.42).abs() < 1e-4);
+        }
+        assert!(!nhau_handles.is_empty());
+        let expected_night_bulb = srgb_hex("#FFD47A").to_linear().red * 2.6;
+        for h in &nhau_handles {
+            assert!((mats.get(h).unwrap().emissive.red - expected_night_bulb).abs() < 1e-3);
+        }
+
+        // 4. Toggle Night -> Day live and verify shop lightboxes & Nhậu bulbs dim immediately
+        app.world_mut().resource_mut::<LightingState>().night = false;
+        app.update();
+        let mats = app.world().resource::<Assets<StandardMaterial>>();
+        for h in &shop_handles {
+            assert!((mats.get(h).unwrap().emissive.red - 0.08).abs() < 1e-4);
+        }
+        let expected_day_bulb = srgb_hex("#FFD47A").to_linear().red * 0.4;
+        for h in &nhau_handles {
+            assert!((mats.get(h).unwrap().emissive.red - expected_day_bulb).abs() < 1e-3);
+        }
     }
 }

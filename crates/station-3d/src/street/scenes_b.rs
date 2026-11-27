@@ -41,6 +41,10 @@ pub struct ParkShuttle {
     pub speed: f32,
 }
 
+/// Marker on Quán Nhậu overhead string bulbs so Day↔Night toggling updates their glow live.
+#[derive(Component)]
+pub struct NhauBulbNight;
+
 fn push_street_person(b: &mut StreetMeshBuilder, pos: Vec3, yaw: f32, shirt: &str, pants: &str, hat: Option<&str>) {
     let rot = Quat::from_rotation_y(yaw);
     b.push_box_rot(pos + rot * Vec3::new(0.0, 0.35, -0.08), Vec3::new(0.13, 0.70, 0.13), rot, pants);
@@ -324,14 +328,30 @@ pub fn spawn_street_scenes_b(
             commands, meshes, ba, signs_mat.clone(), 512.0, 512.0, [0.0, 128.0, 256.0, 128.0],
             f.at(-1.75, 1.19, 0.75), Vec2::new(1.18, 0.56), rot,
         );
-        // Overhead warm string bulbs
+        // Overhead warm string bulbs (dedicated non-cached material so night toggle updates live)
         let bulb_mesh = ba.add_mesh(meshes, Mesh::from(Sphere::new(0.055)));
-        let bulb_mat = ba.mat_emissive(materials, "#FFD47A", if night { 2.6 } else { 0.4 });
+        let bulb_lin = crate::palette::srgb_hex("#FFD47A").to_linear();
+        let bulb_str = if night { 2.6 } else { 0.4 };
+        let bulb_mat = ba.add_material(
+            materials,
+            StandardMaterial {
+                base_color: crate::palette::srgb_hex("#FFD47A"),
+                emissive: LinearRgba::new(
+                    bulb_lin.red * bulb_str,
+                    bulb_lin.green * bulb_str,
+                    bulb_lin.blue * bulb_str,
+                    1.0,
+                ),
+                perceptual_roughness: 0.3,
+                ..default()
+            },
+        );
         for k in 0..6 {
             let lx = -2.1 + k as f32 * 0.84;
             commands.spawn((
                 WorldEntity,
                 BackdropEntity,
+                NhauBulbNight,
                 Mesh3d(bulb_mesh.clone()),
                 MeshMaterial3d(bulb_mat.clone()),
                 Transform::from_translation(f.at(lx, 0.15, 2.25)),

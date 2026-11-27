@@ -7770,6 +7770,17 @@ fn process_ui_actions(
                 if let Some(life) = aux.life.as_deref_mut() {
                     life.weather_city = code.clone();
                 }
+                if ui.backdrop == station_3d::BackdropKind::City
+                    && ui.view_mode == ViewMode::Mode3D
+                    && has_world
+                {
+                    pending_op = match pending_op {
+                        PendingWorldOp::UnloadToLite => PendingWorldOp::UnloadToLite,
+                        PendingWorldOp::UnloadForTray => PendingWorldOp::UnloadForTray,
+                        PendingWorldOp::Rebuild3d => PendingWorldOp::Rebuild3d,
+                        _ => PendingWorldOp::SwapBackdrop(station_3d::BackdropKind::City),
+                    };
+                }
                 if bridge.is_live_net() {
                     spawn_open_meteo_fetch(
                         code.clone(),
@@ -9802,6 +9813,21 @@ fn process_ui_actions(
                 let spec = station_3d::LayoutSpec::for_layout(ui.layout);
                 let mut brands = BrandRegistry::new(bridge.assets_dir.clone());
                 let fonts = shared_fonts.get_or_init();
+                let active_night = world_params
+                    .lighting
+                    .as_deref()
+                    .map(|l| l.is_night())
+                    .unwrap_or(ui.night);
+                let active_city = aux
+                    .life
+                    .as_deref()
+                    .map(|l| l.weather_city.as_str())
+                    .unwrap_or("hcm");
+                let active_temp = aux
+                    .life
+                    .as_deref()
+                    .and_then(|l| l.temp_c)
+                    .unwrap_or(31.0);
                 station_3d::backdrops::spawn_backdrop(
                     &mut commands,
                     p,
@@ -9813,6 +9839,9 @@ fn process_ui_actions(
                     fonts,
                     &spec,
                     bk,
+                    active_night,
+                    active_city,
+                    active_temp,
                 );
                 brands.clear();
             }

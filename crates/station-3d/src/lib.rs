@@ -287,6 +287,9 @@ pub fn spawn_full_office_world_with_life(
         fonts,
         &spec,
         backdrop,
+        night,
+        &life_state.weather_city,
+        life_state.temp_c.unwrap_or(31.0),
     );
     brands.clear();
     interact::spawn_hover_ring(commands, &mut pal, materials);

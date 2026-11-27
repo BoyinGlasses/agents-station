@@ -51,6 +51,10 @@ pub struct ShopNightShutter {
     pub closed_y: f32,
 }
 
+/// Marker on shop fascia quads so Day↔Night toggling updates shop lightbox emissive live.
+#[derive(Component)]
+pub struct ShopLightboxNight;
+
 /// Returns `(chain_roster, walk_in_count)` matching `shops.js:52,70-79` (`hcm` = 10 walk-ins).
 pub fn city_shop_set(city: &str) -> (&'static [&'static str; 12], usize) {
     match city.to_ascii_lowercase().as_str() {
@@ -347,7 +351,7 @@ pub fn spawn_walkin_shops(
 
         // 1. Fascia lightbox sign (UV-cropped [0, 0, 1024, 140])
         push_shop_box(&mut solid, &f, 0.0, SHOP_CEIL + SIGN_H * 0.45, 0.06, SHOP_W + 0.08, SIGN_H + 0.06, 0.24, "#2B2F36");
-        spawn_backdrop_uv_quad(
+        let fascia_e = spawn_backdrop_uv_quad(
             commands,
             meshes,
             ba,
@@ -359,6 +363,7 @@ pub fn spawn_walkin_shops(
             Vec2::new(SHOP_W, SIGN_H),
             f.rot,
         );
+        commands.entity(fascia_e).insert(ShopLightboxNight);
 
         if is_walkin {
             build_chain_interior(&mut solid, &f, chain, depth);
