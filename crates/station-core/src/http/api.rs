@@ -2642,12 +2642,29 @@ pub async fn post_rc(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    let settings_path = state.claude_dir.join("settings.json");
+    let mut doc = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = doc.as_object_mut() {
+        if on {
+            obj.insert("remoteControlAtStartup".to_owned(), Value::Bool(true));
+        } else {
+            obj.remove("remoteControlAtStartup");
+        }
+    }
+    let wrote = serde_json::to_vec_pretty(&doc)
+        .ok()
+        .and_then(|bytes| crate::atomic::write_bytes_atomic(&settings_path, &bytes).ok())
+        .is_some();
     let _ = state
         .prefs
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .set("rcAtStartup", if on { Some(Value::Bool(true)) } else { None });
-    Ok(Json(json!({ "ok": true, "rc": on })))
+    Ok(Json(json!({ "ok": wrote, "rc": on })))
 }
 
 pub async fn post_open(
@@ -2677,6 +2694,7 @@ pub async fn post_open(
 }
 
 pub async fn post_panel_open(
+    State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     OptionalPeer(peer): OptionalPeer,
     ViaTunnel(via_tunnel): ViaTunnel,
@@ -2689,6 +2707,11 @@ pub async fn post_panel_open(
     } else {
         format!("http://127.0.0.1:{}/", crate::DEFAULT_PORT)
     };
+    state
+        .office
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .broadcast(json!({ "k": "panel_open", "what": what, "url": url }));
     Ok(Json(json!({ "ok": true, "url": url })))
 }
 

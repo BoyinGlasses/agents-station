@@ -68,6 +68,7 @@ pub struct ClaudeAccounts {
     main_dir: PathBuf,
     accounts_root: PathBuf,
     data: ClaudeAccountsFile,
+    active_login: Option<(String, String)>,
 }
 
 impl ClaudeAccounts {
@@ -91,6 +92,7 @@ impl ClaudeAccounts {
             main_dir: main_dir.to_path_buf(),
             accounts_root,
             data,
+            active_login: None,
         };
         mgr.ensure_order_consistent();
         mgr
@@ -440,12 +442,46 @@ impl ClaudeAccounts {
                 if !name.is_empty() && !self.has_account(&slug) {
                     json!({ "ok": false, "code": "noAccount" })
                 } else {
-                    json!({ "ok": true, "name": slug })
+                    self.active_login = Some((slug.clone(), "renewing".to_owned()));
+                    json!({ "ok": true, "name": slug, "state": "renewing" })
                 }
             }
-            "login" | "code" | "cancel" => {
+            "login" => {
                 let slug = slug_of(name);
-                json!({ "ok": !slug.is_empty(), "name": slug, "state": if action == "cancel" { "cancelled" } else { "idle" } })
+                if slug.is_empty() {
+                    json!({ "ok": false, "state": "idle", "code": "badName" })
+                } else {
+                    let _ = std::fs::create_dir_all(self.dir_for(&slug));
+                    self.active_login = Some((slug.clone(), "waiting".to_owned()));
+                    json!({ "ok": true, "name": slug, "state": "waiting", "url": "", "note": "" })
+                }
+            }
+            "code" => {
+                let code = body
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let waiting_slug = self
+                    .active_login
+                    .as_ref()
+                    .filter(|(_, st)| st == "waiting")
+                    .map(|(s, _)| s.clone());
+                match waiting_slug {
+                    Some(slug) if !code.is_empty() => {
+                        self.active_login = Some((slug.clone(), "completed".to_owned()));
+                        json!({ "ok": true, "name": slug, "state": "completed" })
+                    }
+                    _ => json!({ "ok": false, "state": "idle" }),
+                }
+            }
+            "cancel" => {
+                let slug = self
+                    .active_login
+                    .take()
+                    .map(|(s, _)| s)
+                    .unwrap_or_else(|| slug_of(name));
+                json!({ "ok": true, "name": slug, "state": "cancelled" })
             }
             _ => json!({ "ok": false, "code": "unknownAction" }),
         }
