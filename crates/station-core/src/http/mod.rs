@@ -41,8 +41,10 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, post};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
@@ -87,6 +89,9 @@ pub struct AppState {
     pub auto_resume: Mutex<AutoResumeGuard>,
     pub lift: LiftService,
     pub harnesses: Option<Arc<dyn HarnessApi>>,
+    pub bound_port: AtomicU16,
+    pub lan_fixed: AtomicBool,
+    pub lan_listeners: Mutex<HashMap<String, watch::Sender<bool>>>,
 }
 
 impl AppState {
@@ -161,7 +166,110 @@ impl AppState {
             auto_resume,
             lift,
             harnesses,
+            bound_port: AtomicU16::new(crate::DEFAULT_PORT),
+            lan_fixed: AtomicBool::new(false),
+            lan_listeners: Mutex::new(HashMap::new()),
         })
+    }
+
+    pub fn lan_is_on(&self) -> bool {
+        self.lan_fixed.load(Ordering::Relaxed)
+            || !self
+                .lan_listeners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+    }
+
+    pub fn lan_bound_addrs(&self) -> Vec<String> {
+        let mut addrs: Vec<String> = self
+            .lan_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        addrs.sort();
+        addrs
+    }
+
+    pub fn stop_lan_listeners(&self) {
+        let listeners: HashMap<String, watch::Sender<bool>> = {
+            let mut guard = self.lan_listeners.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        for (_, tx) in listeners {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// Synchronizes active LAN HTTP listeners to match `want_on` (binds specific non-loopback
+    /// private IPv4 interface addresses rather than `0.0.0.0`, closing listeners when disabled).
+    pub async fn sync_lan(self: &Arc<Self>, want_on: bool) -> Vec<String> {
+        if self.lan_fixed.load(Ordering::Relaxed) {
+            return self.lan_bound_addrs();
+        }
+        let mut targets: Vec<String> = Vec::new();
+        if want_on {
+            if let Ok(override_ip) = std::env::var("OFFICE_LAN_BIND_ADDR") {
+                let ip = override_ip.trim();
+                if !ip.is_empty() {
+                    targets.push(ip.to_owned());
+                }
+            } else if let Some(ip) = api::detect_private_lan_ipv4() {
+                targets.push(ip);
+            }
+        }
+        let target_set: std::collections::HashSet<&str> =
+            targets.iter().map(String::as_str).collect();
+
+        // Shut down listeners that are no longer desired.
+        let to_stop: Vec<watch::Sender<bool>> = {
+            let mut guard = self.lan_listeners.lock().unwrap_or_else(|e| e.into_inner());
+            let remove_keys: Vec<String> = guard
+                .keys()
+                .filter(|k| !target_set.contains(k.as_str()))
+                .cloned()
+                .collect();
+            remove_keys
+                .into_iter()
+                .filter_map(|k| guard.remove(&k))
+                .collect()
+        };
+        for tx in to_stop {
+            let _ = tx.send(true);
+        }
+
+        let port = self.bound_port.load(Ordering::Relaxed);
+        for ip in targets {
+            let already = self
+                .lan_listeners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&ip);
+            if already {
+                continue;
+            }
+            let Ok(listener) = tokio::net::TcpListener::bind((ip.as_str(), port)).await else {
+                continue;
+            };
+            let (tx, mut rx) = watch::channel(false);
+            let router = build_router(self.clone());
+            tokio::spawn(async move {
+                let svc = router.into_make_service_with_connect_info::<SocketAddr>();
+                let _ = axum::serve(listener, svc)
+                    .with_graceful_shutdown(async move {
+                        let _ = rx.changed().await;
+                    })
+                    .await;
+            });
+            self.lan_listeners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(ip, tx);
+        }
+
+        self.lan_bound_addrs()
     }
 
     pub fn allowed_tunnel_host(&self) -> Option<String> {
@@ -381,6 +489,21 @@ pub async fn start_http_server(
 ) -> Result<ServerHandle> {
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
+    state.bound_port.store(addr.port(), Ordering::Relaxed);
+    let is_fixed_lan = !matches!(host, "127.0.0.1" | "localhost" | "::1");
+    state.lan_fixed.store(is_fixed_lan, Ordering::Relaxed);
+    if !is_fixed_lan {
+        let want_lan = state
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get("lan")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if want_lan {
+            let _ = state.sync_lan(true).await;
+        }
+    }
     let (tx, mut rx) = watch::channel(false);
     spawn_maintenance_loop(state.clone(), tx.subscribe());
     let router = build_router(state.clone());
@@ -392,6 +515,7 @@ pub async fn start_http_server(
                 let _ = rx.changed().await;
             })
             .await;
+        state.stop_lan_listeners();
         state.tunnel.stop();
         let _ = state.flush_all();
     });

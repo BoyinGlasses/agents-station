@@ -2625,12 +2625,22 @@ pub async fn post_lan(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
-    let _ = state
-        .prefs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .set("lan", if on { Some(Value::Bool(true)) } else { None });
-    Ok(Json(json!({ "ok": true, "on": on, "pin": state.auth.current_pin() })))
+    if !state.lan_fixed.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = state
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set("lan", if on { Some(Value::Bool(true)) } else { None });
+    }
+    let addrs = state.sync_lan(on).await;
+    let active = state.lan_is_on();
+    Ok(Json(json!({
+        "ok": true,
+        "on": active,
+        "lanOn": active,
+        "addrs": addrs,
+        "pin": state.auth.current_pin(),
+    })))
 }
 
 fn rc_at_startup(claude_dir: &std::path::Path) -> bool {
@@ -2736,6 +2746,40 @@ pub async fn post_open(
     }
 }
 
+fn open_url_in_os_browser(url: &str) {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return;
+    }
+    if std::env::var("OFFICE_OPEN_URL").as_deref() == Ok("0") {
+        return;
+    }
+    #[cfg(test)]
+    {
+        let _ = url;
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let escaped = url.replace('&', "^&");
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/c", "start", "", &escaped])
+                .creation_flags(0x0800_0000);
+            let _ = cmd.spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open").arg(url).spawn();
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+        }
+    }
+}
+
 pub async fn post_panel_open(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2745,11 +2789,13 @@ pub async fn post_panel_open(
 ) -> Result<Json<Value>, StatusCode> {
     require_local_post(peer, via_tunnel, &headers)?;
     let what = body.get("what").and_then(Value::as_str).unwrap_or("");
+    let port = state.bound_port.load(std::sync::atomic::Ordering::Relaxed);
     let url = if what == "2d" {
-        format!("http://127.0.0.1:{}/?view=2d", crate::DEFAULT_PORT)
+        format!("http://127.0.0.1:{port}/?view=2d")
     } else {
-        format!("http://127.0.0.1:{}/", crate::DEFAULT_PORT)
+        format!("http://127.0.0.1:{port}/")
     };
+    open_url_in_os_browser(&url);
     state
         .office
         .lock()
@@ -2914,10 +2960,7 @@ fn tunnel_status_json(state: &AppState) -> Value {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let rc = rc_at_startup(&state.claude_dir);
-        let lan_on = prefs
-            .get("lan")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let lan_on = state.lan_is_on();
         let phone_approve = prefs
             .get("phoneApprove")
             .and_then(Value::as_bool)
@@ -5598,5 +5641,94 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
         assert!(saved_off.get("remoteControlAtStartup").is_none());
         assert_eq!(saved_off["model"], "opus");
+    }
+
+    #[tokio::test]
+    async fn post_lan_binds_and_unbinds_listener_and_panel_open_uses_bound_port() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+        use std::sync::atomic::Ordering;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::new(dir.path().to_path_buf(), None).unwrap());
+        // Pick an ephemeral free port on 127.0.0.1 for deterministic bind/unbind verification.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let test_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        state.bound_port.store(test_port, Ordering::Relaxed);
+        let app = build_router(state.clone());
+
+        // 1. POST /api/panel/open uses the actual bound port instead of hardcoded 4310.
+        let panel_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/panel/open")
+                    .header("host", format!("127.0.0.1:{test_port}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "what": "2d" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(panel_resp.status(), StatusCode::OK);
+        let panel_body: Value =
+            serde_json::from_slice(&to_bytes(panel_resp.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            panel_body["url"],
+            format!("http://127.0.0.1:{test_port}/?view=2d")
+        );
+
+        // 2. POST /api/lan { on: true } binds a real TCP listener and serves /health.
+        // SAFETY: unit test runs single-threaded (`--test-threads=1`) and restores env cleanly.
+        unsafe { std::env::set_var("OFFICE_LAN_BIND_ADDR", "127.0.0.1") };
+        let on_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/lan")
+                    .header("host", format!("127.0.0.1:{test_port}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "on": true }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(on_resp.status(), StatusCode::OK);
+        let on_body: Value =
+            serde_json::from_slice(&to_bytes(on_resp.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(on_body["ok"], true);
+        assert_eq!(on_body["lanOn"], true);
+        assert!(state.lan_is_on());
+
+        // Verify the bound LAN listener actually accepts TCP connections.
+        let conn = tokio::net::TcpStream::connect(("127.0.0.1", test_port)).await;
+        assert!(conn.is_ok(), "LAN listener must accept real TCP connections");
+        drop(conn);
+
+        // 3. POST /api/lan { on: false } shuts down the listener and releases the socket.
+        let off_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/lan")
+                    .header("host", format!("127.0.0.1:{test_port}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "on": false }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        unsafe { std::env::remove_var("OFFICE_LAN_BIND_ADDR") };
+        assert_eq!(off_resp.status(), StatusCode::OK);
+        let off_body: Value =
+            serde_json::from_slice(&to_bytes(off_resp.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(off_body["lanOn"], false);
+        assert!(!state.lan_is_on());
     }
 }
