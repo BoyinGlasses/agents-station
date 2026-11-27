@@ -165,6 +165,9 @@ fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
     let effective_gpu = resolve_effective_gpu_pref(cli);
     let (win_w, win_h) = initial_window_size(cli);
     let builder = DefaultPlugins
+        .set(bevy::app::TaskPoolPlugin {
+            task_pool_options: bevy::app::TaskPoolOptions::with_num_threads(if lite { 2 } else { 4 }),
+        })
         .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Agents Station".to_owned(),
@@ -200,7 +203,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     app.add_plugins(build_default_plugins(cli));
     if !is_lite_2d {
         app.add_plugins(MeshPickingPlugin)
-            .insert_resource(DirectionalLightShadowMap { size: 2048 })
+            .insert_resource(DirectionalLightShadowMap { size: 1536 })
             .insert_resource(PointLightShadowMap { size: 256 });
     }
     app.add_plugins(EguiPlugin {
@@ -438,11 +441,12 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 } else {
                     station_ui::ViewMode::Lite2D
                 };
-                app.add_plugins(station_3d::OfficeWorldRuntimePlugin {
-                    assets_dir: assets_dir.clone(),
-                })
-                .insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
-                .add_systems(Startup, spawn_lite_2d_camera);
+                app.insert_resource(station_3d::audio::SfxEngine::default())
+                    .insert_resource(station_3d::life::OfficeLifeState::default())
+                    .insert_resource(station_3d::demo::DemoSimState::default())
+                    .insert_resource(station_3d::replay::ReplayState::default())
+                    .insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
+                    .add_systems(Startup, spawn_lite_2d_camera);
             } else {
                 app.add_plugins(station_3d::OfficeWorldPlugin {
                     layout: station_3d::OfficeLayout::Pro,
