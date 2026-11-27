@@ -160,6 +160,7 @@ pub fn update_nap_system(
     mut nap: Option<ResMut<NapState>>,
     mut life: Option<ResMut<OfficeLifeState>>,
     mut q_blinds: Query<&mut WindowBlind>,
+    mut q_cloth: Query<(&mut Transform, &mut Visibility), Without<WindowBlind>>,
 ) {
     let Some(nap) = nap.as_deref_mut() else {
         return;
@@ -174,11 +175,31 @@ pub fn update_nap_system(
     }
 
     let goal = if on { 1.0_f32 } else { 0.0_f32 };
-    if (nap.blind_level - goal).abs() > 0.001 {
+    let changed = (nap.blind_level - goal).abs() > 0.001;
+    if changed {
         let dir = (goal - nap.blind_level).signum();
         nap.blind_level = (nap.blind_level + dir * dt / 3.0).clamp(0.0, 1.0);
-        for mut b in &mut q_blinds {
+        if (nap.blind_level - goal).abs() <= 0.001 {
+            nap.blind_level = goal;
+        }
+    }
+
+    for mut b in &mut q_blinds {
+        if changed || (b.lowered - nap.blind_level).abs() > 1e-4 {
             b.lowered = nap.blind_level;
+            if let Ok((mut tf, mut vis)) = q_cloth.get_mut(b.cloth_entity) {
+                let h = (b.full_height * b.lowered).max(0.001);
+                tf.scale.y = h;
+                tf.translation.y = b.top_y - h * 0.5;
+                let want_vis = if b.lowered <= 0.001 {
+                    Visibility::Hidden
+                } else {
+                    Visibility::Visible
+                };
+                if *vis != want_vis {
+                    *vis = want_vis;
+                }
+            }
         }
     }
 }
@@ -264,9 +285,16 @@ mod tests {
             .insert_resource(NapState::default())
             .insert_resource(OfficeLifeState::default())
             .add_systems(Update, update_nap_system);
-        let cloth = app.world_mut().spawn_empty().id();
+        let cloth = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(0.0, 2.5, 0.0).with_scale(Vec3::new(1.2, 0.001, 1.0)),
+                Visibility::Hidden,
+            ))
+            .id();
         app.world_mut().spawn(WindowBlind {
             cloth_entity: cloth,
+            top_y: 2.5,
             full_height: 1.8,
             lowered: 0.0,
         });
@@ -280,5 +308,31 @@ mod tests {
         assert!(app.world().resource::<OfficeLifeState>().nap_active);
         let blind = app.world_mut().query::<&WindowBlind>().single(app.world()).unwrap();
         assert!(blind.lowered > 0.8);
+        let cloth_tf = *app.world().get::<Transform>(cloth).unwrap();
+        let cloth_vis = *app.world().get::<Visibility>(cloth).unwrap();
+        assert_eq!(cloth_vis, Visibility::Visible, "cloth must become visible when lowered");
+        let expected_h = (1.8 * blind.lowered).max(0.001);
+        assert!(
+            (cloth_tf.scale.y - expected_h).abs() < 1e-3,
+            "cloth scale.y ({}) must track full_height * lowered ({expected_h})",
+            cloth_tf.scale.y
+        );
+        assert!(
+            (cloth_tf.translation.y - (2.5 - expected_h * 0.5)).abs() < 1e-3,
+            "cloth translation.y ({}) must hang from top_y",
+            cloth_tf.translation.y
+        );
+
+        // After nap ends -> blinds roll back up and hide
+        app.world_mut().resource_mut::<CastClock>().minutes = 14 * 60;
+        for _ in 0..20 {
+            app.world_mut()
+                .resource_mut::<Time<()>>()
+                .advance_by(std::time::Duration::from_millis(250));
+            app.update();
+        }
+        assert!(!app.world().resource::<NapState>().active);
+        let cloth_vis_after = *app.world().get::<Visibility>(cloth).unwrap();
+        assert_eq!(cloth_vis_after, Visibility::Hidden, "cloth must hide when fully raised");
     }
 }

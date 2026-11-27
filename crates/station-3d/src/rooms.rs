@@ -19,6 +19,7 @@ use std::f32::consts::{FRAC_PI_2, PI};
 #[derive(Component, Debug, Clone, Copy)]
 pub struct WindowBlind {
     pub cloth_entity: Entity,
+    pub top_y: f32,
     pub full_height: f32,
     pub lowered: f32,
 }
@@ -416,14 +417,16 @@ pub fn spawn_wall_window(
     // Roller blind housing + cloth entity (rolled up at top until nap lowers it)
     let blind_y = h * 0.5 + 0.06;
     let cloth_h = h + 0.1;
+    let top_world_y = y + blind_y;
     let cloth_ent = spawn_quad(
         commands,
         palette,
         tiles.blind_mat.clone(),
         at(0.0, blind_y - 0.03, 0.16),
-        Vec2::new(w + 0.08, 0.04),
+        Vec2::new(w + 0.08, 0.001),
         rot,
     );
+    commands.entity(cloth_ent).insert(Visibility::Hidden);
     let valance = spawn_box_rot(
         commands,
         palette,
@@ -434,6 +437,7 @@ pub fn spawn_wall_window(
     );
     commands.entity(valance).insert(WindowBlind {
         cloth_entity: cloth_ent,
+        top_y: top_world_y,
         full_height: cloth_h,
         lowered: 0.0,
     });
