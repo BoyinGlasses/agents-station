@@ -1051,6 +1051,20 @@ pub fn draw_first_person_hud(
                     });
             });
     }
+
+    // 6. Elevator ride `fp-fade` black transition curtain (`first-person.js:66-70`)
+    if state.fp_fade_alpha > 0.01 {
+        let a = (state.fp_fade_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let fade_painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("station_fp_fade"),
+        ));
+        fade_painter.rect_filled(
+            stage_rect,
+            CornerRadius::ZERO,
+            Color32::from_rgba_unmultiplied(0, 0, 0, a),
+        );
+    }
 }
 
 /// Replay bar matching `replay.css` & `ReplayBar.tsx`:
