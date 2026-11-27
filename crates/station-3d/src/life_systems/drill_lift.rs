@@ -3,6 +3,8 @@
 //! evacuation, roll call (`"Có!"`), fire extinguisher demo, and lift maintenance barrier,
 //! cones, open call panel, toolbox, technician, and `"ĐÃ KIỂM ĐỊNH"` inspection sticker.
 
+use crate::cast::{ActiveRoutine, OfficeStaffNpc, StaffRole};
+use crate::chibi::{ChibiWorker, WorkerAnim};
 use crate::entrance::{ElevatorDoors, LIFT_FRONT};
 use crate::layout::LayoutSpec;
 use crate::life::OfficeLifeState;
@@ -10,7 +12,9 @@ use crate::nav::NavGraph;
 use crate::palette::{
     WorldEntity, WorldPalette, spawn_box, spawn_box_rot, spawn_cone_rot, spawn_cyl, spawn_quad,
 };
+use crate::people::{LiveSessionWorker, NavWalker, anim_for_status};
 use crate::replay::ReplayState;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use station_canvas2d::{Canvas2d, FontEngine, RgbaSurface, TextAlign, hex};
 use std::f32::consts::{FRAC_PI_2, PI};
@@ -43,6 +47,8 @@ pub struct FireDrillState {
     pub roll_call_count: usize,
     pub roll_call_responses: Vec<&'static str>,
     pub evacuated_paths_wall_free: bool,
+    pub evac_dispatched: bool,
+    pub return_dispatched: bool,
 }
 
 impl Default for FireDrillState {
@@ -58,6 +64,8 @@ impl Default for FireDrillState {
             roll_call_count: 0,
             roll_call_responses: Vec::new(),
             evacuated_paths_wall_free: true,
+            evac_dispatched: false,
+            return_dispatched: false,
         }
     }
 }
@@ -74,6 +82,8 @@ impl FireDrillState {
         self.roll_call_count = 0;
         self.roll_call_responses.clear();
         self.evacuated_paths_wall_free = true;
+        self.evac_dispatched = false;
+        self.return_dispatched = false;
     }
 
     pub fn abort(&mut self) {
@@ -82,7 +92,21 @@ impl FireDrillState {
         self.strobe_on = false;
         self.fire_level = 0.0;
         self.powder_visible = false;
+        self.evac_dispatched = false;
+        self.return_dispatched = false;
     }
+}
+
+/// Attached to any `LiveSessionWorker` or `OfficeStaffNpc` actively evacuating to the stairwell
+/// (or returning to its home desk) during a PCCC fire drill. Respected by `sync_live_workers_and_screens`,
+/// `RoutineCoordinator`, and `step_staff_roles_system` so no system fights over `NavWalker`.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct DrillEvacuating {
+    pub home_pos: Vec3,
+    pub home_yaw: f32,
+    pub home_sit: bool,
+    pub home_anim: WorkerAnim,
+    pub returning: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -534,18 +558,14 @@ pub fn spawn_drill_and_lift_service(
     commands.entity(sticker).insert((LiftInspectionSticker, Visibility::Hidden));
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn update_drill_and_lift_system(
-    time: Res<Time>,
-    mut drill: Option<ResMut<FireDrillState>>,
-    mut lift_svc: Option<ResMut<LiftServiceState>>,
-    mut life: Option<ResMut<OfficeLifeState>>,
-    replay: Option<Res<ReplayState>>,
-    nav: Option<Res<NavGraph>>,
-    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
-    q_strobes: Query<&DrillStrobeLens>,
-    mut q_kit: Query<
-        &mut Visibility,
+#[derive(SystemParam)]
+#[allow(clippy::type_complexity)]
+pub struct DrillLiftQueries<'w, 's> {
+    q_strobes: Query<'w, 's, &'static DrillStrobeLens>,
+    q_kit: Query<
+        'w,
+        's,
+        &'static mut Visibility,
         (
             With<DrillKitPart>,
             Without<DrillFlame>,
@@ -555,8 +575,10 @@ pub fn update_drill_and_lift_system(
             Without<LiftTechPart>,
         ),
     >,
-    mut q_flames: Query<
-        (&DrillFlame, &mut Visibility, &mut Transform),
+    q_flames: Query<
+        'w,
+        's,
+        (&'static DrillFlame, &'static mut Visibility, &'static mut Transform),
         (
             Without<DrillKitPart>,
             Without<DrillPowder>,
@@ -565,8 +587,10 @@ pub fn update_drill_and_lift_system(
             Without<LiftTechPart>,
         ),
     >,
-    mut q_powder: Query<
-        &mut Visibility,
+    q_powder: Query<
+        'w,
+        's,
+        &'static mut Visibility,
         (
             With<DrillPowder>,
             Without<DrillKitPart>,
@@ -576,8 +600,10 @@ pub fn update_drill_and_lift_system(
             Without<LiftTechPart>,
         ),
     >,
-    mut q_barrier: Query<
-        &mut Visibility,
+    q_barrier: Query<
+        'w,
+        's,
+        &'static mut Visibility,
         (
             With<LiftBarrierPart>,
             Without<DrillKitPart>,
@@ -587,8 +613,10 @@ pub fn update_drill_and_lift_system(
             Without<LiftTechPart>,
         ),
     >,
-    mut q_sticker: Query<
-        &mut Visibility,
+    q_sticker: Query<
+        'w,
+        's,
+        &'static mut Visibility,
         (
             With<LiftInspectionSticker>,
             Without<DrillKitPart>,
@@ -598,8 +626,10 @@ pub fn update_drill_and_lift_system(
             Without<LiftTechPart>,
         ),
     >,
-    mut q_tech: Query<
-        (&LiftTechPart, &mut Visibility, &mut Transform),
+    q_tech: Query<
+        'w,
+        's,
+        (&'static LiftTechPart, &'static mut Visibility, &'static mut Transform),
         (
             Without<DrillKitPart>,
             Without<DrillFlame>,
@@ -608,8 +638,33 @@ pub fn update_drill_and_lift_system(
             Without<LiftInspectionSticker>,
         ),
     >,
-    mut q_doors: Query<&mut ElevatorDoors>,
-    mut q_door_leaves: Query<&mut Transform, (Without<DrillFlame>, Without<LiftTechPart>)>,
+    q_doors: Query<'w, 's, &'static mut ElevatorDoors>,
+    q_door_leaves: Query<'w, 's, &'static mut Transform, (Without<DrillFlame>, Without<LiftTechPart>)>,
+    q_evac: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static ChibiWorker,
+            &'static mut NavWalker,
+            Option<&'static LiveSessionWorker>,
+            Option<&'static OfficeStaffNpc>,
+            Option<&'static mut DrillEvacuating>,
+        ),
+    >,
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn update_drill_and_lift_system(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut drill: Option<ResMut<FireDrillState>>,
+    mut lift_svc: Option<ResMut<LiftServiceState>>,
+    mut life: Option<ResMut<OfficeLifeState>>,
+    replay: Option<Res<ReplayState>>,
+    nav: Option<Res<NavGraph>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut q: DrillLiftQueries,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.25);
     let in_replay = replay.as_deref().is_some_and(|r| r.active);
@@ -625,11 +680,60 @@ pub fn update_drill_and_lift_system(
             match d.phase {
                 DrillPhase::Idle => {}
                 DrillPhase::Alarm => {
-                    if let Some(graph) = nav.as_deref() {
-                        if let Some(spot) = graph.desk_spot(0) {
-                            let path = compute_evacuation_path(graph, spot.pos);
-                            d.evacuated_paths_wall_free =
-                                path.windows(2).all(|w| !graph.crosses_wall(w[0], w[1]));
+                    // One-shot evacuation dispatch (zero per-frame Dijkstra allocations)
+                    if !d.evac_dispatched {
+                        d.evac_dispatched = true;
+                        if let Some(graph) = nav.as_deref() {
+                            if let Some(spot) = graph.desk_spot(0) {
+                                let path = compute_evacuation_path(graph, spot.pos);
+                                d.evacuated_paths_wall_free =
+                                    path.windows(2).all(|w| !graph.crosses_wall(w[0], w[1]));
+                            }
+                            for (ent, chibi, mut walker, live, staff, evac_opt) in &mut q.q_evac {
+                                let eligible = live.is_some()
+                                    || staff.is_some_and(|s| s.role != StaffRole::Guard);
+                                if !eligible || evac_opt.is_some() {
+                                    continue;
+                                }
+                                let path = compute_evacuation_path(graph, chibi.base_pos);
+                                if !path.windows(2).all(|w| !graph.crosses_wall(w[0], w[1])) {
+                                    d.evacuated_paths_wall_free = false;
+                                }
+                                let (home_pos, home_yaw, home_sit, home_anim) =
+                                    if let Some(lw) = live {
+                                        graph
+                                            .desk_spot(lw.desk_index)
+                                            .map(|sp| {
+                                                (sp.pos, sp.face, true, anim_for_status(&lw.status))
+                                            })
+                                            .unwrap_or((
+                                                chibi.base_pos,
+                                                chibi.base_yaw,
+                                                chibi.sitting,
+                                                anim_for_status(&lw.status),
+                                            ))
+                                    } else if let Some(npc) = staff {
+                                        (npc.home_pos, npc.home_yaw, npc.home_sit, WorkerAnim::Work)
+                                    } else {
+                                        (chibi.base_pos, chibi.base_yaw, chibi.sitting, chibi.anim)
+                                    };
+                                walker.waypoints = path;
+                                walker.cursor = 0;
+                                walker.arrive_yaw = FRAC_PI_2;
+                                walker.arrive_sit = false;
+                                walker.arrive_anim = WorkerAnim::Wait;
+                                walker.despawn_on_arrive = false;
+                                commands
+                                    .entity(ent)
+                                    .remove::<ActiveRoutine>()
+                                    .insert(DrillEvacuating {
+                                        home_pos,
+                                        home_yaw,
+                                        home_sit,
+                                        home_anim,
+                                        returning: false,
+                                    });
+                            }
                         }
                     }
                     if d.phase_elapsed >= ALARM_SECS {
@@ -663,15 +767,66 @@ pub fn update_drill_and_lift_system(
                     if d.phase_elapsed >= DEMO_SECS {
                         d.phase = DrillPhase::Back;
                         d.phase_elapsed = 0.0;
+                        d.return_dispatched = false;
                     }
                 }
                 DrillPhase::Back => {
                     d.powder_visible = false;
                     d.fire_level = 0.0;
+                    if !d.return_dispatched {
+                        d.return_dispatched = true;
+                        if let Some(graph) = nav.as_deref() {
+                            for (_ent, chibi, mut walker, _live, _staff, evac_opt) in &mut q.q_evac {
+                                if let Some(mut evac) = evac_opt
+                                    && !evac.returning
+                                {
+                                    walker.set_destination(
+                                        graph,
+                                        chibi.base_pos,
+                                        evac.home_pos,
+                                        evac.home_yaw,
+                                        evac.home_sit,
+                                        evac.home_anim,
+                                    );
+                                    evac.returning = true;
+                                }
+                            }
+                        }
+                    }
+                    for (ent, _chibi, walker, _live, _staff, evac_opt) in &mut q.q_evac {
+                        if let Some(evac) = evac_opt
+                            && evac.returning
+                            && !walker.is_walking()
+                        {
+                            commands.entity(ent).remove::<DrillEvacuating>();
+                        }
+                    }
                     if d.phase_elapsed >= BACK_SECS {
                         d.phase = DrillPhase::Idle;
                         d.phase_elapsed = 0.0;
                     }
+                }
+            }
+        } else {
+            // Idle (including post-Back or post-abort): ensure every remaining DrillEvacuating entity walks home & clears tag
+            for (ent, chibi, mut walker, _live, _staff, evac_opt) in &mut q.q_evac {
+                let Some(mut evac) = evac_opt else {
+                    continue;
+                };
+                if !evac.returning {
+                    if let Some(graph) = nav.as_deref() {
+                        walker.set_destination(
+                            graph,
+                            chibi.base_pos,
+                            evac.home_pos,
+                            evac.home_yaw,
+                            evac.home_sit,
+                            evac.home_anim,
+                        );
+                    }
+                    evac.returning = true;
+                } else if !walker.is_walking() {
+                    commands.entity(ent).remove::<DrillEvacuating>();
                 }
             }
         }
@@ -686,7 +841,7 @@ pub fn update_drill_and_lift_system(
         if want_strobe != d.strobe_on {
             d.strobe_on = want_strobe;
             if let Some(mats) = materials.as_deref_mut() {
-                if let Some(lens) = q_strobes.iter().next() {
+                if let Some(lens) = q.q_strobes.iter().next() {
                     if let Some(m) = mats.get_mut(&lens.mat) {
                         m.emissive = if want_strobe {
                             LinearRgba::new(6.0, 6.0, 6.0, 1.0)
@@ -699,14 +854,14 @@ pub fn update_drill_and_lift_system(
         }
 
         let kit_vis = if active { Visibility::Visible } else { Visibility::Hidden };
-        for mut v in &mut q_kit {
+        for mut v in &mut q.q_kit {
             if *v != kit_vis {
                 *v = kit_vis;
             }
         }
         let flame_on = active && d.fire_level > 0.02;
         let flame_vis = if flame_on { Visibility::Visible } else { Visibility::Hidden };
-        for (fl, mut vis, mut tf) in &mut q_flames {
+        for (fl, mut vis, mut tf) in &mut q.q_flames {
             if *vis != flame_vis {
                 *vis = flame_vis;
             }
@@ -722,7 +877,7 @@ pub fn update_drill_and_lift_system(
         } else {
             Visibility::Hidden
         };
-        for mut v in &mut q_powder {
+        for mut v in &mut q.q_powder {
             if *v != powder_vis {
                 *v = powder_vis;
             }
@@ -770,14 +925,14 @@ pub fn update_drill_and_lift_system(
         } else {
             Visibility::Hidden
         };
-        for mut v in &mut q_barrier {
+        for mut v in &mut q.q_barrier {
             if *v != barrier_vis {
                 *v = barrier_vis;
             }
         }
 
         let tech_vis = if busy { Visibility::Visible } else { Visibility::Hidden };
-        for (tp, mut vis, mut tf) in &mut q_tech {
+        for (tp, mut vis, mut tf) in &mut q.q_tech {
             if *vis != tech_vis {
                 *vis = tech_vis;
             }
@@ -789,7 +944,7 @@ pub fn update_drill_and_lift_system(
         }
 
         let mut doors_open = 0.0_f32;
-        for mut d in &mut q_doors {
+        for mut d in &mut q.q_doors {
             let prev = d.open;
             if svc.phase == LiftServicePhase::Work {
                 d.open = 0.42;
@@ -800,22 +955,22 @@ pub fn update_drill_and_lift_system(
             }
             if (d.open - prev).abs() > 1e-5 {
                 let open = d.open.clamp(0.0, 1.0);
-                if let Ok(mut tf) = q_door_leaves.get_mut(d.left_door) {
+                if let Ok(mut tf) = q.q_door_leaves.get_mut(d.left_door) {
                     tf.translation.z = d.center_z - (0.25 + open * 0.46);
                 }
-                if let Ok(mut tf) = q_door_leaves.get_mut(d.right_door) {
+                if let Ok(mut tf) = q.q_door_leaves.get_mut(d.right_door) {
                     tf.translation.z = d.center_z + (0.25 + open * 0.46);
                 }
             }
             doors_open = d.open;
         }
 
-        let sticker_vis = if svc.sticker_installed && (doors_open > 0.02 || q_doors.is_empty()) {
+        let sticker_vis = if svc.sticker_installed && (doors_open > 0.02 || q.q_doors.is_empty()) {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
-        for mut v in &mut q_sticker {
+        for mut v in &mut q.q_sticker {
             if *v != sticker_vis {
                 *v = sticker_vis;
             }
@@ -1015,5 +1170,199 @@ mod tests {
         assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);
         assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 0);
         assert_eq!(app.world().resource::<Assets<Image>>().len(), 0);
+    }
+
+    #[test]
+    fn fire_drill_evacuates_workers_and_staff_once_without_conflict_and_returns_on_back_or_abort() {
+        use crate::backdrops::BackdropKind;
+        use crate::cast::{CastClock, RoutineCoordinator, begin_cast_tick_system};
+        use crate::chibi::ChibiLook;
+        use crate::people::{LiveWorkerSpec, step_nav_walkers_system, sync_live_workers_in_world};
+        use crate::{SharedFontEngine, spawn_full_office_world};
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(SharedFontEngine::new(assets_dir.clone()))
+            .insert_resource(FireDrillState::default())
+            .insert_resource(LiftServiceState::default())
+            .insert_resource(OfficeLifeState::default())
+            .insert_resource(ReplayState::default())
+            .insert_resource(CastClock::default())
+            .insert_resource(RoutineCoordinator::default())
+            .add_systems(
+                Update,
+                (
+                    update_drill_and_lift_system,
+                    begin_cast_tick_system,
+                    step_nav_walkers_system,
+                )
+                    .chain(),
+            );
+
+        app.world_mut().resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    world.resource_scope(|world, mut sf: Mut<SharedFontEngine>| {
+                        let fonts = sf.get_or_init();
+                        let mut cmds = world.commands();
+                        spawn_full_office_world(
+                            &mut cmds,
+                            &mut meshes,
+                            &mut mats,
+                            &mut imgs,
+                            fonts,
+                            &assets_dir,
+                            OfficeLayout::Pro,
+                            BackdropKind::City,
+                            ChibiLook::Pixar,
+                            false,
+                        );
+                    });
+                });
+            });
+        });
+        app.world_mut().flush();
+
+        // Sync one live worker seated at desk 0
+        let specs = vec![LiveWorkerSpec {
+            session_id: "evac-w0".to_owned(),
+            agent: "claude".to_owned(),
+            name: "EvacWorker".to_owned(),
+            status: "work".to_owned(),
+            desk_hint: 0,
+            tool_kind: None,
+            tool_label: None,
+            git_dirty: 0,
+            subagents: Vec::new(),
+        }];
+        sync_live_workers_in_world(app.world_mut(), &specs, ChibiLook::Pixar);
+        let nav = app.world().resource::<NavGraph>().clone();
+        let desk0 = nav.desk_spot(0).expect("desk 0");
+        let stairwell = nav.node_pos("I").expect("stairwell I");
+
+        let worker_ent = {
+            let mut q = app
+                .world_mut()
+                .query::<(Entity, &LiveSessionWorker, &mut ChibiWorker, &mut NavWalker)>();
+            let (ent, _, mut chibi, mut wlk) = q.single_mut(app.world_mut()).unwrap();
+            chibi.base_pos = desk0.pos;
+            chibi.base_yaw = desk0.face;
+            chibi.sitting = true;
+            wlk.waypoints.clear();
+            wlk.cursor = 0;
+            ent
+        };
+
+        // Trigger fire drill -> 1 tick dispatches evacuation one-shot
+        app.world_mut().resource_mut::<FireDrillState>().trigger();
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(std::time::Duration::from_millis(100));
+        app.update();
+
+        assert!(
+            app.world().resource::<FireDrillState>().evac_dispatched,
+            "evac_dispatched must be set one-shot on entering Alarm"
+        );
+        assert!(
+            app.world().get::<DrillEvacuating>(worker_ent).is_some(),
+            "live worker must be tagged with DrillEvacuating"
+        );
+        let wlk_target = app
+            .world()
+            .get::<NavWalker>(worker_ent)
+            .unwrap()
+            .waypoints
+            .last()
+            .copied()
+            .expect("worker must have evacuation waypoints");
+        assert!(
+            wlk_target.distance(stairwell) < 0.25,
+            "evacuation target ({wlk_target}) must route to stairwell node I ({stairwell})"
+        );
+        // Guard outside must NOT be evacuated, while indoor staff (e.g., HR) MUST be evacuated
+        let hr_evac = app
+            .world_mut()
+            .query::<(&OfficeStaffNpc, Option<&DrillEvacuating>)>()
+            .iter(app.world())
+            .find(|(n, _)| n.role == StaffRole::Hr)
+            .map(|(_, e)| e.is_some())
+            .unwrap_or(false);
+        let guard_evac = app
+            .world_mut()
+            .query::<(&OfficeStaffNpc, Option<&DrillEvacuating>)>()
+            .iter(app.world())
+            .find(|(n, _)| n.role == StaffRole::Guard)
+            .map(|(_, e)| e.is_some())
+            .unwrap_or(false);
+        assert!(hr_evac, "indoor OfficeStaffNpc (HR) must evacuate during Alarm");
+        assert!(!guard_evac, "outdoor Guard must not evacuate");
+
+        // RoutineCoordinator must claim evacuating worker so cultural routines never steal it
+        assert!(
+            app.world()
+                .resource::<RoutineCoordinator>()
+                .is_claimed(worker_ent),
+            "RoutineCoordinator must claim DrillEvacuating entities"
+        );
+
+        // sync_live_workers_in_world with a station tool must NOT clobber evacuation walker
+        let mut station_specs = specs.clone();
+        station_specs[0].tool_kind = Some("bash".to_owned());
+        sync_live_workers_in_world(app.world_mut(), &station_specs, ChibiLook::Pixar);
+        let wlk_after_sync = app
+            .world()
+            .get::<NavWalker>(worker_ent)
+            .unwrap()
+            .waypoints
+            .last()
+            .copied()
+            .expect("evac waypoints preserved");
+        assert!(
+            wlk_after_sync.distance(stairwell) < 0.25,
+            "sync_live_workers_and_screens must not fight DrillEvacuating worker"
+        );
+
+        // Run through full drill cycle -> Back walks worker home and drops DrillEvacuating
+        for _ in 0..220 {
+            app.world_mut()
+                .resource_mut::<Time<()>>()
+                .advance_by(std::time::Duration::from_millis(200));
+            app.update();
+        }
+        assert_eq!(app.world().resource::<FireDrillState>().phase, DrillPhase::Idle);
+        assert!(
+            app.world().get::<DrillEvacuating>(worker_ent).is_none(),
+            "worker must drop DrillEvacuating after returning home"
+        );
+        let pos_after = app.world().get::<ChibiWorker>(worker_ent).unwrap().base_pos;
+        assert!(
+            pos_after.distance(desk0.pos) < 0.35,
+            "worker ({pos_after}) must return to desk 0 ({}) after drill",
+            desk0.pos
+        );
+
+        // Abort mid-Alarm -> must also return home and clear DrillEvacuating
+        app.world_mut().resource_mut::<FireDrillState>().trigger();
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(std::time::Duration::from_millis(200));
+        app.update();
+        assert!(app.world().get::<DrillEvacuating>(worker_ent).is_some());
+        app.world_mut().resource_mut::<FireDrillState>().abort();
+        for _ in 0..80 {
+            app.world_mut()
+                .resource_mut::<Time<()>>()
+                .advance_by(std::time::Duration::from_millis(200));
+            app.update();
+        }
+        assert!(
+            app.world().get::<DrillEvacuating>(worker_ent).is_none(),
+            "aborted drill must return worker and remove DrillEvacuating"
+        );
     }
 }

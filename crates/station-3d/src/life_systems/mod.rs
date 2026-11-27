@@ -22,8 +22,8 @@ use station_canvas2d::FontEngine;
 
 pub use altar::{AltarState, is_offering_day, spawn_than_tai_altar, update_altar_system, vietnamese_lunar_day};
 pub use drill_lift::{
-    DrillPhase, FireDrillState, LiftServicePhase, LiftServiceState, compute_evacuation_path,
-    spawn_drill_and_lift_service, update_drill_and_lift_system,
+    DrillEvacuating, DrillPhase, FireDrillState, LiftServicePhase, LiftServiceState,
+    compute_evacuation_path, spawn_drill_and_lift_service, update_drill_and_lift_system,
 };
 pub use seasons_weather::{
     RAIN_POOL_CAP, WeatherVisualState, spawn_seasons_and_weather, update_seasons_and_weather_system,

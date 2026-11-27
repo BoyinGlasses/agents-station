@@ -477,6 +477,7 @@ pub fn step_staff_roles_system(
         &mut Visibility,
         Option<&mut InternTenure>,
         Option<&ActivePropEntity>,
+        Option<&crate::life_systems::DrillEvacuating>,
     )>,
 ) {
     let (Some(nav), Some(state), Some(cache), Some(pal), Some(mats)) = (
@@ -494,7 +495,10 @@ pub fn step_staff_roles_system(
     let pro = nav.layout().is_pro();
     state.guard_night_shift = !(390..1320).contains(&m);
 
-    for (ent, mut npc, chibi, mut walker, mut vis, intern_tenure, active_prop) in &mut staff_q {
+    for (ent, mut npc, chibi, mut walker, mut vis, intern_tenure, active_prop, evac_opt) in &mut staff_q {
+        if evac_opt.is_some() {
+            continue;
+        }
         // Dwell only counts down after the NPC finishes walking to its destination.
         if !walker.is_walking() && npc.dwell_secs > 0.0 {
             npc.dwell_secs = (npc.dwell_secs - dt).max(0.0);

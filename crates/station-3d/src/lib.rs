@@ -47,11 +47,11 @@ pub use ibl::OfficeIbl;
 pub use interact::WorkerSelected;
 pub use layout::{LayoutSpec, OfficeLayout};
 pub use life_systems::{
-    AltarState, DrillPhase, FireDrillState, IncidentState, LiftServicePhase, LiftServiceState,
-    MAX_PHOTOSTRIPS, MAX_TEST_ROWS, MAX_TROPHY_SLOTS, NapState, PhotostripSlot, PhotostripsState,
-    PostboxState, PostmanStage, QuotaBoardState, RAIN_POOL_CAP, TestRunStatus, TestsBoardState,
-    TrophiesShelfState, TrophyEntry, WeatherVisualState, WorkdayKind, YourTurnState,
-    sync_photostrips_from_shots_dir,
+    AltarState, DrillEvacuating, DrillPhase, FireDrillState, IncidentState, LiftServicePhase,
+    LiftServiceState, MAX_PHOTOSTRIPS, MAX_TEST_ROWS, MAX_TROPHY_SLOTS, NapState, PhotostripSlot,
+    PhotostripsState, PostboxState, PostmanStage, QuotaBoardState, RAIN_POOL_CAP, TestRunStatus,
+    TestsBoardState, TrophiesShelfState, TrophyEntry, WeatherVisualState, WorkdayKind,
+    YourTurnState, sync_photostrips_from_shots_dir,
 };
 pub use lights::LightingSyncSet;
 pub use replay::{ReplayEvent, ReplaySessionSnap, ReplayState, ReplayWorldSnapshot, TimelineSpan};
@@ -177,7 +177,7 @@ fn register_office_runtime(
             Update,
             (
                 life_systems::update_altar_system,
-                life_systems::update_drill_and_lift_system,
+                life_systems::update_drill_and_lift_system.before(people::step_nav_walkers_system),
                 entrance::animate_elevator_doors_system.after(life_systems::update_drill_and_lift_system),
                 life_systems::update_seasons_and_weather_system,
                 life_systems::update_workflow_life_system,

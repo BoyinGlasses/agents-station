@@ -5025,6 +5025,7 @@ struct LiveSync3dParams<'w, 's> {
             Option<&'static station_3d::ActivePropEntity>,
             Option<&'static Children>,
             Option<&'static station_3d::ActiveRoutine>,
+            Option<&'static station_3d::DrillEvacuating>,
         ),
     >,
     subagents_q: Query<

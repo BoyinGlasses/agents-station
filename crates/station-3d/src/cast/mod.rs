@@ -344,12 +344,13 @@ pub(crate) fn sync_lazy_prop(
 }
 
 /// Advances `CastClock::sim_secs` and seeds `RoutineCoordinator` with every currently active
-/// routine participant before the three cultural routine systems run.
+/// routine participant and fire-drill evacuee before the three cultural routine systems run.
 pub fn begin_cast_tick_system(
     time: Res<Time>,
     mut clock: Option<ResMut<CastClock>>,
     mut coord: Option<ResMut<RoutineCoordinator>>,
     active_q: Query<Entity, With<ActiveRoutine>>,
+    evac_q: Query<Entity, With<crate::life_systems::DrillEvacuating>>,
 ) {
     let dt = time.delta_secs().clamp(0.0, 0.1);
     if let Some(c) = clock.as_deref_mut() {
@@ -358,6 +359,9 @@ pub fn begin_cast_tick_system(
     if let Some(co) = coord.as_deref_mut() {
         co.reset();
         for ent in &active_q {
+            co.claim(ent);
+        }
+        for ent in &evac_q {
             co.claim(ent);
         }
     }

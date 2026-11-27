@@ -461,6 +461,7 @@ pub fn sync_live_workers_and_screens(
         Option<&ActivePropEntity>,
         Option<&Children>,
         Option<&crate::cast::ActiveRoutine>,
+        Option<&crate::life_systems::DrillEvacuating>,
     )>,
     subagents_q: &mut Query<
         (Entity, &mut SubagentWorker, &ChibiWorker),
@@ -527,7 +528,7 @@ pub fn sync_live_workers_and_screens(
     }
 
     // 3. Reconcile existing LiveSessionWorker entities: update in-place or despawn ended ones.
-    for (ent, mut live, mut chibi, walker, lifecycle, active_prop, children, routine_opt) in
+    for (ent, mut live, mut chibi, walker, lifecycle, active_prop, children, routine_opt, evac_opt) in
         workers_q.iter_mut()
     {
         let Some(&(spec_idx, target_desk)) = scratch.desired_indices.get(live.session_id.as_str()) else {
@@ -547,9 +548,10 @@ pub fn sync_live_workers_and_screens(
             None
         };
 
-        // Protect ActiveRoutine participants: skip walker/lifecycle/anim/prop mutation until the
-        // cultural routine finishes returning them to their desk and removes ActiveRoutine.
-        if routine_opt.is_none() {
+        // Protect ActiveRoutine & DrillEvacuating participants: skip walker/lifecycle/anim/prop
+        // mutation until the cultural routine or fire drill finishes returning them to their desk.
+        let busy_override = routine_opt.is_some() || evac_opt.is_some();
+        if !busy_override {
             // Route via NavGraph if the active tool station or resting state changed.
             if let (Some(mut wlk), Some(mut lc)) = (walker, lifecycle) {
                 let current_station = match *lc {
@@ -616,8 +618,8 @@ pub fn sync_live_workers_and_screens(
         }
 
         // Lazy prop attachment: ONLY call set_active_prop when desired prop actually changed
-        // and no cultural routine currently owns this worker's held prop.
-        if routine_opt.is_none() {
+        // and no cultural routine or fire drill currently owns this worker.
+        if !busy_override {
             let desired_prop = prop_for_worker_state(desired_station, next_anim);
             if active_prop.map(|p| p.kind) != desired_prop {
                 set_active_prop(commands, chibi_cache, palette, materials, ent, desired_prop);
@@ -860,6 +862,7 @@ pub fn sync_live_workers_in_world(world: &mut World, specs: &[LiveWorkerSpec], l
             Option<&ActivePropEntity>,
             Option<&Children>,
             Option<&crate::cast::ActiveRoutine>,
+            Option<&crate::life_systems::DrillEvacuating>,
         )>,
         Query<(Entity, &mut SubagentWorker, &ChibiWorker), Without<LiveSessionWorker>>,
         Query<(Entity, &TeamLineDash)>,
