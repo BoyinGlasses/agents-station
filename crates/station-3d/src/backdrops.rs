@@ -1,5 +1,5 @@
 use crate::layout::LayoutSpec;
-use crate::palette::{WorldEntity, WorldPalette, parse_hex_rgb, srgb_hex, upload_gpu_image};
+use crate::palette::{WorldPalette, parse_hex_rgb, srgb_hex, upload_gpu_image};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
@@ -358,61 +358,6 @@ impl BackdropAssets {
     }
 }
 
-fn b_box(
-    commands: &mut Commands,
-    pal: &WorldPalette,
-    mat: Handle<StandardMaterial>,
-    pos: Vec3,
-    size: Vec3,
-) -> Entity {
-    commands
-        .spawn((
-            WorldEntity,
-            BackdropEntity,
-            Mesh3d(pal.unit_box.clone()),
-            MeshMaterial3d(mat),
-            Transform::from_translation(pos).with_scale(size),
-        ))
-        .id()
-}
-
-fn b_cyl(
-    commands: &mut Commands,
-    pal: &WorldPalette,
-    mat: Handle<StandardMaterial>,
-    pos: Vec3,
-    diam: f32,
-    h: f32,
-) -> Entity {
-    commands
-        .spawn((
-            WorldEntity,
-            BackdropEntity,
-            Mesh3d(pal.unit_cyl.clone()),
-            MeshMaterial3d(mat),
-            Transform::from_translation(pos).with_scale(Vec3::new(diam, h, diam)),
-        ))
-        .id()
-}
-
-fn b_sphere(
-    commands: &mut Commands,
-    pal: &WorldPalette,
-    mat: Handle<StandardMaterial>,
-    pos: Vec3,
-    scale: Vec3,
-) -> Entity {
-    commands
-        .spawn((
-            WorldEntity,
-            BackdropEntity,
-            Mesh3d(pal.unit_sphere.clone()),
-            MeshMaterial3d(mat),
-            Transform::from_translation(pos).with_scale(scale),
-        ))
-        .id()
-}
-
 pub fn unload_backdrop(
     commands: &mut Commands,
     q: &Query<Entity, With<BackdropEntity>>,
@@ -430,7 +375,7 @@ pub fn unload_backdrop(
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_backdrop(
     commands: &mut Commands,
-    pal: &mut WorldPalette,
+    _pal: &mut WorldPalette,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
@@ -443,7 +388,6 @@ pub fn spawn_backdrop(
     city: &str,
     temp_c: f32,
 ) {
-    const GY: f32 = -0.62;
     backdrop_assets.active = Some(kind);
 
     match kind {
@@ -465,91 +409,27 @@ pub fn spawn_backdrop(
             );
         }
         BackdropKind::Countryside => {
-            // Emerald & golden terraced Vietnamese rice paddies + limestone karst hills + red-tile village houses
-            let grass = backdrop_assets.mat(materials, "#7DAE4E", 0.92, 0.0);
-            let paddy_g = backdrop_assets.mat(materials, "#94C152", 0.85, 0.0);
-            let paddy_y = backdrop_assets.mat(materials, "#D6BD5E", 0.85, 0.0);
-            let water = backdrop_assets.mat(materials, "#5B9AA8", 0.25, 0.1);
-            let hill_a = backdrop_assets.mat(materials, "#668A6E", 0.92, 0.0);
-            let hill_b = backdrop_assets.mat(materials, "#4D735A", 0.92, 0.0);
-            let wall = backdrop_assets.mat(materials, "#F1E3B5", 0.85, 0.0);
-            let roof = backdrop_assets.mat(materials, "#B5533C", 0.78, 0.0);
-            let trunk = backdrop_assets.mat(materials, "#6E4B32", 0.7, 0.0);
-            let leaf = backdrop_assets.mat(materials, "#457E38", 0.75, 0.0);
-
-            b_box(commands, pal, grass, Vec3::new(4.0, GY - 0.1, 4.0), Vec3::new(120.0, 0.2, 120.0));
-
-            let front_z = spec.reach.z1 + 5.5;
-            let right_x = spec.reach.x1 + 6.0;
-            for i in 0..4 {
-                let pm = if i % 2 == 0 { paddy_g.clone() } else { paddy_y.clone() };
-                b_box(commands, pal, pm, Vec3::new(-10.0 + i as f32 * 9.0, GY + 0.04, front_z + 4.5), Vec3::new(8.2, 0.08, 10.5));
-                b_box(commands, pal, paddy_g.clone(), Vec3::new(right_x + 5.0, GY + 0.04, -10.0 + i as f32 * 8.5), Vec3::new(11.0, 0.08, 7.6));
-            }
-            // Irrigation canal
-            b_box(commands, pal, water, Vec3::new(3.0, GY + 0.02, front_z - 1.5), Vec3::new(65.0, 0.05, 1.4));
-
-            // Karst hills along far horizon
-            for (hx, hz, sx, sy, sz, dark) in [
-                (-22.0_f32, -24.0_f32, 14.0_f32, 13.0_f32, 12.0_f32, false),
-                (-4.0, -26.0, 18.0, 17.0, 14.0, true),
-                (18.0, -24.0, 16.0, 14.5, 13.0, false),
-                (34.0, -6.0, 14.0, 12.0, 16.0, true),
-            ] {
-                b_sphere(commands, pal, if dark { hill_b.clone() } else { hill_a.clone() }, Vec3::new(hx, GY + sy * 0.35, hz), Vec3::new(sx, sy, sz));
-            }
-
-            // Red-tile village houses & bamboo trees
-            for (vx, vz) in [(right_x + 4.5, front_z + 5.5), (right_x + 9.0, -4.0), (-10.0, front_z + 11.5)] {
-                b_box(commands, pal, wall.clone(), Vec3::new(vx, GY + 1.2, vz), Vec3::new(4.2, 2.4, 3.4));
-                b_box(commands, pal, roof.clone(), Vec3::new(vx, GY + 2.65, vz), Vec3::new(4.8, 0.65, 4.0));
-                b_cyl(commands, pal, trunk.clone(), Vec3::new(vx - 3.2, GY + 1.5, vz - 1.2), 0.35, 3.0);
-                b_sphere(commands, pal, leaf.clone(), Vec3::new(vx - 3.2, GY + 3.4, vz - 1.2), Vec3::splat(2.4));
-            }
+            crate::street::country_beach::spawn_countryside_backdrop(
+                commands,
+                meshes,
+                materials,
+                images,
+                backdrop_assets,
+                fonts,
+                spec,
+                night,
+            );
         }
         BackdropKind::Beach => {
-            // Golden sand + turquoise shallow water + deep ocean + islands + palm trees + colorful umbrellas
-            let sand = backdrop_assets.mat(materials, "#EBD5A7", 0.9, 0.0);
-            let shallow = backdrop_assets.mat(materials, "#56C6D8", 0.22, 0.05);
-            let deep = backdrop_assets.mat(materials, "#2B7FA8", 0.2, 0.1);
-            let foam = backdrop_assets.mat(materials, "#F2FAFC", 0.5, 0.0);
-            let trunk = backdrop_assets.mat(materials, "#8C6239", 0.75, 0.0);
-            let frond = backdrop_assets.mat(materials, "#3B8E42", 0.65, 0.0);
-            let island = backdrop_assets.mat(materials, "#628E68", 0.88, 0.0);
-
-            b_box(commands, pal, sand, Vec3::new(4.0, GY - 0.1, 4.0), Vec3::new(120.0, 0.2, 120.0));
-            let front_z = spec.reach.z1 + 6.0;
-            let right_x = spec.reach.x1 + 6.5;
-
-            // Shoreline foam, shallow turquoise bay, deep ocean
-            b_box(commands, pal, foam, Vec3::new(6.0, GY + 0.02, front_z + 2.2), Vec3::new(90.0, 0.03, 0.8));
-            b_box(commands, pal, shallow.clone(), Vec3::new(6.0, GY + 0.01, front_z + 10.5), Vec3::new(100.0, 0.04, 16.0));
-            b_box(commands, pal, deep, Vec3::new(6.0, GY, front_z + 30.0), Vec3::new(120.0, 0.04, 24.0));
-            b_box(commands, pal, shallow, Vec3::new(right_x + 14.0, GY + 0.01, 4.0), Vec3::new(22.0, 0.04, 90.0));
-
-            // Distant bay islands
-            b_sphere(commands, pal, island.clone(), Vec3::new(28.0, GY + 2.5, front_z + 14.0), Vec3::new(10.0, 6.5, 8.0));
-            b_sphere(commands, pal, island, Vec3::new(-12.0, GY + 2.0, front_z + 18.0), Vec3::new(12.0, 5.5, 9.0));
-
-            // Palm trees & striped beach umbrellas along the sand
-            let umb_cols = ["#E63946", "#3F7CC4", "#FFD166", "#FF6B9A"];
-            for (i, &(px, pz)) in [
-                (-6.0_f32, front_z - 1.2_f32),
-                (4.0, front_z - 1.0),
-                (14.0, front_z - 1.2),
-                (right_x + 1.2, -4.0),
-                (right_x + 1.2, 5.0),
-            ]
-            .iter()
-            .enumerate()
-            {
-                b_cyl(commands, pal, trunk.clone(), Vec3::new(px, GY + 2.2, pz), 0.28, 4.4);
-                b_sphere(commands, pal, frond.clone(), Vec3::new(px, GY + 4.4, pz), Vec3::new(2.8, 0.75, 2.8));
-                let um = backdrop_assets.mat(materials, umb_cols[i % umb_cols.len()], 0.7, 0.0);
-                let pole = backdrop_assets.mat(materials, "#FFFFFF", 0.4, 0.2);
-                b_cyl(commands, pal, pole, Vec3::new(px + 2.4, GY + 1.0, pz + 0.6), 0.07, 2.0);
-                b_sphere(commands, pal, um, Vec3::new(px + 2.4, GY + 2.0, pz + 0.6), Vec3::new(2.1, 0.45, 2.1));
-            }
+            crate::street::country_beach::spawn_beach_backdrop(
+                commands,
+                meshes,
+                materials,
+                images,
+                backdrop_assets,
+                spec,
+                night,
+            );
         }
     }
 }
@@ -575,6 +455,7 @@ pub fn animate_backdrop_traffic_system(
 mod tests {
     use super::*;
     use crate::layout::OfficeLayout;
+    use crate::palette::WorldEntity;
     use std::path::PathBuf;
 
     #[test]

@@ -189,6 +189,7 @@ fn register_office_runtime(
                 street::eat_com::animate_eat_com_steam_system,
                 street::scenes_a::animate_street_scenes_a_system,
                 street::scenes_b::animate_street_scenes_b_system,
+                street::country_beach::animate_countryside_and_beach_system,
             ),
         )
         .add_systems(

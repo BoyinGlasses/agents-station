@@ -1,4 +1,5 @@
 pub mod city_grid;
+pub mod country_beach;
 pub mod eat_com;
 pub mod scenes_a;
 pub mod scenes_b;
