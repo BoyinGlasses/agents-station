@@ -203,8 +203,8 @@ fn build_gui_app(cli: &cli::Cli) -> App {
     app.add_plugins(build_default_plugins(cli));
     if !is_lite_2d {
         app.add_plugins(MeshPickingPlugin)
-            .insert_resource(DirectionalLightShadowMap { size: 1536 })
-            .insert_resource(PointLightShadowMap { size: 256 });
+            .insert_resource(DirectionalLightShadowMap { size: 1024 })
+            .insert_resource(PointLightShadowMap { size: 128 });
     }
     app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
@@ -445,6 +445,8 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                     .insert_resource(station_3d::life::OfficeLifeState::default())
                     .insert_resource(station_3d::demo::DemoSimState::default())
                     .insert_resource(station_3d::replay::ReplayState::default())
+                    .add_event::<station_3d::interact::PropActivated>()
+                    .add_event::<station_3d::interact::WorkerSelected>()
                     .insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
                     .add_systems(Startup, spawn_lite_2d_camera);
             } else {
