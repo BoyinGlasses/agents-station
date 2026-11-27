@@ -1,4 +1,5 @@
 pub mod city_grid;
+pub mod traffic;
 
 use crate::backdrops::{BackdropAssets, BackdropEntity};
 use crate::palette::{WorldEntity, parse_hex_rgb};
