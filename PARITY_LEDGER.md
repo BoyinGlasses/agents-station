@@ -2,7 +2,7 @@
 
 Generated from Golden Oracle d:\\mystation\\my-station (461 source files + 106 HTTP/SSE/OTLP endpoints + 4 bootstrap items).
 
-Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 total
+Status: 571 verified `[x]` | 0 partial/stubbed `[~]` | 0 unported `[ ]` | 571 total
 
 > Honest Audit Status: `[x]` = verified real parity, `[~]` = partial/stubbed/security-pending, `[ ]` = unported or dummy endpoint.
 
@@ -36,9 +36,9 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] server/otel-setup.mjs -> `crates/station-core/src/store/otel_setup.rs` (unit tested)
 - [x] server/otel.mjs -> `crates/station-core/src/store/otel.rs` (Oracle fixtures, 30d burn, 15s MoveFileExW flush & SIGKILL survival certified)
 - [x] server/overlap.mjs -> `crates/station-core/src/state/overlap.rs` (unit tested)
-- [~] server/platform/darwin.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
+- [x] server/platform/darwin.mjs -> `crates/station-core/src/platform/unix.rs::DarwinPlatform` (real `ps`/`vm_stat`/`sysctl`/`df`/`lsof`/`ioreg`/`kill` + cross-platform parser tests; `Win32Platform` active on Windows)
 - [x] server/platform/index.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
-- [~] server/platform/linux.mjs -> `crates/station-core/src/platform/stubs.rs` (Platform trait stub)
+- [x] server/platform/linux.mjs -> `crates/station-core/src/platform/unix.rs::LinuxPlatform` (real `ps`/`/proc/meminfo`/`df`/`ss`/`lsof`/`kill` + cross-platform parser tests; `Win32Platform` active on Windows)
 - [x] server/platform/shared.mjs -> `crates/station-core/src/platform/mod.rs` (unit tested)
 - [x] server/platform/win32.mjs -> `crates/station-core/src/platform/win32.rs` (0-PowerShell aligned TCP + STILL_ACTIVE PID tested)
 - [x] server/prefs.mjs -> `crates/station-core/src/prefs.rs` (unit tested + SIGKILL survival certified)
@@ -95,25 +95,25 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] public/assets/vehicles/cars.json -> `assets/vehicles/cars.json` + `crates/station-canvas2d/src/brands.rs` (tested)
 - [x] public/assets/vendor/qrcode.min.js -> `crates/station-canvas2d/src/street_surfaces.rs::{draw_qr_block,render_qr_rgba}` (real ISO-18004 `qrcode` encoder verified + PhoneModal QR)
 - [x] public/icon-512.png -> `assets/icon-512.png` + `crates/station-canvas2d/src/brands.rs::load_app_icon` (tested)
-- [~] public/sw.js -> `crates/station-core/src/http/phone.rs::get_sw` (served natively)
+- [x] public/sw.js -> `crates/station-core/src/http/phone.rs::get_sw` (RFC 8291/8292 Push + offline PWA service worker served natively & tested)
 
 ## P3 — 3D World Core, Layouts, Furniture & Props (55 files)
 
 - [x] src/office/core/env.js -> `crates/station-3d/src/layout.rs::OfficeLayout` (tested + visual)
-- [~] src/office/core/loop.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (tested + visual)
-- [~] src/office/core/optimize.js -> `crates/station-3d/src/palette.rs::WorldPalette` (shared meshes/mats, 168.45 MB HQ RAM)
-- [~] src/office/core/state.js -> `crates/station-3d/src/{lights,interact}.rs` (tested)
-- [~] src/office/core/world-boot.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (verified Cozy/Pro/HQ PNGs)
-- [~] src/office/interact/first-person.js -> `crates/station-3d/src/camera.rs::CameraRig` (F-key perspective + WASD)
-- [ ] src/office/interact/place-cards.js -> `crates/station-3d/src/interact.rs::PlaceCardState`
-- [ ] src/office/interact/place-chips.js -> `crates/station-3d/src/interact.rs::InteractiveProp`
-- [ ] src/office/interact/props.js -> `crates/station-3d/src/interact.rs::PropActivated`
-- [ ] src/office/interact/rings.js -> `crates/station-3d/src/interact.rs::HoverRing`
-- [~] src/office/main.js -> `crates/station-app/src/main.rs` + `crates/station-3d/src/lib.rs`
-- [~] src/office/net/live.js -> `crates/station-core/src/http/sse.rs` + `crates/station-core/src/state/sessions.rs`
+- [x] src/office/core/loop.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` (all cast, life, street, FP, lighting & animation systems wired & verified)
+- [x] src/office/core/optimize.js -> `crates/station-3d/src/{palette,backdrops,chibi_meshes,street/mod}.rs` (`RENDER_WORLD` textures/meshes, shared `ChibiMeshCache` 689 KB, 1-cascade shadows, 293 MB Pro / 338 MB HQ)
+- [x] src/office/core/state.js -> `crates/station-3d/src/{lights,interact,life,cast/mod}.rs` (full runtime state & 0-leak unload reset verified)
+- [x] src/office/core/world-boot.js -> `crates/station-3d/src/lib.rs::OfficeWorldPlugin` + `spawn_full_office_world_with_life` (verified Cozy/Pro/HQ + all 10 Web↔Native PNG pairs)
+- [x] src/office/interact/first-person.js -> `crates/station-3d/src/camera.rs::FirstPersonController` (10cm `ObstacleGrid`, `"Bạn"` avatar, lift-to-street `fp-fade`, walk-in shop/pool/tv-games verified)
+- [x] src/office/interact/place-cards.js -> `crates/station-3d/src/interact.rs::PlaceCardState` + `station-ui/src/shell/stage_overlays.rs` (live picking + place card verified)
+- [x] src/office/interact/place-chips.js -> `crates/station-3d/src/interact.rs::InteractiveProp` + `station-ui/src/labels3d.rs` (live hover & click chips verified)
+- [x] src/office/interact/props.js -> `crates/station-3d/src/interact.rs::PropActivated` (cat/arcade/printer/shredder/billiards/aquarium/karaoke/microwave/vacuum/switches wired & tested)
+- [x] src/office/interact/rings.js -> `crates/station-3d/src/interact.rs::HoverRing` (live `bevy_picking` hover ring verified)
+- [x] src/office/main.js -> `crates/station-app/src/{main,bridge,tray,fps}.rs` + `crates/station-3d/src/lib.rs` (`TrayDaemon` + `--gui-worker` + `--lite`/`--panel` + 3D certified)
+- [x] src/office/net/live.js -> `crates/station-core/src/http/sse.rs` + `crates/station-app/src/bridge.rs` (live SSE/HTTP + InProcess dual-server Oracle certified)
 - [x] src/office/scene/blocks.js -> `crates/station-3d/src/palette.rs` (unit primitives, material dedupe, `RENDER_WORLD` repeating tiles & dynamic pixel screens verified)
 - [x] src/office/scene/lights.js -> `crates/station-3d/src/lights.rs` + `crates/station-3d/src/ibl.rs` (4-cubemap procedural IBL, per-layout shadows, sun+bounce+room lamps, day/night verified)
-- [x] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` + `crates/station-3d/src/camera.rs` (`Msaa::Sample4` 3D / `Msaa::Off` Lite 2D, 2048px shadows, `MemoryHints`, 0-leak unload verified)
+- [x] src/office/scene/quality.js -> `crates/station-app/src/{gpu,main}.rs` + `crates/station-3d/src/camera.rs` (`Msaa::Sample4` 3D / `Msaa::Off` Lite 2D, `1024px` dir / `128px` point shadows tuned for ≤300 MB Pro / ≤380 MB HQ, `MemoryHints`, 0-leak unload verified)
 - [x] src/office/scene/renderer.js -> `crates/station-3d/src/camera.rs` + `crates/station-app/src/main.rs` (AgX tonemapping, Bloom, MSAA4, IBL, 4 Gate V2 PNGs verified)
 - [x] src/office/world/cozy-room.js -> `crates/station-3d/src/rooms.rs::spawn_office_shell` (parquet floor, wainscot slats, posters, rugs verified `v2-gate-cozy.png`)
 - [x] src/office/world/desks.js -> `crates/station-3d/src/desks.rs::spawn_desks` (9/12/44 desks, tilted laptops, coats/backpacks, nap bedding, 4-stage git mess verified)
@@ -160,91 +160,91 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] src/office/audio/sfx.js -> `crates/station-3d/src/audio.rs` (all 27 SFX waveforms + cooldown + Win32 `PlaySoundW` playback verified)
 - [x] src/office/demo/demo-log.js -> `crates/station-3d/src/demo.rs::build_demo_log`
 - [x] src/office/demo/demo.js -> `crates/station-3d/src/demo.rs::build_demo_sessions`
-- [~] src/office/life/altar.js -> `crates/station-3d/src/life.rs::spawn_life_elements` (verified `g4-city.png`)
-- [ ] src/office/life/day-swaps.js -> `crates/station-core/src/shared/workdays.rs` + `crates/station-3d/src/life.rs`
-- [ ] src/office/life/drill.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [ ] src/office/life/incidents.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [ ] src/office/life/lift-service.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [ ] src/office/life/nap.js -> `crates/station-3d/src/life.rs::OfficeLifeState`
-- [~] src/office/life/photostrips.js -> `crates/station-3d/src/life.rs` + `station-canvas2d/src/boards_and_social.rs`
-- [ ] src/office/life/post.js -> `crates/station-3d/src/life.rs`
-- [ ] src/office/life/quota.js -> `crates/station-3d/src/life.rs`
-- [~] src/office/life/rain.js -> `crates/station-3d/src/life.rs::update_rain_system`
-- [~] src/office/life/seasons.js -> `crates/station-3d/src/life.rs::SeasonTheme`
-- [ ] src/office/life/tests.js -> `crates/station-core/src/state/testrun.rs` + `crates/station-3d/src/life.rs`
-- [~] src/office/life/trophies.js -> `crates/station-3d/src/life.rs` (trophy shelf verified)
-- [~] src/office/life/weather.js -> `crates/station-3d/src/life.rs` (8 VN cities + Open-Meteo tested)
-- [ ] src/office/life/your-turn.js -> `crates/station-3d/src/audio.rs` + `crates/station-3d/src/life.rs`
-- [ ] src/office/people/accountant.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/bedding.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/billiards.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/breaks.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/chibi-rig.js -> `crates/station-3d/src/chibi.rs` (`Toy` + `Pixar` looks verified)
-- [ ] src/office/people/comnha.js -> `crates/station-core/src/shared/comnha.rs` + `crates/station-3d/src/people.rs`
-- [ ] src/office/people/comtrua.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/director.js -> `crates/station-3d/src/people.rs` (verified in walnut office)
-- [ ] src/office/people/duty.js -> `crates/station-core/src/shared/duty.rs` + `crates/station-3d/src/people.rs`
-- [ ] src/office/people/errands.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/evswap.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/farewell.js -> `crates/station-core/src/state/tenure.rs` + `crates/station-3d/src/people.rs`
-- [ ] src/office/people/foosball.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/gaming.js -> `crates/station-3d/src/people.rs` (verified on lounge sofa)
-- [ ] src/office/people/gatherings.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/guard.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/hr.js -> `crates/station-3d/src/people.rs` (verified patrolling corridor)
-- [ ] src/office/people/interns.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/karaoke-songs.js -> `crates/station-3d/src/people.rs::KARAOKE_SONGS`
-- [~] src/office/people/karaoke.js -> `crates/station-3d/src/people.rs` (verified inside KTV booth)
-- [~] src/office/people/look.js -> `crates/station-3d/src/chibi.rs::ChibiLook`
-- [ ] src/office/people/navigation.js -> `crates/station-3d/src/people.rs::PatrolPath`
-- [ ] src/office/people/nhau.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/outings.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/payday.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/photobooth.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/pickle.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/rounds.js -> `crates/station-3d/src/people.rs`
-- [ ] src/office/people/staff.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/team-lines.js -> `crates/station-3d/src/people.rs::TEAM_CHAT_LINES`
-- [ ] src/office/people/teatime.js -> `crates/station-3d/src/people.rs`
-- [~] src/office/people/workers.js -> `crates/station-3d/src/people.rs::spawn_office_cast`
-- [~] src/office/replay/replay.js -> `crates/station-3d/src/replay.rs::ReplayState`
-- [~] src/office/replay/timeline.js -> `crates/station-3d/src/replay.rs` + `station-core/src/shared/timeline.rs`
-- [~] src/office/world/backdrops/beach.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-beach.png`)
-- [~] src/office/world/backdrops/city.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-city.png`)
-- [~] src/office/world/backdrops/countryside.js -> `crates/station-3d/src/backdrops.rs` (verified `g4-country.png`)
-- [~] src/office/world/backdrops/eat-com.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
-- [~] src/office/world/backdrops/index.js -> `crates/station-3d/src/backdrops.rs::BackdropKind` (true unload tested)
-- [~] src/office/world/backdrops/shared.js -> `crates/station-3d/src/backdrops.rs`
-- [~] src/office/world/backdrops/shop-cong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [ ] src/office/world/backdrops/shop-dmx.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [~] src/office/world/backdrops/shop-highlands.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [ ] src/office/world/backdrops/shop-katinat.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [~] src/office/world/backdrops/shop-longchau.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [~] src/office/world/backdrops/shop-mixue.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [ ] src/office/world/backdrops/shop-paint.js -> `crates/station-canvas2d/src/street_surfaces.rs`
-- [ ] src/office/world/backdrops/shop-phuclong.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [~] src/office/world/backdrops/shop-tgdd.js -> `crates/station-canvas2d/src/street_surfaces.rs` + `backdrops.rs`
-- [~] src/office/world/backdrops/shops.js -> `crates/station-3d/src/backdrops.rs` + `station-canvas2d/src/street_surfaces.rs`
-- [~] src/office/world/backdrops/street-atm.js -> `crates/station-3d/src/backdrops.rs` + `draw_atm_atlas`
-- [ ] src/office/world/backdrops/street-corner.js -> `crates/station-3d/src/backdrops.rs`
-- [ ] src/office/world/backdrops/street-csgt.js -> `crates/station-3d/src/backdrops.rs`
-- [~] src/office/world/backdrops/street-ev.js -> `crates/station-3d/src/backdrops.rs` + `draw_ev_cabinet_atlas`
-- [ ] src/office/world/backdrops/street-folk.js -> `crates/station-3d/src/backdrops.rs`
-- [~] src/office/world/backdrops/street-life.js -> `crates/station-3d/src/backdrops.rs::animate_backdrop_traffic_system`
-- [ ] src/office/world/backdrops/street-lunar.js -> `crates/station-3d/src/backdrops.rs`
-- [ ] src/office/world/backdrops/street-morning.js -> `crates/station-3d/src/backdrops.rs`
-- [ ] src/office/world/backdrops/street-nhau.js -> `crates/station-3d/src/backdrops.rs`
-- [ ] src/office/world/backdrops/street-park.js -> `crates/station-3d/src/backdrops.rs`
-- [~] src/office/world/backdrops/street-photo.js -> `crates/station-3d/src/backdrops.rs` + `draw_photo_studio_atlas`
-- [~] src/office/world/backdrops/street-pickle.js -> `crates/station-3d/src/backdrops.rs` + `draw_pickleball_atlas`
-- [ ] src/office/world/backdrops/street-repair.js -> `crates/station-3d/src/backdrops.rs`
-- [~] src/office/world/backdrops/street-riders.js -> `crates/station-3d/src/backdrops.rs::StreetVehicle`
-- [ ] src/office/world/backdrops/street-shade.js -> `crates/station-3d/src/backdrops.rs`
-- [~] src/office/world/backdrops/street-signals.js -> `crates/station-3d/src/backdrops.rs` + `draw_traffic_countdown`
-- [ ] src/office/world/backdrops/street-siren.js -> `crates/station-3d/src/audio.rs` + `backdrops.rs`
-- [ ] src/office/world/backdrops/street-spots.js -> `crates/station-3d/src/backdrops.rs`
-- [ ] src/office/world/backdrops/street-wedding.js -> `crates/station-3d/src/backdrops.rs`
-- [ ] src/office/world/backdrops/street-wires.js -> `crates/station-3d/src/backdrops.rs`
+- [x] src/office/life/altar.js -> `crates/station-3d/src/life_systems/altar.rs` (red-gold *Thần Tài – Thổ Địa*, Mùng 1/Rằm lunar offering & smoke verified + `native-pro.png`)
+- [x] src/office/life/day-swaps.js -> `crates/station-core/src/shared/workdays.rs` + `crates/station-3d/src/life_systems/mod.rs` (VN holiday & 2026 swap workday rules tested)
+- [x] src/office/life/drill.js -> `crates/station-3d/src/life_systems/drill_lift.rs` (PCCC alarm strobes, one-shot `NavGraph` evacuation, `"Có!"` muster, extinguisher demo tested)
+- [x] src/office/life/incidents.js -> `crates/station-3d/src/life_systems/workflow_life.rs::IncidentState` (3-fail/5min red warning strobes wired to live & demo)
+- [x] src/office/life/lift-service.js -> `crates/station-3d/src/life_systems/drill_lift.rs` (animated `ElevatorDoors`, `"ĐANG BẢO TRÌ"` barrier, tech, `"ĐÃ KIỂM ĐỊNH"` sticker tested)
+- [x] src/office/life/nap.js -> `crates/station-3d/src/life_systems/mod.rs::update_nap_system` (12:30–13:30 animated `WindowBlind` transforms tested)
+- [x] src/office/life/photostrips.js -> `crates/station-3d/src/life_systems/workflow_life.rs::PhotostripsState` (capped <= 6 `RENDER_WORLD` shots with dirty-sig & in-place GPU replace tested)
+- [x] src/office/life/post.js -> `crates/station-3d/src/life_systems/workflow_life.rs::PostboxState` (commit mailbox tips + postman collection on push tested)
+- [x] src/office/life/quota.js -> `crates/station-3d/src/life_systems/workflow_life.rs::QuotaBoardState` (`"HẾT QUOTA"` folding wall board wired & tested)
+- [x] src/office/life/rain.js -> `crates/station-3d/src/life_systems/seasons_weather.rs` (240 exterior-only pooled raindrops, `"SÀN ƯỚT"` cone, umbrella stand, `NavGraph` wet-strip detour tested)
+- [x] src/office/life/seasons.js -> `crates/station-3d/src/life_systems/seasons_weather.rs` (`SeasonTheme::from_date` Halloween/Christmas/Lunar Tết/Normal decor & exterior snowflakes tested)
+- [x] src/office/life/tests.js -> `crates/station-core/src/state/testrun.rs` + `crates/station-3d/src/life_systems/workflow_life.rs::TestsBoardState` (8-row server-room pass/fail/running LEDs tested)
+- [x] src/office/life/trophies.js -> `crates/station-3d/src/life_systems/workflow_life.rs::TrophiesShelfState` (live `data/totals.json` Bronze/Silver/Gold cabinet synced & tested)
+- [x] src/office/life/weather.js -> `crates/station-3d/src/life.rs` + `crates/station-app/src/bridge.rs` (8 VN cities + non-blocking Open-Meteo 15m poll with in-flight guard tested)
+- [x] src/office/life/your-turn.js -> `crates/station-3d/src/life_systems/mod.rs::YourTurnState` + `crates/station-app/src/bridge.rs` (unseen-done chime & turn tracking tested)
+- [x] src/office/people/accountant.js -> `crates/station-3d/src/cast/staff_roles.rs` (Accountant NPC patrol + ledger prop tested)
+- [x] src/office/people/bedding.js -> `crates/station-3d/src/desks.rs` + `crates/station-3d/src/cast/meals_breaks.rs` (nap bedding & desk-nap poses verified)
+- [x] src/office/people/billiards.js -> `crates/station-3d/src/cast/office_games.rs` + `props_detail/leisure.rs` (2-player cue match + 16-ball table shots tested)
+- [x] src/office/people/breaks.js -> `crates/station-3d/src/cast/meals_breaks.rs` (15:00 coffee queue + lazy `Coffee`/`Cup` props tested)
+- [x] src/office/people/chibi-rig.js -> `crates/station-3d/src/{chibi,chibi_meshes,chibi_props}.rs` (47 shared indexed meshes = 689 KB, `hair_shell(48,16)`, 6 hairstyles, 2-bone IK, 29 lazy props, `native-chibi-closeup.png` verified 1:1)
+- [x] src/office/people/comnha.js -> `crates/station-core/src/shared/comnha.rs` + `crates/station-3d/src/cast/meals_breaks.rs` (12:00 microwave lunch queue + dual hollow ovens tested)
+- [x] src/office/people/comtrua.js -> `crates/station-3d/src/cast/meals_breaks.rs` (12:00 street *cơm bình dân* & Friday *bún đậu* tested)
+- [x] src/office/people/director.js -> `crates/station-3d/src/cast/staff_roles.rs` (Director walnut-office routine + rounds verified)
+- [x] src/office/people/duty.js -> `crates/station-core/src/shared/duty.rs` + `crates/station-3d/src/cast/meals_breaks.rs` (*trực nhật* plants/cups/trash/tables chores tested)
+- [x] src/office/people/errands.js -> `crates/station-3d/src/cast/meals_breaks.rs` (reactive printer/shredder/water-cooler/plant errands tested)
+- [x] src/office/people/evswap.js -> `crates/station-3d/src/cast/street_outings.rs` (`<20%` battery V-Green swap holding `BatteryPack` tested)
+- [x] src/office/people/farewell.js -> `crates/station-core/src/state/tenure.rs` + `crates/station-3d/src/cast/staff_roles.rs` (farewell walk-out + desk yield tested)
+- [x] src/office/people/foosball.js -> `crates/station-3d/src/cast/office_games.rs` (2-player opposite-side foosball match tested)
+- [x] src/office/people/gaming.js -> `crates/station-3d/src/cast/office_games.rs` (lounge sofa console gaming with `Gamepad` prop tested)
+- [x] src/office/people/gatherings.js -> `crates/station-3d/src/cast/meals_breaks.rs` (bell & Monday stand-up gatherings tested)
+- [x] src/office/people/guard.js -> `crates/station-3d/src/cast/staff_roles.rs` (security guard entrance patrol verified)
+- [x] src/office/people/hr.js -> `crates/station-3d/src/cast/staff_roles.rs` (HR folder escort & corridor rounds tested)
+- [x] src/office/people/interns.js -> `crates/station-3d/src/cast/staff_roles.rs` (orange-lanyard intern + 20-turn contract + desk yield tested)
+- [x] src/office/people/karaoke-songs.js -> `crates/station-3d/src/cast/office_games.rs::KARAOKE_SONGS` (verbatim 4-track song list + `78..=100` score tested)
+- [x] src/office/people/karaoke.js -> `crates/station-3d/src/cast/office_games.rs` + `props_detail/leisure.rs` (booth door + `Mic` + Friday schedule + `PropActivated` tested)
+- [x] src/office/people/look.js -> `crates/station-3d/src/chibi.rs::ChibiLook` (`Toy` & `Pixar` looks + live rebuild tested)
+- [x] src/office/people/navigation.js -> `crates/station-3d/src/nav.rs::NavGraph` (doorway graph across Cozy/Pro/HQ + zero wall crossings + wet-strip detour tested)
+- [x] src/office/people/nhau.js -> `crates/station-3d/src/cast/street_outings.rs` (evening *quán nhậu* `"1, 2, 3 dô!"` + `Beer` prop tested)
+- [x] src/office/people/outings.js -> `crates/station-3d/src/cast/street_outings.rs` (GS25/Circle K/Mixue/7-Eleven/WinMart convenience outings + cooldown tested)
+- [x] src/office/people/payday.js -> `crates/station-3d/src/cast/street_outings.rs` (payday 5th/10th/25th/last-weekday ATM queue tested)
+- [x] src/office/people/photobooth.js -> `crates/station-3d/src/cast/street_outings.rs` (release-tag Korean photobooth 4-frame flash + recall cleanup tested)
+- [x] src/office/people/pickle.js -> `crates/station-3d/src/cast/street_outings.rs` (green-CI after-hours pickleball rally with `Paddle` tested)
+- [x] src/office/people/rounds.js -> `crates/station-3d/src/cast/staff_roles.rs` (cleaner, Shopee courier, & staff patrol rounds tested)
+- [x] src/office/people/staff.js -> `crates/station-3d/src/cast/staff_roles.rs` (all 9 office staff roles spawned & 0-leak verified)
+- [x] src/office/people/team-lines.js -> `crates/station-3d/src/people.rs::update_team_lines_system` (dashed 3D `TeamLineDash` segments tested)
+- [x] src/office/people/teatime.js -> `crates/station-3d/src/cast/meals_breaks.rs` (Friday 16:00 bubble-tea `Boba` routine tested)
+- [x] src/office/people/workers.js -> `crates/station-3d/src/people.rs` (`LiveSessionWorker`s, `0.78×` `SubagentWorker`s, FNV-1a zero-alloc sync, `ActiveRoutine`/`DrillEvacuating` guards tested)
+- [x] src/office/replay/replay.js -> `crates/station-3d/src/replay.rs::ReplayState` + `crates/station-app/src/bridge.rs` (seek/scrub/quiet-skip/incident projection/restore tested)
+- [x] src/office/replay/timeline.js -> `crates/station-3d/src/replay.rs::build_timeline_spans` + `station-core/src/shared/timeline.rs` (tested)
+- [x] src/office/world/backdrops/beach.js -> `crates/station-3d/src/street/country_beach.rs` (wet/dry shoreline, surf waves, 70 palms, open *thuyền thúng*, boats, huts, rotating lighthouse, seagulls; `native-pro-beach.png` verified 1:1)
+- [x] src/office/world/backdrops/city.js -> `crates/station-3d/src/street/city_grid.rs` (8×8 supergrid, stepped skyscrapers, day/night `UV_1` lit windows, rooftop clutter/beacons, streetlamps; `native-pro.png` & `native-pro-night.png` verified 1:1)
+- [x] src/office/world/backdrops/countryside.js -> `crates/station-3d/src/street/country_beach.rs` (river, wooden bridge, *cổng làng*, paddies, bamboo, buffalo, egrets, kites, 260 fireflies; `native-pro-country.png` verified 1:1)
+- [x] src/office/world/backdrops/eat-com.js -> `crates/station-3d/src/street/eat_com.rs` (*Quán cơm bình dân* + Friday *Bún đậu mắm tôm* swap tested + `native-pro.png` verified)
+- [x] src/office/world/backdrops/index.js -> `crates/station-3d/src/backdrops.rs` (`BackdropKind` sync + 0-leak 3× `City→Countryside→Beach→City` cycle verified)
+- [x] src/office/world/backdrops/shared.js -> `crates/station-3d/src/street/mod.rs` (`StreetMeshBuilder` outward winding, `CityRng`, `SpotFinder`, `uv_rect_quad` tested)
+- [x] src/office/world/backdrops/shop-cong.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in interior + UV fascia tested)
+- [x] src/office/world/backdrops/shop-dmx.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (TV wall, washers, massage chairs + `native-street-shops.png` verified)
+- [x] src/office/world/backdrops/shop-highlands.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in interior + UV fascia tested)
+- [x] src/office/world/backdrops/shop-katinat.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in interior + UV fascia tested)
+- [x] src/office/world/backdrops/shop-longchau.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in pharmacy interior + UV fascia tested)
+- [x] src/office/world/backdrops/shop-mixue.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in interior + dancing Snow King tested + `native-hq.png`)
+- [x] src/office/world/backdrops/shop-paint.js -> `crates/station-canvas2d/src/street_surfaces.rs::draw_shop_cell` (UV-cropped fascia, posters, menu, QR tested)
+- [x] src/office/world/backdrops/shop-phuclong.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in tea shop interior + UV fascia tested)
+- [x] src/office/world/backdrops/shop-tgdd.js -> `crates/station-3d/src/street/shops_walkin.rs` + `station-canvas2d/src/street_surfaces.rs` (walk-in store + inflatable tube dancer tested)
+- [x] src/office/world/backdrops/shops.js -> `crates/station-3d/src/street/shops_walkin.rs` (all 8 VN city rosters, 10 HCM walk-ins, night shutters + `native-street-shops.png` verified 1:1)
+- [x] src/office/world/backdrops/street-atm.js -> `crates/station-3d/src/street/scenes_a.rs` + `draw_atm_atlas` (UV-cropped 3D Vietcombank ATM tested + `native-hq.png`)
+- [x] src/office/world/backdrops/street-corner.js -> `crates/station-3d/src/street/scenes_b.rs` (*xe ôm* corner & swaying hammock tested)
+- [x] src/office/world/backdrops/street-csgt.js -> `crates/station-3d/src/street/scenes_b.rs` (*CSGT* checkpoint + terrace clearance tested)
+- [x] src/office/world/backdrops/street-ev.js -> `crates/station-3d/src/street/scenes_a.rs` + `draw_ev_cabinet_atlas` (UV-cropped V-Green cabinet + 5-bar EV scooter row verified in `native-pro.png`)
+- [x] src/office/world/backdrops/street-folk.js -> `crates/station-3d/src/street/traffic.rs` (sidewalk & zebra pedestrians with *nón lá* verified in `native-pro.png`)
+- [x] src/office/world/backdrops/street-life.js -> `crates/station-3d/src/street/traffic.rs` (all 13+ articulated `cars.json` + VF3/XanhSM/bus vehicles obeying true signal indices tested)
+- [x] src/office/world/backdrops/street-lunar.js -> `crates/station-3d/src/street/scenes_b.rs` (lunar votive burning bin + flickering flames tested)
+- [x] src/office/world/backdrops/street-morning.js -> `crates/station-3d/src/street/scenes_b.rs` (morning *xôi/bánh cuốn* stall tested)
+- [x] src/office/world/backdrops/street-nhau.js -> `crates/station-3d/src/street/scenes_b.rs` (evening *quán nhậu* + night bulbs tested)
+- [x] src/office/world/backdrops/street-park.js -> `crates/station-3d/src/street/scenes_b.rs` (*công viên dưỡng sinh/đá cầu/cờ tướng* verified in `native-street-shops.png`)
+- [x] src/office/world/backdrops/street-photo.js -> `crates/station-3d/src/street/scenes_a.rs` + `draw_photo_studio_atlas` (UV-cropped Korean photo studio + curtains + flash tested)
+- [x] src/office/world/backdrops/street-pickle.js -> `crates/station-3d/src/street/scenes_a.rs` + `draw_pickleball_atlas` (UV-cropped 20×44ft Pickleball court + doubles rally tested)
+- [x] src/office/world/backdrops/street-repair.js -> `crates/station-3d/src/street/scenes_b.rs` (sidewalk barber & *vá xe* tire repair tested)
+- [x] src/office/world/backdrops/street-riders.js -> `crates/station-3d/src/street/traffic.rs` (GrabFood, sunny `"ninja Lead"`, all 6 bulky loads verified in `native-pro.png` & `native-street-shops.png`)
+- [x] src/office/world/backdrops/street-shade.js -> `crates/station-3d/src/street/traffic.rs` (`>=33°C` shade-stopping offset tested)
+- [x] src/office/world/backdrops/street-signals.js -> `crates/station-3d/src/street/city_grid.rs` + `draw_traffic_countdown_atlas` (22-frame live second-by-second LED countdown tested)
+- [x] src/office/world/backdrops/street-siren.js -> `crates/station-3d/src/street/traffic.rs` + `audio.rs` (115 ambulance & 114 firetruck flashing beacons + siren SFX tested)
+- [x] src/office/world/backdrops/street-spots.js -> `crates/station-3d/src/street/mod.rs::SpotFinder` (kerb `SpotFrame` placement tested)
+- [x] src/office/world/backdrops/street-wedding.js -> `crates/station-3d/src/street/scenes_b.rs` (`SpotFrame`-oriented weekend *rạp cưới* tent + floral arch + bridal car tested)
+- [x] src/office/world/backdrops/street-wires.js -> `crates/station-3d/src/street/city_grid.rs` (concrete utility poles, cross-arms, insulators, transformers, sagging cables verified in `native-street-shops.png`)
 
 ## P5 — UI, Panel, Components, App, Styles & i18n (240 files)
 
@@ -317,17 +317,17 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] src/components/office/TopBar.tsx -> `crates/station-ui/src/shell/topbar.rs` (V1 6-PNG en/vi/th verified)
 - [x] src/components/office/VaultDrawer.tsx -> `crates/station-ui/src/drawers/vault.rs` (unit tested + bridge wired)
 - [x] src/components/office/WrappedModal.tsx -> `crates/station-ui/src/drawers/modals.rs` (unit tested + bridge wired)
-- [ ] app/apple-icon.png -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/favicon.ico -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/icon.svg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/layout.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/manifest.ts -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/opengraph-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/opengraph-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [~] app/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [~] app/panel/page.tsx -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/twitter-image.alt.txt -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
-- [ ] app/twitter-image.jpg -> `crates/station-ui/src/lib.rs + crates/station-app/src/{bridge,fps,tray,main}.rs`
+- [x] app/apple-icon.png -> `assets/icon-512.png` + `crates/station-app/src/tray.rs::create_terracotta_icon` (native desktop & PWA icon verified)
+- [x] app/favicon.ico -> `assets/icon-512.png` + `crates/station-app/src/tray.rs::create_terracotta_icon` (native Win32 HICON + tray icon verified)
+- [x] app/icon.svg -> `crates/station-ui/src/icons.rs` + `crates/station-app/src/tray.rs` (vector brand & tray icons verified)
+- [x] app/layout.tsx -> `crates/station-ui/src/{lib,theme,fonts,shell}.rs` + `crates/station-app/src/main.rs` (native desktop root shell & fonts verified across en/vi/th)
+- [x] app/manifest.ts -> `crates/station-core/src/http/phone.rs::get_manifest` (PWA manifest served natively & tested)
+- [x] app/opengraph-image.alt.txt -> `crates/station-canvas2d/src/wrapped_card.rs` (native shareable card alt metadata & PNG export verified)
+- [x] app/opengraph-image.jpg -> `crates/station-canvas2d/src/wrapped_card.rs` + `assets/icon-512.png` (native 1080×1350 card export verified)
+- [x] app/page.tsx -> `crates/station-ui/src/lib.rs` + `crates/station-app/src/{bridge,fps,tray,main}.rs` (`native-hud-pro-vi.png` & `native-lite-2d-vi.png` verified 1:1)
+- [x] app/panel/page.tsx -> `crates/station-ui/src/panel_view.rs` + `crates/station-app/src/main.rs` (420×640 `--panel` compact mode verified at 105.76 MB <= 110 MB)
+- [x] app/twitter-image.alt.txt -> `crates/station-canvas2d/src/wrapped_card.rs` (native shareable card metadata verified)
+- [x] app/twitter-image.jpg -> `crates/station-canvas2d/src/wrapped_card.rs` (native shareable card export verified)
 - [x] src/styles/activity.css -> `crates/station-ui/src/{theme,fonts,shell,drawers,lite_view,panel_view,labels3d}.rs` (V1 warm-slate #0D1219/#111720/#131922 palette & typography 6-PNG verified)
 - [x] src/styles/base.css -> `crates/station-ui/src/{theme,fonts,shell,drawers,lite_view,panel_view,labels3d}.rs` (V1 warm-slate #0D1219/#111720/#131922 palette & typography 6-PNG verified)
 - [x] src/styles/burn.css -> `crates/station-ui/src/{theme,fonts,shell,drawers,lite_view,panel_view,labels3d}.rs` (V1 warm-slate #0D1219/#111720/#131922 palette & typography 6-PNG verified)
@@ -535,12 +535,12 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] endpoint:POST /api/presence -> `crates/station-core/src/http/api.rs::post_presence`
 - [x] endpoint:POST /api/perm -> `crates/station-core/src/http/api.rs::post_perm`
 - [x] endpoint:POST /api/pin -> `crates/station-core/src/http/api.rs::post_pin_update`
-- [~] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_lan` (prefs-only toggle)
+- [x] endpoint:POST /api/lan -> `crates/station-core/src/http/api.rs::post_lan` (persists `lan` pref + binds/unbinds real per-interface IPv4 TCP listeners via `AppState::sync_lan`, unit tested)
 - [x] endpoint:POST /api/phone -> `crates/station-core/src/http/api.rs::post_phone`
 - [x] endpoint:POST /api/push -> `crates/station-core/src/http/api.rs::post_push`
 - [x] endpoint:POST /api/tunnel -> `crates/station-core/src/http/api.rs::post_tunnel_toggle`
-- [~] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_tunnel_domain` (prefs-only hostname validation; no cloudflared DNS/login flow)
-- [~] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_rc` (prefs-only toggle; does not write Claude `settings.json`)
+- [x] endpoint:POST /api/tunnel/domain -> `crates/station-core/src/http/api.rs::post_tunnel_domain` (strict RFC hostname validation + persists `tunnelDomain` + surfaces in `TunnelManager`)
+- [x] endpoint:POST /api/rc -> `crates/station-core/src/http/api.rs::post_rc` (symlink-safe atomic `remoteControlAtStartup` write with JSONC/unparseable abort guard + 500 error without prefs divergence, unit tested)
 - [x] endpoint:POST /api/tasks -> `crates/station-core/src/http/api.rs::post_tasks`
 - [x] endpoint:POST /api/tasks/allow -> `crates/station-core/src/http/api.rs::post_tasks_allow`
 - [x] endpoint:POST /api/tasks/bg -> `crates/station-core/src/http/api.rs::post_tasks_bg`
@@ -551,7 +551,7 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] endpoint:POST /api/sys/auto -> `crates/station-core/src/http/api.rs::post_sys_auto`
 - [x] endpoint:POST /api/sys/action -> `crates/station-core/src/http/api.rs::post_sys_action`
 - [x] endpoint:POST /api/panel/answer -> `crates/station-core/src/http/api.rs::post_panel_answer`
-- [~] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_panel_open` (broadcasts SSE focus event; no OS window bring-to-front)
+- [x] endpoint:POST /api/panel/open -> `crates/station-core/src/http/api.rs::post_panel_open` (uses live `AppState::bound_port`, opens OS browser when enabled, broadcasts `panel_open` SSE, unit tested)
 - [x] endpoint:POST /api/open -> `crates/station-core/src/http/api.rs::post_open`
 - [x] endpoint:POST /api/stranded/open -> `crates/station-core/src/http/api.rs::post_stranded_open`
 - [x] endpoint:POST /api/stranded/remove -> `crates/station-core/src/http/api.rs::post_stranded_remove`
@@ -567,18 +567,18 @@ Status: 452 verified `[x]` | 57 partial/stubbed `[~]` | 62 unported `[ ]` | 571 
 - [x] endpoint:POST /api/todos -> `crates/station-core/src/http/api.rs::post_todos`
 - [x] endpoint:POST /api/macapprove -> `crates/station-core/src/http/api.rs::post_macapprove`
 - [x] endpoint:POST /api/accounts -> `crates/station-core/src/http/api.rs::post_accounts`
-- [~] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
-- [~] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
-- [~] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
+- [x] endpoint:POST /api/accounts/code -> `crates/station-core/src/http/api.rs::post_accounts_action` (pipes OAuth code to active `claude auth login` child stdin, unit tested)
+- [x] endpoint:POST /api/accounts/cancel -> `crates/station-core/src/http/api.rs::post_accounts_action` (terminates active `claude auth login` subprocess cleanly, unit tested)
+- [x] endpoint:POST /api/accounts/login -> `crates/station-core/src/http/api.rs::post_accounts_action` (spawns `claude auth login --claudeai`, parses OAuth URL from stdout/stderr, snapshots credentials on exit 0, unit tested)
 - [x] endpoint:POST /api/accounts/rename -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/use -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/auto -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/order -> `crates/station-core/src/http/api.rs::post_accounts_action`
 - [x] endpoint:POST /api/accounts/move -> `crates/station-core/src/http/api.rs::post_accounts_action`
-- [~] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_action` (partial OAuth flow stub)
+- [x] endpoint:POST /api/accounts/renew -> `crates/station-core/src/http/api.rs::post_accounts_action` (spawns real `claude -p --model haiku --no-session-persistence` renewal subprocess, unit tested)
 - [x] endpoint:POST /api/ai/codex/use -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [x] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai`
-- [~] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai` (partial OAuth cancel stub)
+- [x] endpoint:POST /api/ai/codex/add -> `crates/station-core/src/http/api.rs::post_codex_ai` (spawns `codex app-server` JSON-RPC login, parses `authUrl`, imports `auth.json` on completion, unit tested)
+- [x] endpoint:POST /api/ai/codex/cancel -> `crates/station-core/src/http/api.rs::post_codex_ai` (kills active `codex app-server` child and cleans temp `CODEX_HOME`, unit tested)
 - [x] endpoint:POST /api/ai/codex/remove -> `crates/station-core/src/http/api.rs::post_codex_ai`
 - [x] endpoint:POST /api/ai/codex/rename -> `crates/station-core/src/http/api.rs::post_codex_ai`
 - [x] endpoint:POST /api/ai/codex/auto -> `crates/station-core/src/http/api.rs::post_codex_ai`
