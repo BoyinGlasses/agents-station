@@ -381,6 +381,65 @@ impl StreetMeshBuilder {
         self.push_cyl_rot(center, r_top, r_bot, height, segs, Quat::IDENTITY, hex);
     }
 
+    /// Appends an open-top hollow tapered shell (outer outward-wound wall + inner inward-wound wall,
+    /// zero top cap) for open bowls like Vietnamese *thuyền thúng* basket boats.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_cyl_open(
+        &mut self,
+        center: Vec3,
+        r_top: f32,
+        r_bot: f32,
+        height: f32,
+        segs: usize,
+        outer_hex: &str,
+        inner_hex: &str,
+    ) {
+        let segs = segs.max(3);
+        let outer_col = linear_rgba(outer_hex);
+        let inner_col = linear_rgba(inner_hex);
+        let hh = height * 0.5;
+        let inner_k = 0.93_f32;
+
+        for i in 0..segs {
+            let a0 = (i as f32 / segs as f32) * TAU;
+            let a1 = ((i + 1) as f32 / segs as f32) * TAU;
+            let (s0, c0) = a0.sin_cos();
+            let (s1, c1) = a1.sin_cos();
+            let am = (a0 + a1) * 0.5;
+            let out_n = Vec3::new(am.cos(), 0.0, am.sin()).normalize_or_zero();
+
+            // Outer wall (CCW viewed from outside)
+            let b0 = center + Vec3::new(c0 * r_bot, -hh, s0 * r_bot);
+            let b1 = center + Vec3::new(c1 * r_bot, -hh, s1 * r_bot);
+            let t1 = center + Vec3::new(c1 * r_top, hh, s1 * r_top);
+            let t0 = center + Vec3::new(c0 * r_top, hh, s0 * r_top);
+            self.push_quad(
+                b1,
+                b0,
+                t0,
+                t1,
+                out_n,
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                outer_col,
+            );
+
+            // Inner wall (reversed winding, facing inward into the open bowl)
+            let ib0 = center + Vec3::new(c0 * r_bot * inner_k, -hh + 0.02, s0 * r_bot * inner_k);
+            let ib1 = center + Vec3::new(c1 * r_bot * inner_k, -hh + 0.02, s1 * r_bot * inner_k);
+            let it1 = center + Vec3::new(c1 * r_top * inner_k, hh, s1 * r_top * inner_k);
+            let it0 = center + Vec3::new(c0 * r_top * inner_k, hh, s0 * r_top * inner_k);
+            self.push_quad(
+                ib0,
+                ib1,
+                it1,
+                it0,
+                -out_n,
+                [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+                inner_col,
+            );
+        }
+    }
+
     /// Appends a segment bar between `a` and `b` with radius `r` (for cables, limbs, rails).
     pub fn push_bar(&mut self, a: Vec3, b: Vec3, r: f32, segs: usize, hex: &str) {
         let diff = b - a;
@@ -654,6 +713,8 @@ impl SpotFinder {
 pub struct CityStreetNav {
     pub lobby_exit: Vec2,
     pub lobby_normal: Vec2,
+    pub sb: [f32; 4],
+    pub lobby_pad: [f32; 4],
     pub terrace_excl: [f32; 4],
     pub solids: Vec<[f32; 4]>,
     pub walkin_rooms: Vec<shops_walkin::WalkInRoomBounds>,
@@ -663,14 +724,23 @@ pub struct CityStreetNav {
 }
 
 impl CityStreetNav {
-    /// Returns `true` if `(x, z)` with player radius `r` hits a street building or terrace wall,
-    /// while carving out walk-in shop doorways and interiors so players can walk right inside.
-    pub fn blocked_at(&self, x: f32, z: f32, r: f32) -> bool {
+    /// Returns `true` if `(x, z)` with player radius `r` hits a street building, closed night
+    /// shop shutter, or terrace wall, while carving out the sidewalk lobby exit pad and open
+    /// walk-in shop doorways/interiors so players can walk right inside.
+    pub fn blocked_at(&self, x: f32, z: f32, r: f32, is_night: bool) -> bool {
         if x < -95.0 || x > 95.0 || z < -95.0 || z > 95.0 {
             return true;
         }
-        // Inside any walk-in shop doorway or interior room -> passable!
-        if self.walkin_rooms.iter().any(|room| room.contains_walkable(x, z)) {
+        // Walkable sidewalk lobby exit pad outside the office lift
+        if city_grid::rect_contains_padded(self.lobby_pad, x, z, 0.0) {
+            return false;
+        }
+        // Inside any currently OPEN walk-in shop doorway or interior room -> passable!
+        if self
+            .walkin_rooms
+            .iter()
+            .any(|room| !(room.closed_at_night && is_night) && room.contains_walkable(x, z))
+        {
             return false;
         }
         // Office terrace footprint blocks walking from street without taking the lift
@@ -685,8 +755,12 @@ impl CityStreetNav {
         false
     }
 
-    /// Ground elevation on the city street: `PAVE_Y` on sidewalks/shops, `GY` on asphalt roads.
+    /// Ground elevation on the city street: `PAVE_Y` on the office superblock sidewalk & block
+    /// pavements/shops, `GY` on asphalt roads outside the superblock.
     pub fn ground_at(&self, x: f32, z: f32) -> f32 {
+        if x >= self.sb[0] && x <= self.sb[1] && z >= self.sb[2] && z <= self.sb[3] {
+            return PAVE_Y;
+        }
         let half = city_grid::STREET_W * 0.5;
         let on_road_x = self.xs.iter().any(|&rx| (x - rx).abs() < half);
         let on_road_z = self.zs.iter().any(|&rz| (z - rz).abs() < half);
@@ -738,11 +812,19 @@ pub fn spawn_city_backdrop(
         .iter()
         .map(|s| [s[0], s[1], s[2], s[3]])
         .collect();
-    // Place the street lobby exit on the pavement right outside the office superblock nearest the lift
-    let lobby_exit = Vec2::new(grid.sb.x0 - 0.25, spec.door_z);
+    // Place the street lobby exit cleanly on the office superblock sidewalk (`PAVE_Y`) nearest the lift
+    let lobby_exit = Vec2::new(grid.sb.x0 + 0.30, spec.door_z);
+    let lobby_pad = [
+        grid.sb.x0 - 0.15,
+        grid.sb.x0 + 0.70,
+        spec.door_z - 1.25,
+        spec.door_z + 1.25,
+    ];
     commands.insert_resource(CityStreetNav {
         lobby_exit,
         lobby_normal: Vec2::new(-1.0, 0.0),
+        sb: [grid.sb.x0, grid.sb.x1, grid.sb.z0, grid.sb.z1],
+        lobby_pad,
         terrace_excl: grid.terrace_excl,
         solids,
         walkin_rooms,

@@ -18,6 +18,10 @@ use std::f32::consts::FRAC_PI_2;
 #[derive(Debug, Clone, Copy)]
 pub struct WalkInRoomBounds {
     pub chain: &'static str,
+    pub shop_name: &'static str,
+    pub closed_at_night: bool,
+    pub opens_at: &'static str,
+    pub door_pos: Vec2,
     pub room_min: Vec2,
     pub room_max: Vec2,
     pub door_min: Vec2,
@@ -60,6 +64,8 @@ pub enum ShopSpotKind {
 pub struct StreetShopSpot {
     pub chain: &'static str,
     pub shop_name: &'static str,
+    pub closed_at_night: bool,
+    pub opens_at: &'static str,
     pub pos: Vec2,
     pub kind: ShopSpotKind,
 }
@@ -113,20 +119,30 @@ pub fn build_shop_nav_zones_and_spots(
         let door_min = Vec2::new(d_a.x.min(d_b.x), d_a.z.min(d_b.z));
         let door_max = Vec2::new(d_a.x.max(d_b.x), d_a.z.max(d_b.z));
 
+        let (shop_name, item_a, item_b, has_seats) = chain_catalog(chain);
+        let closed_at_night = matches!(chain, "winmart" | "bhx");
+        let opens_at = if chain == "bhx" { "06:30" } else { "06:00" };
+        let door_w = f.pt(0.0, 0.0, 0.65);
+
         rooms.push(WalkInRoomBounds {
             chain,
+            shop_name,
+            closed_at_night,
+            opens_at,
+            door_pos: Vec2::new(door_w.x, door_w.z),
             room_min,
             room_max,
             door_min,
             door_max,
         });
 
-        let (shop_name, item_a, item_b, has_seats) = chain_catalog(chain);
         // Take item spot (fridge / shelf / display)
         let take_w = f.pt(0.65, 0.0, -depth * 0.62);
         spots.push(StreetShopSpot {
             chain,
             shop_name,
+            closed_at_night,
+            opens_at,
             pos: Vec2::new(take_w.x, take_w.z),
             kind: ShopSpotKind::Take {
                 item_id: item_a.0,
@@ -139,6 +155,8 @@ pub fn build_shop_nav_zones_and_spots(
         spots.push(StreetShopSpot {
             chain,
             shop_name,
+            closed_at_night,
+            opens_at,
             pos: Vec2::new(pay_w.x, pay_w.z),
             kind: ShopSpotKind::Pay {
                 default_item_id: item_b.0,
@@ -152,6 +170,8 @@ pub fn build_shop_nav_zones_and_spots(
             spots.push(StreetShopSpot {
                 chain,
                 shop_name,
+                closed_at_night,
+                opens_at,
                 pos: Vec2::new(sit_w.x, sit_w.z),
                 kind: ShopSpotKind::Sit {
                     seat_yaw: f.yaw,

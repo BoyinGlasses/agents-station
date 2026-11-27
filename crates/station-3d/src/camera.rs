@@ -233,6 +233,10 @@ pub enum FirstPersonPrompt {
         seat_yaw: f32,
         is_stool: bool,
     },
+    ShopClosed {
+        shop_name: &'static str,
+        opens_at: &'static str,
+    },
     BilliardsPlay,
     TvGamesPlay,
     OfficeProp {
@@ -708,6 +712,8 @@ pub fn camera_control_system(
     mut motion_ev: EventReader<MouseMotion>,
     mut wheel_ev: EventReader<MouseWheel>,
     ui_capture: Option<Res<UiInputCapture>>,
+    layout: Option<Res<OfficeLayout>>,
+    lighting: Option<Res<crate::lights::LightingState>>,
     rig: Option<ResMut<CameraRig>>,
     mut fp: Option<ResMut<FirstPersonController>>,
     street_nav: Option<Res<crate::street::CityStreetNav>>,
@@ -726,9 +732,9 @@ pub fn camera_control_system(
 
     let block_keyboard = ui_capture.as_ref().is_some_and(|c| c.wants_keyboard);
     let block_pointer = ui_capture.as_ref().is_some_and(|c| c.wants_pointer);
+    let is_night = lighting.as_ref().is_some_and(|l| l.is_night());
 
     // Sync `CameraRig::first_person` with `FirstPersonController::active`
-    let was_fp = rig.first_person;
     if !block_keyboard && keys.just_pressed(KeyCode::KeyF) {
         rig.first_person = !rig.first_person;
         *proj = rig.projection();
@@ -744,12 +750,19 @@ pub fn camera_control_system(
         }
     }
     if let Some(c) = fp.as_deref_mut() {
+        let was_active = c.active;
         c.active = rig.first_person;
-        if !c.active && was_fp {
-            c.activity = FirstPersonActivity::Walking;
-            c.near_prompt = None;
-            c.fade = FpFadeState::Idle;
-            c.fade_alpha = 0.0;
+        if was_active && !c.active {
+            let spec = LayoutSpec::for_layout(layout.as_deref().copied().unwrap_or(OfficeLayout::Pro));
+            if c.on_street {
+                c.return_to_office_now(&spec);
+            } else {
+                c.activity = FirstPersonActivity::Walking;
+                c.near_prompt = None;
+                c.fade = FpFadeState::Idle;
+                c.fade_alpha = 0.0;
+            }
+            *proj = rig.projection();
         }
     }
 
@@ -804,12 +817,12 @@ pub fn camera_control_system(
                     if c.on_street {
                         if let Some(sn) = street_nav.as_deref() {
                             let cur = c.pos;
-                            let stuck = sn.blocked_at(cur.x, cur.y, FP_PLAYER_RADIUS);
+                            let stuck = sn.blocked_at(cur.x, cur.y, FP_PLAYER_RADIUS, is_night);
                             let mut next = cur;
-                            if stuck || !sn.blocked_at(cur.x + step_delta.x, cur.y, FP_PLAYER_RADIUS) {
+                            if stuck || !sn.blocked_at(cur.x + step_delta.x, cur.y, FP_PLAYER_RADIUS, is_night) {
                                 next.x += step_delta.x;
                             }
-                            if stuck || !sn.blocked_at(next.x, cur.y + step_delta.y, FP_PLAYER_RADIUS) {
+                            if stuck || !sn.blocked_at(next.x, cur.y + step_delta.y, FP_PLAYER_RADIUS, is_night) {
                                 next.y += step_delta.y;
                             }
                             c.pos = next;
@@ -870,7 +883,9 @@ pub fn camera_control_system(
                     let px = tgt.x - dir.x * d;
                     let pz = tgt.z - dir.z * d;
                     let hit = if c.on_street {
-                        street_nav.as_deref().is_some_and(|sn| sn.blocked_at(px, pz, 0.05))
+                        street_nav
+                            .as_deref()
+                            .is_some_and(|sn| sn.blocked_at(px, pz, 0.05, is_night))
                     } else {
                         c.grid.is_blocked_cell(px, pz)
                     };
@@ -947,6 +962,7 @@ pub struct FpWorldContext<'w, 's> {
     ui_capture: Option<Res<'w, UiInputCapture>>,
     layout: Option<Res<'w, OfficeLayout>>,
     backdrop: Option<Res<'w, crate::backdrops::BackdropKind>>,
+    lighting: Option<Res<'w, crate::lights::LightingState>>,
     street_nav: Option<Res<'w, crate::street::CityStreetNav>>,
     lift_service: Option<Res<'w, crate::life_systems::LiftServiceState>>,
     chibi_cache: Option<Res<'w, crate::chibi_meshes::ChibiMeshCache>>,
@@ -967,12 +983,17 @@ pub fn first_person_update_system(
     mut sfx: Option<ResMut<crate::audio::SfxEngine>>,
     mut doors_q: Query<&mut crate::entrance::ElevatorDoors>,
     mut avatar_q: Query<
-        (Entity, &mut Transform, &mut Visibility, &mut crate::chibi::ChibiWorker),
+        (
+            Entity,
+            &mut Transform,
+            &mut Visibility,
+            &mut crate::chibi::ChibiWorker,
+            Option<&crate::chibi_props::ActivePropEntity>,
+        ),
         With<FirstPersonAvatar>,
     >,
     mut palette: Option<ResMut<crate::palette::WorldPalette>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
-    mut last_avatar_prop: Local<Option<PropKind>>,
 ) {
     let Some(mut fp) = fp else {
         return;
@@ -981,6 +1002,7 @@ pub fn first_person_update_system(
     let spec = LayoutSpec::for_layout(layout);
     let dt = time.delta_secs().clamp(0.0, 0.1);
     let block_kb = ctx.ui_capture.as_ref().is_some_and(|u| u.wants_keyboard);
+    let is_night = ctx.lighting.as_ref().is_some_and(|l| l.is_night());
     let city_active = ctx.backdrop.as_deref().copied() == Some(crate::backdrops::BackdropKind::City)
         && ctx.street_nav.is_some();
     let lift_serviced = ctx
@@ -1008,73 +1030,86 @@ pub fn first_person_update_system(
         fp.carry_until = 0.0;
     }
 
-    // 1. Step `fp-fade` elevator transition (`FadeOut -> Teleport -> FadeIn`)
-    match fp.fade {
-        FpFadeState::Idle => {
+    // 1. Step `fp-fade` elevator transition (`FadeOut -> Teleport -> FadeIn`), cancelled immediately if FP exited!
+    if !fp.active {
+        if !matches!(fp.fade, FpFadeState::Idle) {
+            fp.fade = FpFadeState::Idle;
             fp.fade_alpha = 0.0;
-        }
-        FpFadeState::FadingOut {
-            mut timer,
-            duration,
-            to_street,
-        } => {
-            timer += dt;
-            fp.fade_alpha = (timer / duration.max(0.05)).clamp(0.0, 1.0);
             for mut d in &mut doors_q {
-                d.open = (d.open + dt * 4.0).min(1.0);
+                d.open = 0.0;
             }
-            if timer >= duration {
-                if to_street {
-                    if let Some(sn) = ctx.street_nav.as_deref() {
-                        fp.on_street = true;
-                        fp.pos = sn.lobby_exit + sn.lobby_normal * 0.35;
-                        fp.ground_y = sn.ground_at(fp.pos.x, fp.pos.y);
-                        fp.yaw = sn.lobby_normal.x.atan2(sn.lobby_normal.y);
-                        fp.pitch = -0.04;
+        }
+        fp.near_prompt = None;
+    } else {
+        match fp.fade {
+            FpFadeState::Idle => {
+                fp.fade_alpha = 0.0;
+            }
+            FpFadeState::FadingOut {
+                mut timer,
+                duration,
+                to_street,
+            } => {
+                timer += dt;
+                fp.fade_alpha = (timer / duration.max(0.05)).clamp(0.0, 1.0);
+                for mut d in &mut doors_q {
+                    d.open = (d.open + dt * 4.0).min(1.0);
+                }
+                if timer >= duration {
+                    if to_street {
+                        if let Some(sn) = ctx.street_nav.as_deref() {
+                            fp.on_street = true;
+                            // Land directly on the office superblock sidewalk (`PAVE_Y`) facing out toward the street
+                            fp.pos = sn.lobby_exit;
+                            fp.ground_y = sn.ground_at(fp.pos.x, fp.pos.y);
+                            fp.yaw = sn.lobby_normal.x.atan2(sn.lobby_normal.y);
+                            fp.pitch = -0.04;
+                            fp.activity = FirstPersonActivity::Walking;
+                            fp.near_prompt = None;
+                        }
+                    } else {
+                        fp.on_street = false;
+                        fp.pos = Vec2::new(if layout.is_pro() { -6.15 } else { -6.35 }, spec.door_z);
+                        fp.ground_y = 0.0;
+                        fp.yaw = std::f32::consts::FRAC_PI_2;
+                        fp.pitch = -0.06;
                         fp.activity = FirstPersonActivity::Walking;
                         fp.near_prompt = None;
                     }
+                    fp.fade = FpFadeState::FadingIn {
+                        timer: 0.0,
+                        duration: 0.22,
+                    };
+                    fp.fade_alpha = 1.0;
                 } else {
-                    fp.on_street = false;
-                    fp.pos = Vec2::new(if layout.is_pro() { -6.15 } else { -6.35 }, spec.door_z);
-                    fp.ground_y = 0.0;
-                    fp.yaw = std::f32::consts::FRAC_PI_2;
-                    fp.pitch = -0.06;
-                    fp.activity = FirstPersonActivity::Walking;
-                    fp.near_prompt = None;
+                    fp.fade = FpFadeState::FadingOut {
+                        timer,
+                        duration,
+                        to_street,
+                    };
                 }
-                fp.fade = FpFadeState::FadingIn {
-                    timer: 0.0,
-                    duration: 0.22,
-                };
-                fp.fade_alpha = 1.0;
-            } else {
-                fp.fade = FpFadeState::FadingOut {
-                    timer,
-                    duration,
-                    to_street,
-                };
             }
-        }
-        FpFadeState::FadingIn {
-            mut timer,
-            duration,
-        } => {
-            timer += dt;
-            fp.fade_alpha = (1.0 - timer / duration.max(0.05)).clamp(0.0, 1.0);
-            if timer >= duration {
-                fp.fade = FpFadeState::Idle;
-                fp.fade_alpha = 0.0;
-                for mut d in &mut doors_q {
-                    d.open = 0.0;
+            FpFadeState::FadingIn {
+                mut timer,
+                duration,
+            } => {
+                timer += dt;
+                fp.fade_alpha = (1.0 - timer / duration.max(0.05)).clamp(0.0, 1.0);
+                if timer >= duration {
+                    fp.fade = FpFadeState::Idle;
+                    fp.fade_alpha = 0.0;
+                    for mut d in &mut doors_q {
+                        d.open = 0.0;
+                    }
+                } else {
+                    fp.fade = FpFadeState::FadingIn { timer, duration };
                 }
-            } else {
-                fp.fade = FpFadeState::FadingIn { timer, duration };
             }
         }
     }
 
     // 2. Step active mini-activities (Billiards Spacebar power bar & TV-Games sofa controls)
+    let mut synced_aim_yaw: Option<f32> = None;
     if fp.active && !block_kb {
         match &mut fp.activity {
             FirstPersonActivity::PlayingBilliards {
@@ -1100,6 +1135,7 @@ pub fn first_person_update_system(
                     if keys.pressed(KeyCode::ArrowRight) || keys.pressed(KeyCode::KeyD) {
                         *aim_yaw -= rate * dt;
                     }
+                    synced_aim_yaw = Some(*aim_yaw);
                     if keys.pressed(KeyCode::Space) {
                         *charging = true;
                         *power += *charge_dir * dt * 1.15;
@@ -1150,6 +1186,9 @@ pub fn first_person_update_system(
             FirstPersonActivity::Walking => {}
         }
     }
+    if let Some(yaw) = synced_aim_yaw {
+        fp.yaw = yaw;
+    }
 
     // 3. Near-prompt detection (`E` contextual prompt) when actively walking
     if !fp.active || !matches!(fp.fade, FpFadeState::Idle) {
@@ -1168,7 +1207,27 @@ pub fn first_person_update_system(
                 if d_exit < 2.4 {
                     consider(&mut best, d_exit, FirstPersonPrompt::LiftToOffice);
                 }
+                if is_night {
+                    for room in &sn.walkin_rooms {
+                        if room.closed_at_night {
+                            let d = fp.pos.distance(room.door_pos);
+                            if d < 2.2 {
+                                consider(
+                                    &mut best,
+                                    d,
+                                    FirstPersonPrompt::ShopClosed {
+                                        shop_name: room.shop_name,
+                                        opens_at: room.opens_at,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
                 for spot in &sn.shop_spots {
+                    if spot.closed_at_night && is_night {
+                        continue;
+                    }
                     let d = fp.pos.distance(spot.pos);
                     if d < 2.2 {
                         let prompt = match spot.kind {
@@ -1365,6 +1424,9 @@ pub fn first_person_update_system(
                         vars: Vec::new(),
                     });
                 }
+                FirstPersonPrompt::ShopClosed { .. } => {
+                    fp.pending_sfx.push(crate::audio::SfxKind::Click);
+                }
                 FirstPersonPrompt::BilliardsPlay => {
                     let aim_yaw = if let Some([bx, bz]) = spec.bil {
                         (bx - fp.pos.x).atan2(bz - fp.pos.y)
@@ -1435,7 +1497,7 @@ pub fn first_person_update_system(
         && (fp.third_person
             || !matches!(fp.fade, FpFadeState::Idle)
             || !matches!(fp.activity, FirstPersonActivity::Walking));
-    for (ent, mut tf, mut vis, mut worker) in &mut avatar_q {
+    for (ent, mut tf, mut vis, mut worker, active_prop) in &mut avatar_q {
         tf.translation = Vec3::new(fp.pos.x, fp.ground_y, fp.pos.y);
         tf.rotation = Quat::from_rotation_y(fp.yaw);
         *vis = if show_avatar {
@@ -1455,8 +1517,8 @@ pub fn first_person_update_system(
                 }
             }
         };
-        if *last_avatar_prop != desired_prop {
-            *last_avatar_prop = desired_prop;
+        let current_prop = active_prop.map(|p| p.kind);
+        if current_prop != desired_prop {
             if let (Some(cache), Some(pal), Some(mats)) = (
                 ctx.chibi_cache.as_deref(),
                 palette.as_deref_mut(),
@@ -1778,9 +1840,20 @@ mod tests {
         }
         {
             let fp = app.world().resource::<FirstPersonController>();
+            let nav = app.world().resource::<CityStreetNav>();
             assert!(fp.on_street, "Player must arrive on city street after lift fade");
             assert_eq!(fp.fade, FpFadeState::Idle);
             assert!(fp.fade_alpha < 1e-3);
+            assert!(
+                (fp.ground_y - crate::street::PAVE_Y).abs() < 1e-4,
+                "Lift exit must land on sidewalk pavement PAVE_Y (got {})",
+                fp.ground_y
+            );
+            assert!(
+                !nav.blocked_at(fp.pos.x, fp.pos.y, FP_PLAYER_RADIUS, false),
+                "Lift exit landing pos {:?} must be passable on sidewalk",
+                fp.pos
+            );
         }
 
         // Walk inside a walk-in shop: verify Take -> Pay -> carrying prop equipped!
@@ -1858,6 +1931,23 @@ mod tests {
             app.world().resource::<FirstPersonController>().activity,
             FirstPersonActivity::PlayingBilliards { .. }
         ));
+        // Aim left with ArrowLeft -> fp.yaw must track aim_yaw live!
+        let yaw_before = app.world().resource::<FirstPersonController>().yaw;
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::ArrowLeft);
+        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(80));
+        app.update();
+        app.world_mut().resource_mut::<ButtonInput<KeyCode>>().release(KeyCode::ArrowLeft);
+        {
+            let fp = app.world().resource::<FirstPersonController>();
+            if let FirstPersonActivity::PlayingBilliards { aim_yaw, .. } = fp.activity {
+                assert!(
+                    (fp.yaw - aim_yaw).abs() < 1e-4 && (fp.yaw - yaw_before).abs() > 0.05,
+                    "PlayingBilliards aim must sync fp.yaw (yaw={}, aim={})",
+                    fp.yaw,
+                    aim_yaw
+                );
+            }
+        }
         app.world_mut().resource_mut::<ButtonInput<KeyCode>>().press(KeyCode::Space);
         for _ in 0..5 {
             app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(80));
@@ -1941,5 +2031,171 @@ mod tests {
         assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0, "0 leaked Meshes");
         assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 0, "0 leaked Materials");
         assert_eq!(app.world().resource::<Assets<Image>>().len(), 0, "0 leaked Images");
+    }
+
+    #[test]
+    fn backdrop_switch_countryside_to_city_syncs_backdrop_kind_night_shutters_and_fp_exit_cleanup() {
+        use crate::backdrops::{BackdropAssets, BackdropEntity, BackdropKind, spawn_backdrop, unload_backdrop};
+        use crate::chibi::ChibiLook;
+        use crate::lights::LightingState;
+        use crate::street::CityStreetNav;
+        use station_canvas2d::{BrandRegistry, FontEngine};
+        use std::path::PathBuf;
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+        let mut brands = BrandRegistry::new(assets_dir.clone());
+        let spec = LayoutSpec::for_layout(OfficeLayout::Pro);
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(ButtonInput::<KeyCode>::default())
+            .insert_resource(ButtonInput::<MouseButton>::default())
+            .insert_resource(UiInputCapture::default())
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .insert_resource(crate::audio::SfxEngine::new(false))
+            .add_event::<MouseMotion>()
+            .add_event::<MouseWheel>()
+            .add_systems(Update, first_person_update_system)
+            .add_systems(PostUpdate, camera_control_system);
+
+        // 1. Start in Countryside (no CityStreetNav, LiftToStreet unavailable)
+        app.world_mut().resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut cmds = world.commands();
+                    crate::spawn_full_office_world(
+                        &mut cmds,
+                        &mut meshes,
+                        &mut mats,
+                        &mut imgs,
+                        &mut fonts,
+                        &assets_dir,
+                        OfficeLayout::Pro,
+                        BackdropKind::Countryside,
+                        ChibiLook::Pixar,
+                        false,
+                    );
+                });
+            });
+        });
+        app.world_mut().flush();
+        assert_eq!(*app.world().resource::<BackdropKind>(), BackdropKind::Countryside);
+
+        // 2. Switch Countryside -> City via unload_backdrop + spawn_backdrop (must update Res<BackdropKind>!)
+        let b_ents: Vec<Entity> = app
+            .world_mut()
+            .query_filtered::<Entity, With<BackdropEntity>>()
+            .iter(app.world())
+            .collect();
+        for e in b_ents {
+            app.world_mut().despawn(e);
+        }
+        app.world_mut().resource_scope(|world, mut pal: Mut<crate::palette::WorldPalette>| {
+            world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                    world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                        world.resource_scope(|world, mut ba: Mut<BackdropAssets>| {
+                            ba.purge(&mut meshes, &mut mats, &mut imgs);
+                            let mut cmds = world.commands();
+                            spawn_backdrop(
+                                &mut cmds,
+                                &mut pal,
+                                &mut meshes,
+                                &mut mats,
+                                &mut imgs,
+                                &mut ba,
+                                &mut brands,
+                                &mut fonts,
+                                &spec,
+                                BackdropKind::City,
+                                false,
+                                "hcm",
+                                31.0,
+                            );
+                        });
+                    });
+                });
+            });
+        });
+        app.world_mut().flush();
+        assert_eq!(
+            *app.world().resource::<BackdropKind>(),
+            BackdropKind::City,
+            "spawn_backdrop must sync Res<BackdropKind> on SwitchBackdrop"
+        );
+
+        // Standing near elevator in FP mode must immediately offer LiftToStreet
+        {
+            app.world_mut().resource_mut::<CameraRig>().first_person = true;
+            let mut fp = app.world_mut().resource_mut::<FirstPersonController>();
+            fp.active = true;
+            fp.pos = Vec2::new(-6.35, spec.door_z);
+        }
+        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(50));
+        app.update();
+        assert!(
+            matches!(
+                app.world().resource::<FirstPersonController>().near_prompt,
+                Some(FirstPersonPrompt::LiftToStreet { .. })
+            ),
+            "Countryside -> City switch must activate LiftToStreet cleanly"
+        );
+
+        // 3. Night shutters block shuttered shop (bhx) and offer ShopClosed prompt
+        app.world_mut().resource_mut::<LightingState>().night = true;
+        let (closed_room_center, closed_door_pos) = {
+            let nav = app.world().resource::<CityStreetNav>();
+            let r = nav
+                .walkin_rooms
+                .iter()
+                .find(|r| r.closed_at_night)
+                .expect("HCM city set must include shuttered bhx shop");
+            assert!(
+                nav.blocked_at(
+                    (r.room_min.x + r.room_max.x) * 0.5,
+                    (r.room_min.y + r.room_max.y) * 0.5,
+                    FP_PLAYER_RADIUS,
+                    true
+                ),
+                "Shuttered shop interior must be blocked at night"
+            );
+            (((r.room_min + r.room_max) * 0.5), r.door_pos)
+        };
+        let _ = closed_room_center;
+        {
+            let mut fp = app.world_mut().resource_mut::<FirstPersonController>();
+            fp.on_street = true;
+            fp.pos = closed_door_pos;
+        }
+        app.update();
+        assert!(
+            matches!(
+                app.world().resource::<FirstPersonController>().near_prompt,
+                Some(FirstPersonPrompt::ShopClosed { .. })
+            ),
+            "Standing outside shuttered shop at night must surface ShopClosed prompt"
+        );
+
+        // 4. Exiting FP via SelectCameraPreset (rig.apply_preset) while on street + mid-fade cleans up completely
+        app.world_mut()
+            .resource_mut::<FirstPersonController>()
+            .start_fade_transition(false, false);
+        app.world_mut()
+            .resource_mut::<CameraRig>()
+            .apply_preset(CameraPreset::Home, OfficeLayout::Pro);
+        app.world_mut().resource_mut::<Time>().advance_by(Duration::from_millis(300));
+        app.update();
+        {
+            let fp = app.world().resource::<FirstPersonController>();
+            assert!(!fp.active);
+            assert!(!fp.on_street, "Preset exit from street must return player cleanly to office");
+            assert_eq!(fp.fade, FpFadeState::Idle, "Pending fade must cancel immediately on FP exit");
+            assert_eq!(fp.fade_alpha, 0.0);
+            assert!(fp.near_prompt.is_none());
+        }
+        let _ = unload_backdrop;
     }
 }
