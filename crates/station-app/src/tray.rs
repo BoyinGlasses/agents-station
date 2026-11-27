@@ -905,6 +905,20 @@ pub fn request_parent_switch_3d() -> bool {
     }
 }
 
+/// Spawns a standalone full-3D `agents-station` process when a PBR-less `--panel` or direct
+/// `--lite` window asks to switch to 3D without a running `TrayDaemon` parent.
+pub fn spawn_standalone_3d_app(port: u16) -> Result<Child> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--port").arg(port.to_string());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    Ok(cmd.spawn()?)
+}
+
 /// Asks the parent `"AgentsStationTrayHost"` process to emit a tray balloon notification
 /// using its own `HWND` and configured HTTP port (cross-process `Shell_NotifyIconW` is rejected by Win32).
 pub fn notify_parent_in_tray(closed_window: bool) -> bool {

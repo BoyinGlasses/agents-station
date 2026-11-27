@@ -9916,9 +9916,7 @@ fn process_ui_actions(
         PendingWorldOp::EnsureMode3d => {
             if !has_world {
                 if world_params.materials.is_none() {
-                    if crate::tray::request_parent_switch_3d() {
-                        tray_params.app_exit.write(AppExit::Success);
-                    }
+                    switch_lite_process_to_3d(bridge.port, &mut ui, &mut tray_params.app_exit);
                 } else {
                     rebuild_3d_office_world(
                         &mut commands,
@@ -9937,9 +9935,7 @@ fn process_ui_actions(
         }
         PendingWorldOp::Rebuild3d => {
             if world_params.materials.is_none() {
-                if crate::tray::request_parent_switch_3d() {
-                    tray_params.app_exit.write(AppExit::Success);
-                }
+                switch_lite_process_to_3d(bridge.port, &mut ui, &mut tray_params.app_exit);
             } else {
                 rebuild_3d_office_world(
                     &mut commands,
@@ -10004,6 +10000,49 @@ fn process_ui_actions(
                 brands.clear();
             }
         }
+    }
+}
+
+fn switch_lite_process_to_3d_with<N, S>(
+    port: u16,
+    ui: &mut UiState,
+    notify_parent: N,
+    spawn_standalone: S,
+) -> bool
+where
+    N: FnOnce() -> bool,
+    S: FnOnce(u16) -> Result<(), String>,
+{
+    if notify_parent() {
+        return true;
+    }
+    match spawn_standalone(port) {
+        Ok(()) => true,
+        Err(err) => {
+            ui.view_mode = ViewMode::Lite2D;
+            ui.push_toast("3D View", format!("Could not launch 3D window: {err}"));
+            false
+        }
+    }
+}
+
+fn switch_lite_process_to_3d(
+    port: u16,
+    ui: &mut UiState,
+    app_exit: &mut EventWriter<AppExit>,
+) {
+    let switched = switch_lite_process_to_3d_with(
+        port,
+        ui,
+        crate::tray::request_parent_switch_3d,
+        |p| {
+            crate::tray::spawn_standalone_3d_app(p)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        },
+    );
+    if switched {
+        app_exit.write(AppExit::Success);
     }
 }
 
@@ -14127,5 +14166,49 @@ mod tests {
             let _g = WeatherInFlightGuard(in_flight.clone());
         }
         assert!(!in_flight.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn lite_to_3d_switch_falls_back_to_standalone_spawn_or_reverts_cleanly() {
+        let mut ui = UiState::default();
+        ui.view_mode = ViewMode::Mode3D;
+
+        // 1. TrayDaemon parent handles switch -> exits immediately without standalone spawn.
+        let mut spawned = false;
+        assert!(switch_lite_process_to_3d_with(
+            4310,
+            &mut ui,
+            || true,
+            |_| {
+                spawned = true;
+                Ok(())
+            },
+        ));
+        assert!(!spawned);
+
+        // 2. Standalone --panel/--lite (no TrayDaemon) -> spawns full 3D process on active port.
+        let mut spawned_port = 0u16;
+        assert!(switch_lite_process_to_3d_with(
+            4399,
+            &mut ui,
+            || false,
+            |p| {
+                spawned_port = p;
+                Ok(())
+            },
+        ));
+        assert_eq!(spawned_port, 4399);
+
+        // 3. If standalone spawn also fails -> reverts to ViewMode::Lite2D and pushes error toast.
+        ui.view_mode = ViewMode::Mode3D;
+        ui.toasts.clear();
+        assert!(!switch_lite_process_to_3d_with(
+            4310,
+            &mut ui,
+            || false,
+            |_| Err("missing binary".to_owned()),
+        ));
+        assert_eq!(ui.view_mode, ViewMode::Lite2D);
+        assert_eq!(ui.toasts.len(), 1);
     }
 }
