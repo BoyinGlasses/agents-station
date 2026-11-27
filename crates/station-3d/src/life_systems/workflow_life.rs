@@ -196,17 +196,51 @@ pub struct TrophyEntry {
     pub tier: u8,
 }
 
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone)]
 pub struct TrophiesShelfState {
     pub entries: Vec<TrophyEntry>,
     pub has_plaque: bool,
     pub dirty: bool,
+    pub last_sig: Option<(u64, u64)>,
+    pub needs_sync: bool,
+}
+
+impl Default for TrophiesShelfState {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            has_plaque: false,
+            dirty: false,
+            last_sig: None,
+            needs_sync: true,
+        }
+    }
+}
+
+fn file_mtime_ms_and_len(meta: &std::fs::Metadata) -> (u64, u64) {
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    (mtime_ms, meta.len())
 }
 
 impl TrophiesShelfState {
     /// Parses `data/totals.json` (`TrophyStore` schema) and selects the highest reached tier
     /// (`1=Bronze`, `2=Silver`, `3=Gold`) per milestone category, capped at `MAX_TROPHY_SLOTS`.
+    /// Skips disk read + JSON parse when `(mtime_ms, len)` is unchanged and `needs_sync == false`.
     pub fn load_from_totals_json(&mut self, path: &Path) -> usize {
+        let sig = std::fs::metadata(path).ok().map(|m| file_mtime_ms_and_len(&m));
+        if !self.needs_sync && sig == self.last_sig {
+            return self.entries.len();
+        }
+        let Some(sig) = sig else {
+            self.last_sig = None;
+            self.needs_sync = false;
+            return self.entries.len();
+        };
         let Ok(raw) = std::fs::read_to_string(path) else {
             return self.entries.len();
         };
@@ -243,47 +277,84 @@ impl TrophiesShelfState {
                 }
             }
         }
+        self.last_sig = Some(sig);
+        self.needs_sync = false;
         self.dirty = true;
         self.entries.len()
     }
 }
 
-#[derive(Resource, Debug, Clone, Default)]
+#[derive(Resource, Debug, Clone)]
 pub struct PhotostripsState {
     pub loaded_paths: Vec<String>,
     pub dirty: bool,
+    pub last_sig: Vec<(String, u64, u64)>,
+    pub slot_images: [Option<Handle<Image>>; MAX_PHOTOSTRIPS],
+    pub needs_sync: bool,
+}
+
+impl Default for PhotostripsState {
+    fn default() -> Self {
+        Self {
+            loaded_paths: Vec::new(),
+            dirty: false,
+            last_sig: Vec::new(),
+            slot_images: std::array::from_fn(|_| None),
+            needs_sync: true,
+        }
+    }
+}
+
+fn compute_shots_signature(shots_dir: &Path) -> Vec<(String, u64, u64)> {
+    let Ok(entries) = std::fs::read_dir(shots_dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(String, u64, u64)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if !path.is_file() {
+                return None;
+            }
+            let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+            if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
+                let (mtime_ms, len) = e
+                    .metadata()
+                    .ok()
+                    .map(|m| file_mtime_ms_and_len(&m))
+                    .unwrap_or((0, 0));
+                Some((path.to_string_lossy().into_owned(), mtime_ms, len))
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    if files.len() > MAX_PHOTOSTRIPS {
+        let drain = files.len() - MAX_PHOTOSTRIPS;
+        files.drain(..drain);
+    }
+    files
 }
 
 impl PhotostripsState {
+    /// Marks state dirty after a 3D world rebuild so handles are re-uploaded cleanly into the new palette.
+    pub fn mark_world_rebuilt(&mut self) {
+        self.slot_images = std::array::from_fn(|_| None);
+        self.needs_sync = true;
+    }
+
     /// Scans `data/shots/` safely (returns 0 if missing), keeping up to `MAX_PHOTOSTRIPS` (6)
     /// newest PNG/JPEG paths sorted lexicographically newest-last.
     pub fn scan_shots_dir(&mut self, shots_dir: &Path) -> usize {
-        self.loaded_paths.clear();
-        let Ok(entries) = std::fs::read_dir(shots_dir) else {
-            return 0;
-        };
-        let mut files: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let path = e.path();
-                if !path.is_file() {
-                    return None;
-                }
-                let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-                if matches!(ext.as_str(), "png" | "jpg" | "jpeg") {
-                    Some(path.to_string_lossy().into_owned())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        files.sort();
-        if files.len() > MAX_PHOTOSTRIPS {
-            let drain = files.len() - MAX_PHOTOSTRIPS;
-            files.drain(..drain);
+        let sig = compute_shots_signature(shots_dir);
+        if !self.needs_sync && sig == self.last_sig {
+            return self.loaded_paths.len();
         }
-        self.loaded_paths = files;
+        self.loaded_paths = sig.iter().map(|(p, _, _)| p.clone()).collect();
+        self.last_sig = sig;
         self.dirty = true;
+        self.needs_sync = false;
         self.loaded_paths.len()
     }
 }
@@ -847,7 +918,9 @@ pub fn spawn_workflow_life(
 }
 
 /// Syncs up to `MAX_PHOTOSTRIPS` (6) thumbnails from `data/shots/` onto the whiteboard photostrip
-/// slots using capped `RENDER_WORLD` images tracked in `WorldPalette`. Safe when folder is missing.
+/// slots using capped `RENDER_WORLD` images tracked in `WorldPalette`. Skips disk decode & GPU
+/// upload completely when the directory signature `(path, mtime_ms, len)` is unchanged, and replaces
+/// prior slot handles in-place so `Assets<Image>::len()` stays strictly bounded.
 pub fn sync_photostrips_from_shots_dir(
     shots_dir: &Path,
     state: &mut PhotostripsState,
@@ -856,24 +929,38 @@ pub fn sync_photostrips_from_shots_dir(
     materials: &mut Assets<StandardMaterial>,
     slots: &mut Query<(&PhotostripSlot, &mut Visibility)>,
 ) -> usize {
-    let count = state.scan_shots_dir(shots_dir);
+    let sig = compute_shots_signature(shots_dir);
+    if !state.needs_sync && sig == state.last_sig {
+        return state.slot_images.iter().filter(|h| h.is_some()).count();
+    }
+
+    state.loaded_paths = sig.iter().map(|(p, _, _)| p.clone()).collect();
+    state.last_sig = sig;
+    state.needs_sync = false;
     state.dirty = false;
-    if count == 0 {
+
+    let mut loaded = 0usize;
+    for i in 0..MAX_PHOTOSTRIPS {
+        if let Some(path_str) = state.loaded_paths.get(i)
+            && let Some(surf) = decode_capped_thumbnail(Path::new(path_str))
+        {
+            let handle = pal.replace_owned_image(images, state.slot_images[i].as_ref(), surf);
+            state.slot_images[i] = Some(handle);
+            loaded += 1;
+        } else if let Some(old_h) = state.slot_images[i].take() {
+            pal.remove_owned_image(images, &old_h);
+        }
+    }
+
+    if loaded == 0 {
         return 0;
     }
 
-    let mut uploaded: Vec<Handle<Image>> = Vec::with_capacity(count);
-    for path_str in &state.loaded_paths {
-        if let Some(surf) = decode_capped_thumbnail(Path::new(path_str)) {
-            uploaded.push(pal.upload_surface(images, surf));
-        }
-    }
-    let loaded = uploaded.len().min(MAX_PHOTOSTRIPS);
     for (slot, mut vis) in slots.iter_mut() {
-        if slot.index < loaded {
+        if let Some(tex) = state.slot_images.get(slot.index).and_then(|h| h.as_ref()) {
             if let Some(mat) = materials.get_mut(&slot.mat) {
                 mat.base_color = Color::WHITE;
-                mat.base_color_texture = Some(uploaded[slot.index].clone());
+                mat.base_color_texture = Some(tex.clone());
                 mat.emissive = LinearRgba::BLACK;
                 mat.perceptual_roughness = 0.55;
             }
@@ -1314,5 +1401,127 @@ mod tests {
         assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);
         assert_eq!(app.world().resource::<Assets<StandardMaterial>>().len(), 0);
         assert_eq!(app.world().resource::<Assets<Image>>().len(), 0);
+    }
+
+    #[test]
+    fn sync_photostrips_from_shots_dir_skips_unchanged_replaces_in_place_and_unloads_zero_leaks() {
+        use crate::{BackdropAssets, ChibiMeshCache, OfficeIbl, unload_full_office_world};
+        use bevy::ecs::system::SystemState;
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let shots_dir = tmp.path().join("shots");
+        std::fs::create_dir_all(&shots_dir).unwrap();
+
+        let img_a = image::RgbaImage::from_pixel(160, 240, image::Rgba([200, 90, 90, 255]));
+        for i in 0..4 {
+            img_a.save(shots_dir.join(format!("shot-{i:02}.png"))).unwrap();
+        }
+
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        world.insert_resource(PhotostripsState::default());
+
+        let spec = LayoutSpec::for_layout(OfficeLayout::Pro);
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = WorldPalette::new(&mut meshes);
+                    let mut cmds = world.commands();
+                    spawn_workflow_life(&mut cmds, &mut pal, &mut mats, &mut imgs, &mut fonts, &spec);
+                    world.insert_resource(pal);
+                });
+            });
+        });
+        world.flush();
+
+        let base_imgs = world.resource::<Assets<Image>>().len();
+
+        let run_sync = |world: &mut World, dir: &Path| -> usize {
+            let mut ss: SystemState<(
+                ResMut<PhotostripsState>,
+                ResMut<WorldPalette>,
+                ResMut<Assets<Image>>,
+                ResMut<Assets<StandardMaterial>>,
+                Query<(&PhotostripSlot, &mut Visibility)>,
+            )> = SystemState::new(world);
+            let (mut st, mut pal, mut imgs, mut mats, mut q) = ss.get_mut(world);
+            sync_photostrips_from_shots_dir(dir, &mut st, &mut pal, &mut imgs, &mut mats, &mut q)
+        };
+
+        // 1. First sync loads 4 thumbnails
+        assert_eq!(run_sync(&mut world, &shots_dir), 4);
+        let after_first = world.resource::<Assets<Image>>().len();
+        assert_eq!(after_first, base_imgs + 4);
+
+        // 2. Repeated sync with unchanged files must NOT allocate new Images
+        for _ in 0..5 {
+            assert_eq!(run_sync(&mut world, &shots_dir), 4);
+        }
+        assert_eq!(
+            world.resource::<Assets<Image>>().len(),
+            after_first,
+            "unchanged repeated syncs must not leak or grow Assets<Image>"
+        );
+
+        // 3. Modify existing PNG (different dimensions/bytes -> different len) + add 2 more (total 6)
+        let img_b = image::RgbaImage::from_pixel(180, 260, image::Rgba([40, 180, 120, 255]));
+        img_b.save(shots_dir.join("shot-00.png")).unwrap();
+        img_b.save(shots_dir.join("shot-04.png")).unwrap();
+        img_b.save(shots_dir.join("shot-05.png")).unwrap();
+        assert_eq!(run_sync(&mut world, &shots_dir), 6);
+        let after_six = world.resource::<Assets<Image>>().len();
+        assert_eq!(
+            after_six,
+            base_imgs + 6,
+            "modifying & expanding photostrips must replace old handles in-place without leaking"
+        );
+
+        // 4. Modify all 6 again -> Assets<Image>::len() MUST stay strictly bounded at base_imgs + 6
+        let img_c = image::RgbaImage::from_pixel(200, 280, image::Rgba([60, 90, 220, 255]));
+        for i in 0..6 {
+            img_c.save(shots_dir.join(format!("shot-{i:02}.png"))).unwrap();
+        }
+        assert_eq!(run_sync(&mut world, &shots_dir), 6);
+        assert_eq!(
+            world.resource::<Assets<Image>>().len(),
+            base_imgs + 6,
+            "Assets<Image> must stay strictly bounded across repeated modified refreshes"
+        );
+
+        // 5. Full unload via unload_full_office_world must reach 0 Images / Meshes / Materials
+        let ents: Vec<Entity> = world
+            .query_filtered::<Entity, With<WorldEntity>>()
+            .iter(&world)
+            .collect();
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = world.remove_resource::<WorldPalette>();
+                    let mut ba = world.remove_resource::<BackdropAssets>();
+                    let ibl = world.remove_resource::<OfficeIbl>();
+                    let cm = world.remove_resource::<ChibiMeshCache>();
+                    let mut cmds = world.commands();
+                    unload_full_office_world(
+                        &mut cmds,
+                        ents,
+                        pal.as_mut(),
+                        ba.as_mut(),
+                        ibl.as_ref(),
+                        cm.as_ref(),
+                        &mut meshes,
+                        &mut mats,
+                        &mut imgs,
+                    );
+                });
+            });
+        });
+        world.flush();
+        assert_eq!(world.resource::<Assets<Mesh>>().len(), 0);
+        assert_eq!(world.resource::<Assets<StandardMaterial>>().len(), 0);
+        assert_eq!(world.resource::<Assets<Image>>().len(), 0);
     }
 }
