@@ -74,12 +74,12 @@ fn frame_street_shops_camera(
         }
     }
     let focus = sum / count;
-    rig.target = Vec3::new(focus.x, 1.35, focus.z);
-    // Look from outward +X/+Z side so shop fascias, interiors, and vehicles face the camera cleanly
-    rig.yaw = if dir_out.x > 0.5 { 1.05 } else { 0.52 };
+    rig.target = Vec3::new(focus.x - 1.5, 1.45, focus.z - 2.0);
+    // Look from outward +X/+Z side so multiple walk-in shops, interiors, and vehicles face the camera cleanly
+    rig.yaw = if dir_out.x > 0.5 { 0.96 } else { 0.56 };
     rig.pitch = 0.42;
-    rig.distance = 26.0;
-    rig.viewport_height = 14.5;
+    rig.distance = 28.0;
+    rig.viewport_height = 17.5;
 }
 
 fn handle_window_close_requests(
