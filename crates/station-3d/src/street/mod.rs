@@ -685,10 +685,22 @@ pub fn animate_city_signals_and_night_system(
     mut countdowns: Query<(&mut city_grid::TrafficCountdownDisplay, &mut MeshMaterial3d<StandardMaterial>)>,
     mut beacons: Query<(&city_grid::RooftopBeacon, &mut Visibility), (Without<city_grid::TrafficSignalLamp>, Without<city_grid::CityNightLampPool>)>,
     mut pools: Query<&mut Visibility, (With<city_grid::CityNightLampPool>, Without<city_grid::TrafficSignalLamp>, Without<city_grid::RooftopBeacon>)>,
-    asphalt_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightAsphalt>>,
-    facade_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightFacade>>,
-    slab_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightSidewalk>>,
-    bulb_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightLampBulb>>,
+    asphalt_q: Query<
+        &MeshMaterial3d<StandardMaterial>,
+        (With<city_grid::CityNightAsphalt>, Without<city_grid::TrafficCountdownDisplay>),
+    >,
+    facade_q: Query<
+        &MeshMaterial3d<StandardMaterial>,
+        (With<city_grid::CityNightFacade>, Without<city_grid::TrafficCountdownDisplay>),
+    >,
+    slab_q: Query<
+        &MeshMaterial3d<StandardMaterial>,
+        (With<city_grid::CityNightSidewalk>, Without<city_grid::TrafficCountdownDisplay>),
+    >,
+    bulb_q: Query<
+        &MeshMaterial3d<StandardMaterial>,
+        (With<city_grid::CityNightLampBulb>, Without<city_grid::TrafficCountdownDisplay>),
+    >,
     mut last_night: Local<Option<bool>>,
 ) {
     let t = time.elapsed_secs();
