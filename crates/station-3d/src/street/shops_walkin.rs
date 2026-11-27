@@ -538,7 +538,7 @@ pub fn spawn_walkin_shops(
 
     let solid_mat = ba.mat(materials, "#FFFFFF", 0.72, 0.05);
     solid.spawn(commands, meshes, ba, solid_mat);
-    let glass_mat = ba.mat_blend(materials, "#D6ECF7", 0.24, 0.10, false);
+    let glass_mat = ba.mat_blend(materials, "#D6ECF7", 0.13, 0.08, false);
     glass.spawn(commands, meshes, ba, glass_mat);
 
     doors

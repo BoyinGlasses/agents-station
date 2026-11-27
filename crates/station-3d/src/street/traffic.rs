@@ -575,16 +575,17 @@ pub fn spawn_street_traffic(
 
     let shade_offset = if temp_c >= 33.0 { 3.2 } else { 0.0 };
 
-    // Bus stop shelter along the front avenue
+    // Bus stop shelter along the front avenue kerb (clear of office terrace railing)
     let bus_stop_x = grid.office_mid.x + 2.5;
+    let kerb_z = front_z - STREET_W * 0.5;
     let mut stop_b = StreetMeshBuilder::default();
-    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 2.35, front_z - STREET_W * 0.5 - 0.85), Vec3::new(3.2, 0.08, 1.1), "#1F4E8C");
-    for dx in [-1.45_f32, 1.45] {
-        stop_b.push_box(Vec3::new(bus_stop_x + dx, PAVE_Y + 1.15, front_z - STREET_W * 0.5 - 1.25), Vec3::new(0.08, 2.3, 0.08), "#5E6670");
+    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 2.35, kerb_z - 0.55), Vec3::new(3.0, 0.08, 0.92), "#1F4E8C");
+    for dx in [-1.35_f32, 1.35] {
+        stop_b.push_box(Vec3::new(bus_stop_x + dx, PAVE_Y + 1.15, kerb_z - 0.85), Vec3::new(0.08, 2.3, 0.08), "#5E6670");
     }
-    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 0.44, front_z - STREET_W * 0.5 - 1.05), Vec3::new(2.2, 0.06, 0.36), "#C9CED6");
-    stop_b.push_cyl(Vec3::new(bus_stop_x + 1.9, PAVE_Y + 1.15, front_z - STREET_W * 0.5 - 0.55), 0.03, 0.03, 2.3, 8, "#2B2F36");
-    stop_b.push_box(Vec3::new(bus_stop_x + 1.9, PAVE_Y + 2.15, front_z - STREET_W * 0.5 - 0.55), Vec3::new(0.45, 0.55, 0.06), "#1E6FD1");
+    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 0.44, kerb_z - 0.72), Vec3::new(2.1, 0.06, 0.34), "#C9CED6");
+    stop_b.push_cyl(Vec3::new(bus_stop_x + 1.85, PAVE_Y + 1.15, kerb_z - 0.35), 0.03, 0.03, 2.3, 8, "#2B2F36");
+    stop_b.push_box(Vec3::new(bus_stop_x + 1.85, PAVE_Y + 2.15, kerb_z - 0.35), Vec3::new(0.45, 0.55, 0.06), "#1E6FD1");
     let stop_mat = ba.mat(materials, "#FFFFFF", 0.55, 0.2);
     stop_b.spawn(commands, meshes, ba, stop_mat);
 
