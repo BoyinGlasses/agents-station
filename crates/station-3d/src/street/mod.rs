@@ -1,5 +1,7 @@
 pub mod city_grid;
 pub mod eat_com;
+pub mod scenes_a;
+pub mod scenes_b;
 pub mod shops_walkin;
 pub mod traffic;
 
