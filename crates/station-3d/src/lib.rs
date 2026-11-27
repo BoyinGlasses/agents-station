@@ -24,6 +24,7 @@ pub mod props;
 pub mod props_detail;
 pub mod replay;
 pub mod rooms;
+pub mod street;
 
 use bevy::prelude::*;
 pub use audio::SfxKind;
