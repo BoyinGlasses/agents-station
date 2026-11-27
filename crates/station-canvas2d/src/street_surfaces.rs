@@ -35,14 +35,42 @@ fn draw_seven_seg(c: &mut Canvas2d, digit: u32, x: f32, y: f32, w: f32, h: f32, 
 pub fn draw_traffic_countdown(seconds: u32, color: SignalColor) -> RgbaSurface {
     let mut c = Canvas2d::new(64, 40);
     c.fill(hex("#050505"));
+    draw_traffic_countdown_cell(&mut c, 0.0, 0.0, seconds, color);
+    c.into_surface()
+}
+
+fn draw_traffic_countdown_cell(c: &mut Canvas2d, ox: f32, oy: f32, seconds: u32, color: SignalColor) {
+    c.fill_rect(ox, oy, 64.0, 40.0, hex("#050505"));
     let (on, off) = match color {
         SignalColor::Red => (hex("#FF3322"), hex("#3A0D0A")),
         SignalColor::Green => (hex("#33FF66"), hex("#0B3316")),
         SignalColor::Amber => (hex("#FFC422"), hex("#3A2A08")),
     };
     let v = seconds.min(99);
-    draw_seven_seg(&mut c, v / 10, 9.0, 5.0, 20.0, 30.0, on, off);
-    draw_seven_seg(&mut c, v % 10, 35.0, 5.0, 20.0, 30.0, on, off);
+    draw_seven_seg(c, v / 10, ox + 9.0, oy + 5.0, 20.0, 30.0, on, off);
+    draw_seven_seg(c, v % 10, ox + 35.0, oy + 5.0, 20.0, 30.0, on, off);
+}
+
+/// Packs all 22 live countdown frames of the 22-second traffic cycle into a single `512×192`
+/// `RENDER_WORLD` atlas (`8×3` grid of `64×40` cells):
+/// - `0..8`: Green `08..=01`
+/// - `8..10`: Amber `02..=01`
+/// - `10..22`: Red `12..=01`
+pub fn draw_traffic_countdown_atlas() -> RgbaSurface {
+    let mut c = Canvas2d::new(512, 192);
+    c.fill(hex("#050505"));
+    for idx in 0..22u32 {
+        let (sec, col) = if idx < 8 {
+            (8 - idx, SignalColor::Green)
+        } else if idx < 10 {
+            (10 - idx, SignalColor::Amber)
+        } else {
+            (22 - idx, SignalColor::Red)
+        };
+        let ox = ((idx % 8) * 64) as f32;
+        let oy = ((idx / 8) * 40) as f32;
+        draw_traffic_countdown_cell(&mut c, ox, oy, sec, col);
+    }
     c.into_surface()
 }
 
@@ -964,5 +992,9 @@ mod tests {
         let signs = draw_street_signs_atlas(&mut fonts);
         assert_eq!((signs.width, signs.height), (512, 512));
         assert!(signs.non_background_ratio([0, 0, 0, 0]) > 0.5);
+
+        let cd_atlas = draw_traffic_countdown_atlas();
+        assert_eq!((cd_atlas.width, cd_atlas.height), (512, 192));
+        assert!(cd_atlas.non_background_ratio(hex("#050505")) > 0.08);
     }
 }

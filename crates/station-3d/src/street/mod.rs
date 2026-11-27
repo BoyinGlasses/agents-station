@@ -720,7 +720,7 @@ pub fn animate_city_signals_and_night_system(
     lighting: Option<Res<LightingState>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
     mut lamps: Query<(&city_grid::TrafficSignalLamp, &mut Visibility), (Without<city_grid::RooftopBeacon>, Without<city_grid::CityNightLampPool>)>,
-    mut countdowns: Query<(&mut city_grid::TrafficCountdownDisplay, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut countdowns: Query<(&mut city_grid::TrafficCountdownDisplay, &mut Mesh3d)>,
     mut beacons: Query<(&city_grid::RooftopBeacon, &mut Visibility), (Without<city_grid::TrafficSignalLamp>, Without<city_grid::CityNightLampPool>)>,
     mut pools: Query<&mut Visibility, (With<city_grid::CityNightLampPool>, Without<city_grid::TrafficSignalLamp>, Without<city_grid::RooftopBeacon>)>,
     asphalt_q: Query<
@@ -752,20 +752,11 @@ pub fn animate_city_signals_and_night_system(
         };
     }
 
-    for (mut cd, mut mat_h) in &mut countdowns {
-        let cur = city_grid::signal_color_of(city_grid::signal_phase(cd.i, cd.j, t, cd.axis_x));
-        let bucket = match cur {
-            station_canvas2d::street_surfaces::SignalColor::Green => 0,
-            station_canvas2d::street_surfaces::SignalColor::Amber => 1,
-            station_canvas2d::street_surfaces::SignalColor::Red => 2,
-        };
-        if cd.last_bucket != bucket {
-            cd.last_bucket = bucket;
-            mat_h.0 = match bucket {
-                0 => cd.green_mat.clone(),
-                1 => cd.amber_mat.clone(),
-                _ => cd.red_mat.clone(),
-            };
+    for (mut cd, mut mesh_h) in &mut countdowns {
+        let frame = (city_grid::signal_phase(cd.i, cd.j, t, cd.axis_x).floor() as usize).min(21) as u8;
+        if cd.last_frame != frame {
+            cd.last_frame = frame;
+            mesh_h.0 = cd.frames[frame as usize].clone();
         }
     }
 

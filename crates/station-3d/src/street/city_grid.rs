@@ -8,7 +8,7 @@ use crate::street::{CityRng, GY, StreetMeshBuilder, linear_rgba};
 use bevy::prelude::*;
 use station_canvas2d::street_surfaces::{
     SignalColor, draw_asphalt_tile, draw_facade_day_tile, draw_facade_night_atlas,
-    draw_generic_shop_strip, draw_lamp_pool_tex, draw_traffic_countdown,
+    draw_generic_shop_strip, draw_lamp_pool_tex, draw_traffic_countdown_atlas,
 };
 use std::collections::HashSet;
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
@@ -116,10 +116,8 @@ pub struct TrafficCountdownDisplay {
     pub i: usize,
     pub j: usize,
     pub axis_x: bool,
-    pub last_bucket: u8,
-    pub green_mat: Handle<StandardMaterial>,
-    pub amber_mat: Handle<StandardMaterial>,
-    pub red_mat: Handle<StandardMaterial>,
+    pub last_frame: u8,
+    pub frames: [Handle<Mesh>; 22],
 }
 
 /// Phase function matching Oracle `street-life.js` & `street-signals.js`:
@@ -1146,15 +1144,16 @@ pub fn spawn_city_grid(
         }
     }
 
-    // 12. Spawn traffic signal poles, 3-color signal heads, and countdown LED displays (`street-signals.js`)
+    // 12. Spawn traffic signal poles, 3-color signal heads, and live second-by-second countdown LEDs (`street-signals.js`)
     if !signal_poles.is_empty() {
         let mut sig_bodies = StreetMeshBuilder::default();
         let lamp_mesh = ba.add_mesh(meshes, Mesh::from(Sphere::new(0.085)));
-        let led_quad = ba.uv_rect_quad(meshes, 0.0, 0.0, 1.0, 1.0);
-
-        let green_led_mat = ba.textured(images, materials, draw_traffic_countdown(8, SignalColor::Green), true, 0.5);
-        let amber_led_mat = ba.textured(images, materials, draw_traffic_countdown(2, SignalColor::Amber), true, 0.5);
-        let red_led_mat = ba.textured(images, materials, draw_traffic_countdown(12, SignalColor::Red), true, 0.5);
+        let cd_atlas_mat = ba.textured(images, materials, draw_traffic_countdown_atlas(), true, 0.5);
+        let cd_frames: [Handle<Mesh>; 22] = std::array::from_fn(|idx| {
+            let ox = ((idx % 8) * 64) as f32;
+            let oy = ((idx / 8) * 40) as f32;
+            ba.atlas_quad(meshes, 512.0, 192.0, ox, oy, 64.0, 40.0)
+        });
 
         let red_on = ba.mat_emissive(materials, "#FF3322", 2.4);
         let amber_on = ba.mat_emissive(materials, "#FFC422", 2.2);
@@ -1193,13 +1192,8 @@ pub fn spawn_city_grid(
                     Transform::from_translation(lp),
                 ));
             }
-            // Countdown LED quad
-            let init_col = signal_color_of(signal_phase(p.i, p.j, 0.0, p.axis_x));
-            let init_mat = match init_col {
-                SignalColor::Green => green_led_mat.clone(),
-                SignalColor::Amber => amber_led_mat.clone(),
-                SignalColor::Red => red_led_mat.clone(),
-            };
+            // Countdown LED quad swapped second-by-second across the 22 prebuilt UV-cropped frames
+            let init_frame = (signal_phase(p.i, p.j, 0.0, p.axis_x).floor() as usize).min(21);
             commands.spawn((
                 WorldEntity,
                 BackdropEntity,
@@ -1207,13 +1201,11 @@ pub fn spawn_city_grid(
                     i: p.i,
                     j: p.j,
                     axis_x: p.axis_x,
-                    last_bucket: 255,
-                    green_mat: green_led_mat.clone(),
-                    amber_mat: amber_led_mat.clone(),
-                    red_mat: red_led_mat.clone(),
+                    last_frame: init_frame as u8,
+                    frames: cd_frames.clone(),
                 },
-                Mesh3d(led_quad.clone()),
-                MeshMaterial3d(init_mat),
+                Mesh3d(cd_frames[init_frame].clone()),
+                MeshMaterial3d(cd_atlas_mat.clone()),
                 Transform::from_translation(cd_pos + rot * Vec3::new(0.0, 0.0, 0.075))
                     .with_rotation(rot)
                     .with_scale(Vec3::new(0.32, 0.20, 1.0)),
