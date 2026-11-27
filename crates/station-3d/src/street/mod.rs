@@ -1,4 +1,6 @@
 pub mod city_grid;
+pub mod eat_com;
+pub mod shops_walkin;
 pub mod traffic;
 
 use crate::backdrops::{BackdropAssets, BackdropEntity};
