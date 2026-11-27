@@ -390,6 +390,7 @@ pub fn spawn_backdrop(
     temp_c: f32,
 ) {
     backdrop_assets.active = Some(kind);
+    commands.insert_resource(kind);
 
     match kind {
         BackdropKind::City => {

@@ -313,6 +313,30 @@ fn draw_beam_grad_tex() -> RgbaSurface {
     }
 }
 
+fn draw_firefly_dot_tex() -> RgbaSurface {
+    const SZ: usize = 16;
+    let mut rgba = vec![0u8; SZ * SZ * 4];
+    let c = (SZ as f32 - 1.0) * 0.5;
+    for y in 0..SZ {
+        for x in 0..SZ {
+            let dx = (x as f32 - c) / c;
+            let dy = (y as f32 - c) / c;
+            let d = (dx * dx + dy * dy).sqrt();
+            let a = (1.0 - d).clamp(0.0, 1.0).powf(2.0);
+            let idx = (y * SZ + x) * 4;
+            rgba[idx] = 255;
+            rgba[idx + 1] = 255;
+            rgba[idx + 2] = 220;
+            rgba[idx + 3] = (a * 255.0).round() as u8;
+        }
+    }
+    RgbaSurface {
+        width: SZ as u32,
+        height: SZ as u32,
+        rgba,
+    }
+}
+
 fn draw_moon_glint_tex() -> RgbaSurface {
     let mut c = Canvas2d::new(64, 256);
     c.fill([0, 0, 0, 0]);
@@ -531,16 +555,17 @@ fn push_horizontal_ring(
     }
 }
 
-/// Hollow woven *thuyền thúng* basket boat (`beach.js:48-53`).
+/// Hollow open-top woven *thuyền thúng* basket boat (`beach.js:48-53`) with visible dark tarred
+/// interior floor and wooden thwart seat spanning across the open bowl.
 fn push_basket_boat(b: &mut StreetMeshBuilder, x: f32, y: f32, z: f32) {
-    // Tapered woven hull bowl (lower rim -> upper rim)
-    b.push_cyl(Vec3::new(x, y + 0.30, z), 1.08, 0.72, 0.52, 14, "#5B4532");
-    // Dark tarred interior base disk
-    b.push_cyl(Vec3::new(x, y + 0.32, z), 0.94, 0.94, 0.06, 14, "#3E2F22");
-    // Blue woven gunwale rim
-    push_horizontal_ring(b, Vec3::new(x, y + 0.56, z), 1.08, 0.075, 16, "#2E6FA8");
-    // Wooden thwart seat plank across basket
-    b.push_box(Vec3::new(x, y + 0.50, z), Vec3::new(1.75, 0.06, 0.20), "#7A5A3E");
+    // Open-top woven exterior & dark interior hull walls (zero top cap!)
+    b.push_cyl_open(Vec3::new(x, y + 0.30, z), 1.08, 0.72, 0.52, 16, "#5B4532", "#443223");
+    // Dark tarred interior bottom floor inside the open bowl
+    b.push_cyl(Vec3::new(x, y + 0.14, z), 0.74, 0.72, 0.05, 16, "#2D2118");
+    // Blue woven gunwale rim framing the open top
+    push_horizontal_ring(b, Vec3::new(x, y + 0.56, z), 1.08, 0.08, 16, "#2E6FA8");
+    // Wooden thwart seat plank visibly spanning the open dark bowl
+    b.push_box(Vec3::new(x, y + 0.48, z), Vec3::new(1.94, 0.06, 0.24), "#96724D");
 }
 
 /// Outward-wound vertex-colored golden wet/dry shoreline strip (`beach.js:18-27`).
@@ -1468,23 +1493,19 @@ pub fn spawn_countryside_backdrop(
         if !tall_ok(excl, kx, kz, 2.0) {
             continue;
         }
-        // Chibi-proportioned kid figure holding kite string up
+        // Chibi-proportioned kid figure rotated to face their kite (`-3π/4`)
         let rot = Quat::from_rotation_y(-PI * 0.75);
-        kids_b.push_cyl(Vec3::new(kx - 0.11, GY + 0.22, kz), 0.07, 0.07, 0.44, 6, "#2F3B52");
-        kids_b.push_cyl(Vec3::new(kx + 0.11, GY + 0.22, kz), 0.07, 0.07, 0.44, 6, "#2F3B52");
-        kids_b.push_cyl(Vec3::new(kx, GY + 0.64, kz), 0.18, 0.21, 0.46, 8, col);
-        kids_b.push_sphere(Vec3::new(kx, GY + 1.08, kz), Vec3::splat(0.24), "#F5D0B5");
-        kids_b.push_sphere(Vec3::new(kx, GY + 1.15, kz - 0.02), Vec3::new(0.25, 0.22, 0.25), "#2B2420");
-        // Raised right arm holding string
-        kids_b.push_bar(
-            Vec3::new(kx + 0.16, GY + 0.78, kz),
-            Vec3::new(kx + 0.25, GY + 1.05, kz),
-            0.055,
-            5,
-            col,
-        );
+        let kp = |lx: f32, ly: f32, lz: f32| Vec3::new(kx, GY + ly, kz) + rot * Vec3::new(lx, 0.0, lz);
+        kids_b.push_cyl_rot(kp(-0.11, 0.22, 0.0), 0.07, 0.07, 0.44, 6, rot, "#2F3B52");
+        kids_b.push_cyl_rot(kp(0.11, 0.22, 0.0), 0.07, 0.07, 0.44, 6, rot, "#2F3B52");
+        kids_b.push_cyl_rot(kp(0.0, 0.64, 0.0), 0.18, 0.21, 0.46, 8, rot, col);
+        kids_b.push_sphere(kp(0.0, 1.08, 0.0), Vec3::splat(0.24), "#F5D0B5");
+        kids_b.push_sphere(kp(0.0, 1.15, -0.04), Vec3::new(0.25, 0.22, 0.25), "#2B2420");
+        // Raised right arm holding string toward the kite
+        let shoulder = kp(0.16, 0.78, 0.04);
+        let hand = kp(0.22, 1.05, 0.20);
+        kids_b.push_bar(shoulder, hand, 0.055, 5, col);
 
-        let hand = Vec3::new(kx + 0.25, GY + 1.05, kz);
         let base_pos = Vec3::new(kx - 9.0, GY + rng.range(17.0, 22.0), kz - 9.0);
         let ph = rng.range(0.0, 6.0);
         let k_mesh = ba.add_mesh(meshes, build_diamond_kite_mesh(col));
@@ -1497,7 +1518,6 @@ pub fn spawn_countryside_backdrop(
                 Transform::from_translation((hand + base_pos) * 0.5),
             ))
             .id();
-        let _ = rot;
         commands.spawn((
             WorldEntity,
             BackdropEntity,
@@ -1532,10 +1552,12 @@ pub fn spawn_countryside_backdrop(
         ff_phases.push(rng.range(0.0, 10.0));
     }
     let ff_mesh = ba.add_mesh(meshes, build_firefly_cloud_mesh(&ff_base));
+    let ff_dot_img = ba.upload_image(images, draw_firefly_dot_tex());
     let ff_mat = ba.add_material(
         materials,
         StandardMaterial {
             base_color: Color::WHITE,
+            base_color_texture: Some(ff_dot_img),
             emissive: LinearRgba::new(1.5, 2.2, 0.45, 1.0),
             alpha_mode: AlphaMode::Add,
             unlit: true,
@@ -1856,7 +1878,8 @@ pub fn spawn_beach_backdrop(
                     BackdropEntity,
                     Mesh3d(beam_cone.clone()),
                     MeshMaterial3d(beam_mat.clone()),
-                    Transform::from_rotation(Quat::from_rotation_y(ang) * Quat::from_rotation_z(-FRAC_PI_2))
+                    // +FRAC_PI_2 maps cone apex (+Y) to -X (at 0.0 on lamp) and wide base (-Y) outward to +34.0
+                    Transform::from_rotation(Quat::from_rotation_y(ang) * Quat::from_rotation_z(FRAC_PI_2))
                         .with_translation(Quat::from_rotation_y(ang) * Vec3::new(17.0, 0.0, 0.0)),
                 ));
             }
@@ -2600,5 +2623,32 @@ mod tests {
             .unwrap()
             .rotation;
         assert!(rot1.angle_between(rot2) > 0.1, "lighthouse beam must rotate over time");
+
+        // Verify LighthouseBeam cone children place bright apex (+Y) at 0.0 on the lamp and flare base (-Y) outward to 34.0
+        let beam_ent = app
+            .world_mut()
+            .query_filtered::<Entity, With<LighthouseBeam>>()
+            .single(app.world())
+            .unwrap();
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(beam_ent)
+            .expect("LighthouseBeam must have 2 cone children")
+            .iter()
+            .collect();
+        assert_eq!(children.len(), 2);
+        for child in children {
+            let tf = *app.world().get::<Transform>(child).unwrap();
+            let apex = tf.transform_point(Vec3::new(0.0, 17.0, 0.0));
+            let base = tf.transform_point(Vec3::new(0.0, -17.0, 0.0));
+            assert!(
+                apex.length() < 1e-3,
+                "LighthouseBeam cone apex must sit at lamp origin (got {apex:?})"
+            );
+            assert!(
+                (base.length() - 34.0).abs() < 1e-3,
+                "LighthouseBeam cone base must flare outward to 34m (got {base:?})"
+            );
+        }
     }
 }
