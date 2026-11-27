@@ -5515,7 +5515,7 @@ fn step_demo_simulation_system(
     let Some(demo) = demo.as_deref_mut() else {
         return;
     };
-    if !ui.demo_running || !demo.active {
+    if !ui.demo_running || !demo.active || ui.replay_active {
         return;
     }
     let emitted = demo.tick(time.delta_secs());
@@ -5638,17 +5638,55 @@ fn sync_life_world_data_system(
     }
 }
 
+fn project_replay_world_effects(
+    rep: &station_3d::replay::ReplayState,
+    life: Option<&mut station_3d::life::OfficeLifeState>,
+    incidents: Option<&mut station_3d::IncidentState>,
+) {
+    if !rep.active {
+        return;
+    }
+    let inc_active = rep.snapshot.incident_active;
+    if let Some(l) = life {
+        l.incident_active = inc_active;
+    }
+    if let Some(inc) = incidents {
+        if inc_active {
+            inc.incident_until = inc.sim_secs + 1.0;
+        } else {
+            inc.incident_until = 0.0;
+        }
+    }
+}
+
+fn clear_replay_world_effects(
+    life: Option<&mut station_3d::life::OfficeLifeState>,
+    incidents: Option<&mut station_3d::IncidentState>,
+) {
+    if let Some(l) = life {
+        l.incident_active = false;
+    }
+    if let Some(inc) = incidents {
+        inc.incident_until = 0.0;
+    }
+}
+
 fn step_replay_system(
     time: Res<Time>,
     mut ui: ResMut<UiState>,
     mut replay: Option<ResMut<station_3d::replay::ReplayState>>,
+    mut life: Option<ResMut<station_3d::life::OfficeLifeState>>,
+    mut incidents: Option<ResMut<station_3d::IncidentState>>,
 ) {
     let Some(rep) = replay.as_deref_mut() else {
         return;
     };
-    if rep.active && rep.playing {
-        rep.step(time.delta_secs());
-        apply_replay_snapshot_to_ui(rep, &mut ui);
+    if rep.active {
+        if rep.playing {
+            rep.step(time.delta_secs());
+            apply_replay_snapshot_to_ui(rep, &mut ui);
+        }
+        project_replay_world_effects(rep, life.as_deref_mut(), incidents.as_deref_mut());
     }
 }
 
@@ -6104,6 +6142,9 @@ struct AuxActionParams<'w, 's> {
     cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
     demo: Option<ResMut<'w, station_3d::DemoSimState>>,
     replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
+    postbox: Option<ResMut<'w, station_3d::PostboxState>>,
+    incidents: Option<ResMut<'w, station_3d::IncidentState>>,
+    tests_board: Option<ResMut<'w, station_3d::TestsBoardState>>,
     rocket_queue: Option<ResMut<'w, station_3d::RocketLaunchQueue>>,
     pending_photo: Option<ResMut<'w, PendingPhotoCapture>>,
     pending_timelapse: Option<ResMut<'w, PendingTimelapseCapture>>,
@@ -7666,6 +7707,19 @@ fn process_ui_actions(
                     if let Some(sim) = aux.demo.as_deref_mut() {
                         sim.stop();
                     }
+                    // Reset demo-induced workflow life state cleanly so nothing spills into live mode
+                    if let Some(pb) = aux.postbox.as_deref_mut() {
+                        *pb = station_3d::PostboxState::default();
+                    }
+                    if let Some(inc) = aux.incidents.as_deref_mut() {
+                        *inc = station_3d::IncidentState::default();
+                    }
+                    if let Some(tb) = aux.tests_board.as_deref_mut() {
+                        *tb = station_3d::TestsBoardState::default();
+                    }
+                    if let Some(l) = aux.life.as_deref_mut() {
+                        l.incident_active = false;
+                    }
                     ui.sessions.clear();
                     ui.pending_perms.clear();
                     ui.feed.clear();
@@ -7693,6 +7747,11 @@ fn process_ui_actions(
                         rep.playing = true;
                         ui.replay_heatmap = build_replay_heatmap(rep, 24);
                         apply_replay_snapshot_to_ui(rep, &mut ui);
+                        project_replay_world_effects(
+                            rep,
+                            aux.life.as_deref_mut(),
+                            aux.incidents.as_deref_mut(),
+                        );
                         ui.replay_active = true;
                     } else {
                         rep.restore_live();
@@ -7702,6 +7761,11 @@ fn process_ui_actions(
                             let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
                             apply_remote_snapshot_to_ui(&snap, &mut ui);
                         }
+                        clear_replay_world_effects(
+                            aux.life.as_deref_mut(),
+                            aux.incidents.as_deref_mut(),
+                        );
+                        rep.needs_live_restore = false;
                     }
                 }
                 let replay_msg = if ui.replay_active {
@@ -7722,6 +7786,11 @@ fn process_ui_actions(
                 if let Some(rep) = aux.replay.as_deref_mut() {
                     rep.scrub(ui.replay_progress);
                     apply_replay_snapshot_to_ui(rep, &mut ui);
+                    project_replay_world_effects(
+                        rep,
+                        aux.life.as_deref_mut(),
+                        aux.incidents.as_deref_mut(),
+                    );
                     ui.replay_active = true;
                 }
             }
@@ -7739,6 +7808,11 @@ fn process_ui_actions(
                     rep.active = true;
                     ui.replay_heatmap = build_replay_heatmap(rep, 24);
                     apply_replay_snapshot_to_ui(rep, &mut ui);
+                    project_replay_world_effects(
+                        rep,
+                        aux.life.as_deref_mut(),
+                        aux.incidents.as_deref_mut(),
+                    );
                     ui.replay_active = true;
                 }
             }
@@ -7753,6 +7827,13 @@ fn process_ui_actions(
                 } else if let BridgeBackend::AttachedHttp { snapshot, .. } = &bridge.backend {
                     let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     apply_remote_snapshot_to_ui(&snap, &mut ui);
+                }
+                clear_replay_world_effects(
+                    aux.life.as_deref_mut(),
+                    aux.incidents.as_deref_mut(),
+                );
+                if let Some(rep) = aux.replay.as_deref_mut() {
+                    rep.needs_live_restore = false;
                 }
             }
             UiAction::OpenPlaceCard(place_id) => {
@@ -12950,5 +13031,185 @@ mod tests {
         sync_app.update();
         assert_eq!(sync_app.world().resource::<station_3d::TrophiesShelfState>().entries.len(), 1);
         assert_eq!(sync_app.world().resource::<station_3d::PhotostripsState>().loaded_paths.len(), 1);
+    }
+
+    #[test]
+    fn demo_replay_isolation_replay_incident_effects_and_demo_off_reset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+
+        // 1. step_demo_simulation_system MUST early-return while ui.replay_active is true
+        let mut demo_app = App::new();
+        let mut ui = UiState::default();
+        ui.demo_running = true;
+        ui.replay_active = true;
+        let mut demo_sim = station_3d::DemoSimState::default();
+        demo_sim.start();
+        let initial_sim_secs = demo_sim.sim_secs;
+        demo_app
+            .insert_resource(Time::<()>::default())
+            .insert_resource(ui)
+            .insert_resource(demo_sim)
+            .insert_resource(station_3d::PostboxState::default())
+            .insert_resource(station_3d::IncidentState::default())
+            .insert_resource(station_3d::TestsBoardState::default())
+            .insert_resource(station_3d::RocketLaunchQueue::default())
+            .insert_resource(station_3d::CastEvents::default())
+            .add_systems(Update, step_demo_simulation_system);
+        for _ in 0..8 {
+            demo_app
+                .world_mut()
+                .resource_mut::<Time<()>>()
+                .advance_by(Duration::from_millis(250));
+            demo_app.update();
+        }
+        assert_eq!(
+            demo_app.world().resource::<station_3d::DemoSimState>().sim_secs,
+            initial_sim_secs,
+            "step_demo_simulation_system must early-return when ui.replay_active is true"
+        );
+        assert!(
+            demo_app.world().resource::<UiState>().feed.is_empty(),
+            "demo must not overwrite replay feed while replay is active"
+        );
+
+        // 2. Replay incident_active projects onto OfficeLifeState & IncidentState, and ReplayClose clears needs_live_restore
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir.clone(),
+            "127.0.0.1".into(),
+            0,
+            false,
+            false,
+        );
+        let mut rep = station_3d::replay::ReplayState::default();
+        rep.load_events(vec![
+            station_3d::replay::ReplayEvent {
+                ts: 10_000,
+                session_id: "s1".into(),
+                kind: "ev".into(),
+                summary: "f1".into(),
+                agent: "claude".into(),
+                project: "api".into(),
+                status: "work".into(),
+                tool: "bash".into(),
+                desk: Some(0),
+                event_type: "fail".into(),
+            },
+            station_3d::replay::ReplayEvent {
+                ts: 11_000,
+                session_id: "s1".into(),
+                kind: "ev".into(),
+                summary: "f2".into(),
+                agent: "claude".into(),
+                project: "api".into(),
+                status: "work".into(),
+                tool: "bash".into(),
+                desk: Some(0),
+                event_type: "fail".into(),
+            },
+            station_3d::replay::ReplayEvent {
+                ts: 12_000,
+                session_id: "s1".into(),
+                kind: "ev".into(),
+                summary: "f3".into(),
+                agent: "claude".into(),
+                project: "api".into(),
+                status: "work".into(),
+                tool: "bash".into(),
+                desk: Some(0),
+                event_type: "fail".into(),
+            },
+        ]);
+        rep.scrub(1.0);
+        assert!(rep.snapshot.incident_active);
+
+        let mut act_app = App::new();
+        let mut act_ui = UiState::default();
+        act_ui.demo_running = true;
+        act_ui.replay_active = true;
+        act_ui.push_action(UiAction::ReplayScrub(1.0));
+        let mut pb = station_3d::PostboxState::default();
+        pb.on_commit();
+        let inc = station_3d::IncidentState::default();
+        let mut tb = station_3d::TestsBoardState::default();
+        tb.set_row(0, station_3d::TestRunStatus::Fail);
+
+        act_app
+            .insert_resource(Time::<()>::default())
+            .insert_resource(ClearColor::default())
+            .insert_resource(bridge)
+            .insert_resource(I18nStore::load_from_assets(&assets_dir, "en"))
+            .insert_resource(act_ui)
+            .insert_resource(rep)
+            .insert_resource(station_3d::DemoSimState::default())
+            .insert_resource(station_3d::life::OfficeLifeState::default())
+            .insert_resource(pb)
+            .insert_resource(inc)
+            .insert_resource(tb)
+            .add_systems(Update, (process_ui_actions, step_replay_system).chain());
+        act_app.update();
+
+        assert!(
+            act_app
+                .world()
+                .resource::<station_3d::life::OfficeLifeState>()
+                .incident_active,
+            "Replay scrub onto 3-fail incident must set OfficeLifeState.incident_active"
+        );
+        assert!(
+            act_app.world().resource::<station_3d::IncidentState>().is_active(),
+            "Replay scrub onto 3-fail incident must activate IncidentState"
+        );
+
+        // Close replay -> clears needs_live_restore and clears replay incident
+        act_app
+            .world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::ReplayClose);
+        act_app.update();
+        assert!(
+            !act_app
+                .world()
+                .resource::<station_3d::replay::ReplayState>()
+                .needs_live_restore,
+            "ReplayClose must clear rep.needs_live_restore after restoring live state"
+        );
+        assert!(
+            !act_app
+                .world()
+                .resource::<station_3d::life::OfficeLifeState>()
+                .incident_active,
+            "ReplayClose must clear replay-projected incident_active"
+        );
+
+        // 3. ToggleDemo OFF must reset PostboxState, IncidentState, TestsBoardState cleanly
+        {
+            let mut inc_res = act_app.world_mut().resource_mut::<station_3d::IncidentState>();
+            inc_res.record_failure();
+            inc_res.record_failure();
+            inc_res.record_failure();
+            assert!(inc_res.is_active());
+        }
+        act_app
+            .world_mut()
+            .resource_mut::<UiState>()
+            .push_action(UiAction::ToggleDemo);
+        act_app.update();
+        assert!(!act_app.world().resource::<UiState>().demo_running);
+        assert_eq!(
+            act_app.world().resource::<station_3d::PostboxState>().in_box,
+            0,
+            "ToggleDemo OFF must reset PostboxState"
+        );
+        assert!(
+            !act_app.world().resource::<station_3d::IncidentState>().is_active(),
+            "ToggleDemo OFF must reset IncidentState"
+        );
+        assert_eq!(
+            act_app.world().resource::<station_3d::TestsBoardState>().rows[0].status,
+            station_3d::TestRunStatus::Idle,
+            "ToggleDemo OFF must reset TestsBoardState"
+        );
     }
 }
