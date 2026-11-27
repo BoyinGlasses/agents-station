@@ -149,7 +149,10 @@ pub fn initial_window_size(cli: &cli::Cli) -> (f32, f32) {
 fn is_lite_or_panel(cli: &cli::Cli) -> bool {
     cli.lite
         || cli.panel
-        || matches!(cli.capture_scene.as_deref(), Some("lite-2d" | "panel"))
+        || matches!(
+            cli.capture_scene.as_deref(),
+            Some("lite-2d" | "lite-2d-vi" | "panel")
+        )
 }
 
 fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
@@ -228,7 +231,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             app.add_plugins(station_3d::ChibiCloseupPlugin)
                 .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
-        Some("lite-2d") => {
+        Some("lite-2d" | "lite-2d-vi") => {
             let mut ui_state = station_ui::UiState::with_demo_seed(
                 station_3d::OfficeLayout::Pro,
                 station_3d::BackdropKind::City,
@@ -236,7 +239,13 @@ fn build_gui_app(cli: &cli::Cli) -> App {
             );
             ui_state.view_mode = station_ui::ViewMode::Lite2D;
             ui_state.sys.private_mb = 78.0;
-            let initial_lang = cli.lang.clone().unwrap_or_else(|| "en".to_owned());
+            let initial_lang = cli.lang.clone().unwrap_or_else(|| {
+                if scene == Some("lite-2d-vi") {
+                    "vi".to_owned()
+                } else {
+                    "en".to_owned()
+                }
+            });
             app.insert_resource(ClearColor(Color::srgb(0.06, 0.075, 0.105)))
                 .add_systems(Startup, spawn_lite_2d_camera)
                 .add_plugins(station_ui::StationUiPlugin {
@@ -262,13 +271,19 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                     initial_lang,
                 });
         }
-        Some("hud-pro") => {
+        Some("hud-pro" | "hud-pro-vi") => {
             let ui_state = station_ui::UiState::with_demo_seed(
                 station_3d::OfficeLayout::Pro,
                 station_3d::BackdropKind::City,
                 false,
             );
-            let initial_lang = cli.lang.clone().unwrap_or_else(|| "en".to_owned());
+            let initial_lang = cli.lang.clone().unwrap_or_else(|| {
+                if scene == Some("hud-pro-vi") {
+                    "vi".to_owned()
+                } else {
+                    "en".to_owned()
+                }
+            });
             app.add_plugins(station_3d::OfficeWorldPlugin {
                 layout: station_3d::OfficeLayout::Pro,
                 backdrop: station_3d::BackdropKind::City,
