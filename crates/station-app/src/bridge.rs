@@ -3767,6 +3767,10 @@ pub(crate) fn fp_prompt_to_label(
         FirstPersonPrompt::ShopSit { is_stool, .. } => {
             i18n.tr(if *is_stool { "fp.sitStool" } else { "fp.sit" })
         }
+        FirstPersonPrompt::ShopClosed {
+            shop_name,
+            opens_at,
+        } => i18n.tr_vars("fp.closed", &[("shop", shop_name), ("at", opens_at)]),
         FirstPersonPrompt::BilliardsPlay => i18n.tr("props.billiards.name"),
         FirstPersonPrompt::TvGamesPlay => i18n.tr("props.gametv.name"),
         FirstPersonPrompt::OfficeProp { id, place } => i18n.tr(fp_prop_i18n_key(id, place)),
@@ -4159,6 +4163,11 @@ pub fn project_stage_labels_to_ui(
             ui.fp_billiards = None;
             ui.fp_fade_alpha = 0.0;
         }
+    } else {
+        ui.first_person = false;
+        ui.fp_near_label = None;
+        ui.fp_billiards = None;
+        ui.fp_fade_alpha = 0.0;
     }
 
     let Some(stage_rect) = stage_viewport.0 else {
@@ -6981,6 +6990,10 @@ fn process_ui_actions(
             }
             UiAction::SetViewMode(mode @ (ViewMode::Lite2D | ViewMode::PanelCompact)) => {
                 ui.view_mode = mode;
+                ui.first_person = false;
+                ui.fp_near_label = None;
+                ui.fp_billiards = None;
+                ui.fp_fade_alpha = 0.0;
                 pending_op = PendingWorldOp::UnloadToLite;
                 for mut win in &mut tray_params.windows {
                     if mode == ViewMode::PanelCompact {
@@ -7922,6 +7935,13 @@ fn process_ui_actions(
             UiAction::SelectCameraPreset(preset) => {
                 ui.camera_preset = preset;
                 ui.first_person = false;
+                ui.fp_near_label = None;
+                ui.fp_billiards = None;
+                ui.fp_fade_alpha = 0.0;
+                if let Some(fp) = aux.fp_ctrl.as_deref_mut() {
+                    fp.active = false;
+                    fp.return_to_office_now(&LayoutSpec::for_layout(ui.layout));
+                }
                 if let Some(rig) = aux.camera_rig.as_deref_mut() {
                     rig.apply_preset(preset, ui.layout);
                     ui.camera_zoom_pct = rig.zoom_pct();
@@ -7977,6 +7997,13 @@ fn process_ui_actions(
                     {
                         rig.first_person = false;
                         ui.first_person = false;
+                        ui.fp_near_label = None;
+                        ui.fp_billiards = None;
+                        ui.fp_fade_alpha = 0.0;
+                        if let Some(fp) = aux.fp_ctrl.as_deref_mut() {
+                            fp.active = false;
+                            fp.return_to_office_now(&LayoutSpec::for_layout(ui.layout));
+                        }
                         let next_proj = rig.projection();
                         for mut proj in &mut aux.cam_q {
                             *proj = next_proj.clone();
@@ -10305,13 +10332,30 @@ mod tests {
         assert_eq!(station_3d::desks::count_desks_in_world(app.world_mut()), 12);
         assert_eq!(app.world().resource::<SharedFontEngine>().load_count(), 1);
 
-        // 1. 3D -> Lite2D: unload 3D world and spawn Lite2dCamera (never tagged WorldEntity).
+        // 1. 3D -> Lite2D: unload 3D world and spawn Lite2dCamera (never tagged WorldEntity),
+        //    clearing all active First-Person HUD state cleanly.
         {
             let mut ui = app.world_mut().resource_mut::<UiState>();
+            ui.first_person = true;
+            ui.fp_near_label = Some("Down to the street (lift)".to_owned());
+            ui.fp_billiards = Some(BilliardsHudState {
+                score_label: "0 potted".to_owned(),
+                turn_label: "Your shot".to_owned(),
+                power: 0.6,
+            });
+            ui.fp_fade_alpha = 0.75;
             ui.view_mode = ViewMode::Lite2D;
             ui.push_action(UiAction::SetViewMode(ViewMode::Lite2D));
         }
         app.update();
+
+        {
+            let ui = app.world().resource::<UiState>();
+            assert!(!ui.first_person, "SetViewMode(Lite2D) must exit first_person");
+            assert!(ui.fp_near_label.is_none(), "SetViewMode(Lite2D) must clear fp_near_label");
+            assert!(ui.fp_billiards.is_none(), "SetViewMode(Lite2D) must clear fp_billiards");
+            assert_eq!(ui.fp_fade_alpha, 0.0, "SetViewMode(Lite2D) must clear fp_fade_alpha");
+        }
 
         assert_eq!(
             app.world_mut()
@@ -12276,6 +12320,10 @@ mod tests {
                     seat_pos: Vec2::ZERO,
                     seat_yaw: 0.0,
                     is_stool: true,
+                },
+                station_3d::FirstPersonPrompt::ShopClosed {
+                    shop_name: "Bách Hóa Xanh",
+                    opens_at: "06:30",
                 },
                 station_3d::FirstPersonPrompt::BilliardsPlay,
                 station_3d::FirstPersonPrompt::TvGamesPlay,
