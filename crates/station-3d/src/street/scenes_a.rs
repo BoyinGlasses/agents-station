@@ -4,7 +4,7 @@
 
 use crate::backdrops::{BackdropAssets, BackdropEntity};
 use crate::palette::WorldEntity;
-use crate::street::city_grid::CityGridData;
+use crate::street::city_grid::{CityGridData, STREET_W};
 use crate::street::{GY, PAVE_Y, SpotFinder, StreetMeshBuilder, spawn_backdrop_uv_quad};
 use bevy::prelude::*;
 use station_canvas2d::FontEngine;
@@ -25,6 +25,12 @@ pub struct StreetAtmBooth;
 
 #[derive(Component)]
 pub struct StreetEvStation;
+
+#[derive(Component)]
+pub struct StreetEvScooterRow {
+    pub center: Vec3,
+    pub half_extents: Vec2,
+}
 
 #[derive(Component)]
 pub struct StreetPhotoStudio;
@@ -179,10 +185,14 @@ pub fn spawn_street_scenes_a(
             f.at(1.32, 0.28, 1.88), Vec2::new(0.50, 0.64), rot,
         );
 
-        // Row of 5 parked electric scooters on the office pavement with 5-bar battery gauges!
+        // Row of 5 parked electric scooters on unobstructed sidewalk (far-side kerb in HQ to clear terrace)
         let ev_cols = ["#F2F4F7", "#22B8BE", "#3B7AD9", "#E85D4A", "#2B2F36"];
         let bar_cols = ["#3DDC84", "#3DDC84", "#F2B544", "#3DDC84", "#FF5F5F"];
-        let row_z = grid.sb.z1 - 0.85;
+        let row_z = if grid.layout.is_hq() {
+            grid.sb.z1 + STREET_W + 1.05
+        } else {
+            grid.sb.z1 - 0.85
+        };
         for (i, col) in ev_cols.iter().enumerate() {
             let bx = grid.office_mid.x - 4.0 + i as f32 * 0.92;
             let base = Vec3::new(bx, PAVE_Y, row_z);
@@ -201,6 +211,16 @@ pub fn spawn_street_scenes_a(
                 );
             }
         }
+        let row_cx = grid.office_mid.x - 4.0 + 2.0 * 0.92;
+        commands.spawn((
+            WorldEntity,
+            BackdropEntity,
+            StreetEvScooterRow {
+                center: Vec3::new(row_cx, PAVE_Y, row_z),
+                half_extents: Vec2::new(2.05, 0.65),
+            },
+            Transform::from_translation(Vec3::new(row_cx, PAVE_Y, row_z)),
+        ));
         commands.spawn((WorldEntity, BackdropEntity, StreetEvStation, Transform::from_translation(f.origin)));
     }
 

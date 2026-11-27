@@ -72,6 +72,8 @@ pub struct SignalPole {
 
 #[derive(Debug, Clone)]
 pub struct CityGridData {
+    pub layout: OfficeLayout,
+    pub terrace_excl: [f32; 4],
     pub xs: Vec<f32>,
     pub zs: Vec<f32>,
     pub sb: SuperBlock,
@@ -84,6 +86,27 @@ pub struct CityGridData {
     pub solids: Vec<[f32; 5]>,
     pub pickle: Option<PickleSite>,
     pub signal_poles: Vec<SignalPole>,
+    pub lamp_positions: Vec<[f32; 2]>,
+}
+
+/// Exact terrace + railing clearance rectangle `[x0, x1, z0, z1]` matching `rooms.rs:627-631`
+/// so streetlamps, pedestrian tracks, bus stop, EV scooters, and CSGT never clip the terrace.
+pub fn terrace_exclusion(layout: OfficeLayout) -> [f32; 4] {
+    match layout {
+        OfficeLayout::Cozy => [-9.4, 12.6, -7.3, 11.2],
+        OfficeLayout::Pro => [-9.4, 16.0, -8.9, 12.1],
+        OfficeLayout::Hq => [-9.4, 16.0, -8.9, 29.1],
+    }
+}
+
+pub fn rect_contains_padded(r: [f32; 4], x: f32, z: f32, pad: f32) -> bool {
+    x > r[0] - pad && x < r[1] + pad && z > r[2] - pad && z < r[3] + pad
+}
+
+impl CityGridData {
+    pub fn in_terrace(&self, x: f32, z: f32, pad: f32) -> bool {
+        rect_contains_padded(self.terrace_excl, x, z, pad)
+    }
 }
 
 /// Marker components for day/night & animated city infrastructure updates.
@@ -269,6 +292,7 @@ pub fn spawn_city_grid(
         z1: (if spec.layout.is_hq() { 31.2 } else { 16.2 }) - half,
     };
     let office_mid = office_middle(spec.layout);
+    let terrace_excl = terrace_exclusion(spec.layout);
 
     // 3. Identify park blocks, paved park squares (plazas), and pickleball site
     let mut all_parks: Vec<[f32; 4]> = Vec::new();
@@ -857,7 +881,10 @@ pub fn spawn_city_grid(
                     (ix - half - 0.45, jz - half - 0.45, false, 0.0_f32, 1.0_f32),
                 ];
                 for (px, pz, axis_x, fx, fz) in corners {
-                    if !sb.contains(px, pz) && !on_court(px, pz, 0.6) {
+                    if !sb.contains(px, pz)
+                        && !rect_contains_padded(terrace_excl, px, pz, 0.0)
+                        && !on_court(px, pz, 0.6)
+                    {
                         signal_poles.push(SignalPole {
                             x: px,
                             z: pz,
@@ -874,10 +901,12 @@ pub fn spawn_city_grid(
     }
 
     // 8. Streetlamps every 9m on alternating sidewalks + night light pools (`city.js:264-273`)
+    let mut lamp_positions: Vec<[f32; 2]> = Vec::new();
     let mut add_lamp = |x: f32, z: f32, ax: f32, az: f32| {
-        if (x > -9.4 && x < 12.6 && z > -7.2 && z < 11.2) || on_court(x, z, 0.3) {
+        if rect_contains_padded(terrace_excl, x, z, 0.0) || on_court(x, z, 0.3) {
             return;
         }
+        lamp_positions.push([x, z]);
         lamp_geo.push_cyl(Vec3::new(x, GY + 1.9, z), 0.06, 0.08, 3.8, 6, "#2B2F36");
         lamp_geo.push_box(
             Vec3::new(x + ax * 0.45, GY + 3.75, z + az * 0.45),
@@ -952,7 +981,11 @@ pub fn spawn_city_grid(
                     }
                     let (px, pz) = if axis_z { (w, a) } else { (a, w) };
                     let (sx, sz) = if axis_z { (v, a) } else { (a, v) };
-                    if sb.contains(px, pz) || sb.contains(sx, sz) || on_court(px, pz, 0.8) {
+                    if sb.contains(px, pz)
+                        || sb.contains(sx, sz)
+                        || rect_contains_padded(terrace_excl, px, pz, 0.0)
+                        || on_court(px, pz, 0.8)
+                    {
                         continue;
                     }
                     poles.push((px, pz, a));
@@ -1220,6 +1253,8 @@ pub fn spawn_city_grid(
     let _ = (FRAC_PI_2, linear_rgba("#FFFFFF"));
 
     CityGridData {
+        layout: spec.layout,
+        terrace_excl,
         xs,
         zs,
         sb,
@@ -1232,6 +1267,7 @@ pub fn spawn_city_grid(
         solids,
         pickle,
         signal_poles,
+        lamp_positions,
     }
 }
 

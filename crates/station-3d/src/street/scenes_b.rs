@@ -90,7 +90,12 @@ pub fn spawn_street_scenes_b(
     let mut b = StreetMeshBuilder::default();
 
     // ==================== 1. CSGT TRAFFIC POLICE CHECKPOINT (`street-csgt.js`) ====================
-    let csgt_pos = Vec3::new(grid.sb.x1 - 1.2, PAVE_Y, grid.sb.z1 - 0.65);
+    let csgt_z = if grid.layout.is_hq() {
+        grid.sb.z1 + STREET_W + 1.25
+    } else {
+        grid.sb.z1 - 0.65
+    };
+    let csgt_pos = Vec3::new(grid.sb.x1 - 1.2, PAVE_Y, csgt_z);
     for dx in [-1.8_f32, -0.6, 0.6, 1.8] {
         // Orange traffic cones along the kerb
         b.push_cyl(csgt_pos + Vec3::new(dx, 0.22, 0.35), 0.04, 0.16, 0.44, 8, "#F26419");

@@ -1041,4 +1041,201 @@ mod tests {
             assert!((mats.get(h).unwrap().emissive.red - expected_day_bulb).abs() < 1e-3);
         }
     }
+
+    #[test]
+    fn zero_terrace_overlap_and_exact_signal_indices_across_cozy_pro_and_hq() {
+        use crate::layout::OfficeLayout;
+        use std::path::PathBuf;
+
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+        let aabb_overlaps = |r: [f32; 4], cx: f32, cz: f32, hx: f32, hz: f32| -> bool {
+            (cx + hx) > r[0] && (cx - hx) < r[1] && (cz + hz) > r[2] && (cz - hz) < r[3]
+        };
+
+        for layout in [OfficeLayout::Cozy, OfficeLayout::Pro, OfficeLayout::Hq] {
+            let spec = LayoutSpec::for_layout(layout);
+            let excl = city_grid::terrace_exclusion(layout);
+            let mut world = World::new();
+            world.insert_resource(Assets::<Mesh>::default());
+            world.insert_resource(Assets::<StandardMaterial>::default());
+            world.insert_resource(Assets::<Image>::default());
+            world.insert_resource(BackdropAssets::default());
+
+            let grid = world.resource_scope(|w, mut meshes: Mut<Assets<Mesh>>| {
+                w.resource_scope(|w, mut mats: Mut<Assets<StandardMaterial>>| {
+                    w.resource_scope(|w, mut imgs: Mut<Assets<Image>>| {
+                        w.resource_scope(|w, mut ba: Mut<BackdropAssets>| {
+                            let mut cmds = w.commands();
+                            let grid = city_grid::spawn_city_grid(
+                                &mut cmds,
+                                &mut meshes,
+                                &mut mats,
+                                &mut imgs,
+                                &mut ba,
+                                &spec,
+                                false,
+                            );
+                            let signs_mat = ba.textured(
+                                &mut imgs,
+                                &mut mats,
+                                draw_street_signs_atlas(&mut fonts),
+                                false,
+                                0.45,
+                            );
+                            traffic::spawn_street_traffic(
+                                &mut cmds,
+                                &mut meshes,
+                                &mut mats,
+                                &mut ba,
+                                &grid,
+                                signs_mat.clone(),
+                                34.0,
+                            );
+                            let mut finder = SpotFinder::new(
+                                grid.office_mid,
+                                grid.parks.clone(),
+                                grid.plazas.clone(),
+                                grid.trees.clone(),
+                            );
+                            scenes_a::spawn_street_scenes_a(
+                                &mut cmds,
+                                &mut meshes,
+                                &mut mats,
+                                &mut imgs,
+                                &mut ba,
+                                &mut fonts,
+                                &grid,
+                                &mut finder,
+                                false,
+                            );
+                            scenes_b::spawn_street_scenes_b(
+                                &mut cmds,
+                                &mut meshes,
+                                &mut mats,
+                                &mut ba,
+                                &grid,
+                                &mut finder,
+                                signs_mat,
+                                false,
+                            );
+                            grid
+                        })
+                    })
+                })
+            });
+            world.flush();
+
+            // 1. Streetlamps & signal poles outside terrace
+            assert!(!grid.lamp_positions.is_empty());
+            for &[lx, lz] in &grid.lamp_positions {
+                assert!(
+                    !city_grid::rect_contains_padded(excl, lx, lz, 0.0),
+                    "{layout:?}: streetlamp at ({lx}, {lz}) overlaps terrace {excl:?}"
+                );
+            }
+            for sp in &grid.signal_poles {
+                assert!(
+                    !city_grid::rect_contains_padded(excl, sp.x, sp.z, 0.0),
+                    "{layout:?}: signal pole at ({}, {}) overlaps terrace {excl:?}",
+                    sp.x,
+                    sp.z
+                );
+            }
+
+            // 2. Pedestrian tracks outside terrace along entire walk segment
+            let peds: Vec<_> = world.query::<&traffic::StreetPedestrian>().iter(&world).collect();
+            assert!(!peds.is_empty());
+            for p in peds {
+                let (cx, cz, hx, hz) = if p.axis_x {
+                    ((p.min_pos + p.max_pos) * 0.5, p.side_coord, (p.max_pos - p.min_pos) * 0.5, 0.15)
+                } else {
+                    (p.side_coord, (p.min_pos + p.max_pos) * 0.5, 0.15, (p.max_pos - p.min_pos) * 0.5)
+                };
+                assert!(
+                    !aabb_overlaps(excl, cx, cz, hx, hz),
+                    "{layout:?}: pedestrian track (axis_x={}, side={}, range={}..{}) overlaps terrace {excl:?}",
+                    p.axis_x,
+                    p.side_coord,
+                    p.min_pos,
+                    p.max_pos
+                );
+            }
+
+            // 3. Bus stop shelter outside terrace
+            let stops: Vec<_> = world.query::<&traffic::BusStopShelter>().iter(&world).collect();
+            assert_eq!(stops.len(), 1);
+            for s in stops {
+                assert!(
+                    !aabb_overlaps(excl, s.center.x, s.center.z, s.half_extents.x, s.half_extents.y),
+                    "{layout:?}: bus stop {:?} overlaps terrace {excl:?}",
+                    s.center
+                );
+            }
+
+            // 4. EV scooter row outside terrace
+            let ev_rows: Vec<_> = world.query::<&scenes_a::StreetEvScooterRow>().iter(&world).collect();
+            assert_eq!(ev_rows.len(), 1);
+            for r in ev_rows {
+                assert!(
+                    !aabb_overlaps(excl, r.center.x, r.center.z, r.half_extents.x, r.half_extents.y),
+                    "{layout:?}: EV scooter row {:?} overlaps terrace {excl:?}",
+                    r.center
+                );
+            }
+
+            // 5. CSGT checkpoint outside terrace
+            let csgt_list: Vec<_> = world
+                .query::<(&scenes_b::StreetCultureScene, &Transform)>()
+                .iter(&world)
+                .filter(|(s, _)| **s == scenes_b::StreetCultureScene::CsgtCheckpoint)
+                .map(|(_, tf)| tf.translation)
+                .collect();
+            assert_eq!(csgt_list.len(), 1);
+            for pos in csgt_list {
+                assert!(
+                    !aabb_overlaps(excl, pos.x, pos.z, 1.8, 0.85),
+                    "{layout:?}: CSGT checkpoint {pos:?} overlaps terrace {excl:?}"
+                );
+            }
+
+            // 6. Important #6: every CityVehicle's (sig_i, sig_j) resolves its true stop_cross intersection
+            let vehicles: Vec<_> = world.query::<&traffic::CityVehicle>().iter(&world).collect();
+            assert!(!vehicles.is_empty());
+            for v in vehicles {
+                assert!(v.sig_i < grid.xs.len() && v.sig_j < grid.zs.len());
+                if v.axis_x {
+                    assert!(
+                        (grid.xs[v.sig_i] - v.stop_cross).abs() < 0.01,
+                        "{layout:?}: X-vehicle sig_i={} ({}) != stop_cross {}",
+                        v.sig_i,
+                        grid.xs[v.sig_i],
+                        v.stop_cross
+                    );
+                    assert!(
+                        (grid.zs[v.sig_j] - v.lane_coord).abs() < 2.2,
+                        "{layout:?}: X-vehicle sig_j={} ({}) doesn't match lane {}",
+                        v.sig_j,
+                        grid.zs[v.sig_j],
+                        v.lane_coord
+                    );
+                } else {
+                    assert!(
+                        (grid.zs[v.sig_j] - v.stop_cross).abs() < 0.01,
+                        "{layout:?}: Z-vehicle sig_j={} ({}) != stop_cross {}",
+                        v.sig_j,
+                        grid.zs[v.sig_j],
+                        v.stop_cross
+                    );
+                    assert!(
+                        (grid.xs[v.sig_i] - v.lane_coord).abs() < 2.2,
+                        "{layout:?}: Z-vehicle sig_i={} ({}) doesn't match lane {}",
+                        v.sig_i,
+                        grid.xs[v.sig_i],
+                        v.lane_coord
+                    );
+                }
+            }
+        }
+    }
 }

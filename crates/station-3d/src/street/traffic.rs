@@ -160,6 +160,12 @@ pub struct StreetPedestrian {
     pub phase: f32,
 }
 
+#[derive(Component)]
+pub struct BusStopShelter {
+    pub center: Vec3,
+    pub half_extents: Vec2,
+}
+
 pub struct VehicleMeshPair {
     pub paint: Handle<Mesh>,
     pub rest: Handle<Mesh>,
@@ -575,19 +581,30 @@ pub fn spawn_street_traffic(
 
     let shade_offset = if temp_c >= 33.0 { 3.2 } else { 0.0 };
 
-    // Bus stop shelter along the front avenue kerb (clear of office terrace railing)
+    // Bus stop shelter along the front avenue kerb (placed on far-side kerb in HQ to clear terrace)
     let bus_stop_x = grid.office_mid.x + 2.5;
-    let kerb_z = front_z - STREET_W * 0.5;
+    let bus_on_far_kerb = grid.layout.is_hq();
+    let kerb_z = if bus_on_far_kerb {
+        front_z + STREET_W * 0.5
+    } else {
+        front_z - STREET_W * 0.5
+    };
+    let s_dir = if bus_on_far_kerb { 1.0_f32 } else { -1.0_f32 };
     let mut stop_b = StreetMeshBuilder::default();
-    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 2.35, kerb_z - 0.55), Vec3::new(3.0, 0.08, 0.92), "#1F4E8C");
+    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 2.35, kerb_z + s_dir * 0.55), Vec3::new(3.0, 0.08, 0.92), "#1F4E8C");
     for dx in [-1.35_f32, 1.35] {
-        stop_b.push_box(Vec3::new(bus_stop_x + dx, PAVE_Y + 1.15, kerb_z - 0.85), Vec3::new(0.08, 2.3, 0.08), "#5E6670");
+        stop_b.push_box(Vec3::new(bus_stop_x + dx, PAVE_Y + 1.15, kerb_z + s_dir * 0.85), Vec3::new(0.08, 2.3, 0.08), "#5E6670");
     }
-    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 0.44, kerb_z - 0.72), Vec3::new(2.1, 0.06, 0.34), "#C9CED6");
-    stop_b.push_cyl(Vec3::new(bus_stop_x + 1.85, PAVE_Y + 1.15, kerb_z - 0.35), 0.03, 0.03, 2.3, 8, "#2B2F36");
-    stop_b.push_box(Vec3::new(bus_stop_x + 1.85, PAVE_Y + 2.15, kerb_z - 0.35), Vec3::new(0.45, 0.55, 0.06), "#1E6FD1");
+    stop_b.push_box(Vec3::new(bus_stop_x, PAVE_Y + 0.44, kerb_z + s_dir * 0.72), Vec3::new(2.1, 0.06, 0.34), "#C9CED6");
+    stop_b.push_cyl(Vec3::new(bus_stop_x + 1.85, PAVE_Y + 1.15, kerb_z + s_dir * 0.35), 0.03, 0.03, 2.3, 8, "#2B2F36");
+    stop_b.push_box(Vec3::new(bus_stop_x + 1.85, PAVE_Y + 2.15, kerb_z + s_dir * 0.35), Vec3::new(0.45, 0.55, 0.06), "#1E6FD1");
     let stop_mat = ba.mat(materials, "#FFFFFF", 0.55, 0.2);
-    stop_b.spawn(commands, meshes, ba, stop_mat);
+    if let Some(stop_e) = stop_b.spawn(commands, meshes, ba, stop_mat) {
+        commands.entity(stop_e).insert(BusStopShelter {
+            center: Vec3::new(bus_stop_x, PAVE_Y, kerb_z + s_dir * 0.55),
+            half_extents: Vec2::new(2.0, 0.46),
+        });
+    }
 
     // Siren beacon shared mesh + red/blue emissive materials
     let beacon_mesh = ba.add_mesh(meshes, Mesh::from(Sphere::new(0.11)));
@@ -645,6 +662,24 @@ pub fn spawn_street_traffic(
             Vec3::new(lane_coord, GY, init_pos)
         };
         let stop_cross = if axis_x { right_x } else { front_z };
+        let nearest_idx = |coords: &[f32], target: f32| -> usize {
+            coords
+                .iter()
+                .enumerate()
+                .min_by(|a, b| {
+                    (*a.1 - target)
+                        .abs()
+                        .partial_cmp(&(*b.1 - target).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        let (sig_i, sig_j) = if axis_x {
+            (nearest_idx(&grid.xs, stop_cross), nearest_idx(&grid.zs, lane_coord))
+        } else {
+            (nearest_idx(&grid.xs, lane_coord), nearest_idx(&grid.zs, stop_cross))
+        };
 
         let root = commands
             .spawn((
@@ -659,8 +694,8 @@ pub fn spawn_street_traffic(
                     max_pos: 38.0,
                     speed,
                     stop_cross,
-                    sig_i: idx % 4,
-                    sig_j: (idx / 2) % 4,
+                    sig_i,
+                    sig_j,
                     is_scooter,
                     is_siren,
                     is_bus,
@@ -782,14 +817,26 @@ pub fn spawn_street_traffic(
         .collect();
     let ped_mat = ba.mat(materials, "#FFFFFF", 0.78, 0.0);
 
+    let near_front_side = front_z - STREET_W * 0.5 - 0.85;
+    let front_track_b = if near_front_side <= grid.terrace_excl[3] + 0.15 {
+        front_z + STREET_W * 0.5 + 1.35
+    } else {
+        near_front_side
+    };
+    let near_right_side = right_x - STREET_W * 0.5 - 0.85;
+    let right_track_b = if near_right_side <= grid.terrace_excl[1] + 0.15 {
+        right_x + STREET_W * 0.5 + 1.35
+    } else {
+        near_right_side
+    };
     let ped_tracks = [
         (true, 1.0_f32, front_z + STREET_W * 0.5 + 0.85, -18.0_f32, 22.0_f32),
-        (true, -1.0, front_z - STREET_W * 0.5 - 0.85, -14.0, 20.0),
+        (true, -1.0, front_track_b, -14.0, 20.0),
         (false, 1.0, right_x + STREET_W * 0.5 + 0.85, -14.0, 22.0),
-        (false, -1.0, right_x - STREET_W * 0.5 - 0.85, -14.0, 20.0),
-        // Zebra crossing pedestrians across front & right streets
-        (false, 1.0, right_x - STREET_W * 0.5 - 1.3, front_z - 3.6, front_z + 3.6),
-        (true, 1.0, front_z - STREET_W * 0.5 - 1.3, right_x - 3.6, right_x + 3.6),
+        (false, -1.0, right_track_b, -14.0, 20.0),
+        // Zebra crossing pedestrians across front & right streets (far arms clear of Pro/HQ terrace)
+        (false, 1.0, right_x + STREET_W * 0.5 + 1.3, front_z - 3.6, front_z + 3.6),
+        (true, 1.0, front_z + STREET_W * 0.5 + 1.3, right_x - 3.6, right_x + 3.6),
     ];
     for (idx, &(axis_x, dir, side_coord, min_p, max_p)) in ped_tracks.iter().enumerate() {
         for k in 0..2 {
