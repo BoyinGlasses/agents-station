@@ -2633,21 +2633,39 @@ pub async fn post_lan(
     Ok(Json(json!({ "ok": true, "on": on, "pin": state.auth.current_pin() })))
 }
 
-pub async fn post_rc(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    OptionalPeer(peer): OptionalPeer,
-    ViaTunnel(via_tunnel): ViaTunnel,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    require_local_post(peer, via_tunnel, &headers)?;
-    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
-    let settings_path = state.claude_dir.join("settings.json");
-    let mut doc = std::fs::read_to_string(&settings_path)
+fn rc_at_startup(claude_dir: &std::path::Path) -> bool {
+    let settings_path = claude_dir.join("settings.json");
+    let real = std::fs::canonicalize(&settings_path).unwrap_or(settings_path);
+    std::fs::read_to_string(&real)
         .ok()
         .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
+        .and_then(|v| v.get("remoteControlAtStartup").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn set_rc_at_startup(claude_dir: &std::path::Path, on: bool) -> bool {
+    let settings_path = claude_dir.join("settings.json");
+    let (real, raw) = match std::fs::canonicalize(&settings_path) {
+        Ok(canonical) => match std::fs::read_to_string(&canonical) {
+            Ok(text) => (canonical, text),
+            Err(_) => return false,
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            (settings_path, String::new())
+        }
+        Err(_) => return false,
+    };
+
+    let mut doc = if raw.trim().is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_str::<Value>(&raw) {
+            Ok(v) if v.is_object() => v,
+            // Never overwrite an existing file with comments (JSONC) or invalid syntax.
+            _ => return false,
+        }
+    };
+
     if let Some(obj) = doc.as_object_mut() {
         if on {
             obj.insert("remoteControlAtStartup".to_owned(), Value::Bool(true));
@@ -2655,16 +2673,41 @@ pub async fn post_rc(
             obj.remove("remoteControlAtStartup");
         }
     }
-    let wrote = serde_json::to_vec_pretty(&doc)
-        .ok()
-        .and_then(|bytes| crate::atomic::write_bytes_atomic(&settings_path, &bytes).ok())
-        .is_some();
-    let _ = state
-        .prefs
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .set("rcAtStartup", if on { Some(Value::Bool(true)) } else { None });
-    Ok(Json(json!({ "ok": wrote, "rc": on })))
+
+    let Ok(mut bytes) = serde_json::to_vec_pretty(&doc) else {
+        return false;
+    };
+    bytes.push(b'\n');
+    crate::atomic::write_bytes_atomic(&real, &bytes).is_ok()
+}
+
+pub async fn post_rc(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    OptionalPeer(peer): OptionalPeer,
+    ViaTunnel(via_tunnel): ViaTunnel,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), StatusCode> {
+    require_local_post(peer, via_tunnel, &headers)?;
+    let on = body.get("on").and_then(Value::as_bool).unwrap_or(false);
+    let wrote = set_rc_at_startup(&state.claude_dir, on);
+    let actual_rc = rc_at_startup(&state.claude_dir);
+    if wrote {
+        let _ = state
+            .prefs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set(
+                "rcAtStartup",
+                if actual_rc { Some(Value::Bool(true)) } else { None },
+            );
+        Ok((StatusCode::OK, Json(json!({ "ok": true, "rc": actual_rc }))))
+    } else {
+        Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "rc": actual_rc })),
+        ))
+    }
 }
 
 pub async fn post_open(
@@ -2870,10 +2913,7 @@ fn tunnel_status_json(state: &AppState) -> Value {
             .get("phoneTasks")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let rc = prefs
-            .get("rcAtStartup")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let rc = rc_at_startup(&state.claude_dir);
         let lan_on = prefs
             .get("lan")
             .and_then(Value::as_bool)
@@ -5464,5 +5504,99 @@ mod tests {
         assert!(tun_body.get("lanOn").is_some(), "/api/tunnel missing `lanOn`");
         assert!(tun_body.get("phoneApprove").is_some(), "/api/tunnel missing `phoneApprove`");
         assert!(tun_body.get("lanIp").is_some(), "/api/tunnel missing `lanIp`");
+    }
+
+    #[tokio::test]
+    async fn post_rc_aborts_on_jsonc_without_overwriting_and_preserves_valid_settings() {
+        use axum::body::to_bytes;
+        use serde_json::{Value, json};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let claude_dir = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        // 1. Existing JSONC file with comments must NEVER be overwritten or diverge prefs.
+        let jsonc = "{\n  // user comment\n  \"model\": \"opus\",\n  \"hooks\": {\"Stop\": []}\n}\n";
+        let settings_path = claude_dir.join("settings.json");
+        std::fs::write(&settings_path, jsonc).unwrap();
+
+        let state = Arc::new(
+            AppState::new_with_claude_dir(data_dir, claude_dir.clone(), None).unwrap(),
+        );
+        let app = build_router(state.clone());
+
+        let fail_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/rc")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "on": true }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let fail_body: Value =
+            serde_json::from_slice(&to_bytes(fail_resp.into_body(), 16 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(fail_body["ok"], false);
+        assert_eq!(fail_body["rc"], false);
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            jsonc,
+            "JSONC settings.json must remain byte-for-byte intact"
+        );
+        assert!(
+            state.prefs.lock().unwrap().get("rcAtStartup").is_none(),
+            "prefs must not mutate when settings.json write aborts"
+        );
+
+        // 2. Valid JSON preserves hooks/env and toggles remoteControlAtStartup cleanly.
+        std::fs::write(
+            &settings_path,
+            r#"{"model":"opus","hooks":{"Stop":[]},"env":{"FOO":"bar"}}"#,
+        )
+        .unwrap();
+        let ok_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/rc")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "on": true }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok_resp.status(), StatusCode::OK);
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert_eq!(saved["remoteControlAtStartup"], true);
+        assert_eq!(saved["model"], "opus");
+        assert_eq!(saved["env"]["FOO"], "bar");
+
+        let off_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/rc")
+                    .header("host", "127.0.0.1:4310")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "on": false }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(off_resp.status(), StatusCode::OK);
+        let saved_off: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert!(saved_off.get("remoteControlAtStartup").is_none());
+        assert_eq!(saved_off["model"], "opus");
     }
 }
