@@ -183,6 +183,12 @@ fn register_office_runtime(
                 life_systems::update_seasons_and_weather_system,
                 life_systems::update_workflow_life_system,
                 life_systems::update_nap_system,
+                street::animate_city_signals_and_night_system,
+                street::traffic::animate_street_traffic_system,
+                street::shops_walkin::animate_walkin_shops_system,
+                street::eat_com::animate_eat_com_steam_system,
+                street::scenes_a::animate_street_scenes_a_system,
+                street::scenes_b::animate_street_scenes_b_system,
             ),
         )
         .add_systems(

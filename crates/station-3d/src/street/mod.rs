@@ -6,10 +6,14 @@ pub mod shops_walkin;
 pub mod traffic;
 
 use crate::backdrops::{BackdropAssets, BackdropEntity};
-use crate::palette::{WorldEntity, parse_hex_rgb};
+use crate::layout::LayoutSpec;
+use crate::lights::LightingState;
+use crate::palette::{WorldEntity, parse_hex_rgb, srgb_hex};
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
+use station_canvas2d::street_surfaces::draw_street_signs_atlas;
+use station_canvas2d::{BrandRegistry, FontEngine};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 /// Ground asphalt elevation matching Golden Oracle `terrace.js` (`GY = -0.62`).
@@ -601,6 +605,173 @@ impl SpotFinder {
             Some(frame)
         } else {
             None
+        }
+    }
+}
+
+/// Spawns the complete 1:1 City exterior backdrop: multi-block supergrid, stepped skyscrapers,
+/// rooftop clutter, streetlamps & night pools, utility wires, countdown traffic signals, all 10
+/// walk-in 3D Vietnamese shops, *Quán cơm bình dân* / Friday *Bún đậu*, all 13+ `cars.json` +
+/// scooter traffic & pedestrians, UV-cropped ATM / V-Green / Photobooth / Pickleball, and all 8
+/// cultural street life scenes. Every asset registers inside `BackdropAssets` for 0-leak purge.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_city_backdrop(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    ba: &mut BackdropAssets,
+    brands: &mut BrandRegistry,
+    fonts: &mut FontEngine,
+    spec: &LayoutSpec,
+    city: &str,
+    night: bool,
+    temp_c: f32,
+    is_friday: bool,
+) {
+    let grid = city_grid::spawn_city_grid(commands, meshes, materials, images, ba, spec, night);
+    let signs_mat = ba.textured(images, materials, draw_street_signs_atlas(fonts), false, 0.45);
+    shops_walkin::spawn_walkin_shops(
+        commands,
+        meshes,
+        materials,
+        images,
+        ba,
+        brands,
+        fonts,
+        &grid.shop_fronts,
+        city,
+        night,
+    );
+    traffic::spawn_street_traffic(commands, meshes, materials, ba, &grid, signs_mat.clone(), temp_c);
+    let mut finder = SpotFinder::new(
+        grid.office_mid,
+        grid.parks.clone(),
+        grid.plazas.clone(),
+        grid.trees.clone(),
+    );
+    eat_com::spawn_eat_com(commands, meshes, materials, images, ba, fonts, &mut finder, is_friday);
+    scenes_a::spawn_street_scenes_a(
+        commands,
+        meshes,
+        materials,
+        images,
+        ba,
+        fonts,
+        &grid,
+        &mut finder,
+        night,
+    );
+    scenes_b::spawn_street_scenes_b(
+        commands,
+        meshes,
+        materials,
+        ba,
+        &grid,
+        &mut finder,
+        signs_mat,
+        night,
+    );
+}
+
+/// Zero-allocation Update system driving live traffic signals, countdown LED color state,
+/// aviation rooftop beacons, and city day/night material lighting transitions.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn animate_city_signals_and_night_system(
+    time: Res<Time>,
+    lighting: Option<Res<LightingState>>,
+    mut materials: Option<ResMut<Assets<StandardMaterial>>>,
+    mut lamps: Query<(&city_grid::TrafficSignalLamp, &mut Visibility), (Without<city_grid::RooftopBeacon>, Without<city_grid::CityNightLampPool>)>,
+    mut countdowns: Query<(&mut city_grid::TrafficCountdownDisplay, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut beacons: Query<(&city_grid::RooftopBeacon, &mut Visibility), (Without<city_grid::TrafficSignalLamp>, Without<city_grid::CityNightLampPool>)>,
+    mut pools: Query<&mut Visibility, (With<city_grid::CityNightLampPool>, Without<city_grid::TrafficSignalLamp>, Without<city_grid::RooftopBeacon>)>,
+    asphalt_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightAsphalt>>,
+    facade_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightFacade>>,
+    slab_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightSidewalk>>,
+    bulb_q: Query<&MeshMaterial3d<StandardMaterial>, With<city_grid::CityNightLampBulb>>,
+    mut last_night: Local<Option<bool>>,
+) {
+    let t = time.elapsed_secs();
+
+    for (lamp, mut vis) in &mut lamps {
+        let cur = city_grid::signal_color_of(city_grid::signal_phase(lamp.i, lamp.j, t, lamp.axis_x));
+        *vis = if cur == lamp.color {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    for (mut cd, mut mat_h) in &mut countdowns {
+        let cur = city_grid::signal_color_of(city_grid::signal_phase(cd.i, cd.j, t, cd.axis_x));
+        let bucket = match cur {
+            station_canvas2d::street_surfaces::SignalColor::Green => 0,
+            station_canvas2d::street_surfaces::SignalColor::Amber => 1,
+            station_canvas2d::street_surfaces::SignalColor::Red => 2,
+        };
+        if cd.last_bucket != bucket {
+            cd.last_bucket = bucket;
+            mat_h.0 = match bucket {
+                0 => cd.green_mat.clone(),
+                1 => cd.amber_mat.clone(),
+                _ => cd.red_mat.clone(),
+            };
+        }
+    }
+
+    for (b, mut vis) in &mut beacons {
+        let on = (t + b.phase).rem_euclid(1.6) < 0.28;
+        *vis = if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+
+    if let Some(l) = lighting {
+        let night = l.is_night();
+        if *last_night != Some(night) {
+            *last_night = Some(night);
+            for mut vis in &mut pools {
+                *vis = if night {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+            }
+            if let Some(mats) = materials.as_deref_mut() {
+                for mh in &asphalt_q {
+                    if let Some(m) = mats.get_mut(&mh.0) {
+                        m.base_color = srgb_hex(if night { "#1B1F27" } else { "#5B616A" });
+                    }
+                }
+                let em = if night { 0.9 } else { 0.0 };
+                for mh in &facade_q {
+                    if let Some(m) = mats.get_mut(&mh.0) {
+                        m.emissive = LinearRgba::new(em, em, em, 1.0);
+                    }
+                }
+                for mh in &slab_q {
+                    if let Some(m) = mats.get_mut(&mh.0) {
+                        m.base_color = if night {
+                            Color::srgb(0.35, 0.35, 0.38)
+                        } else {
+                            Color::WHITE
+                        };
+                    }
+                }
+                for mh in &bulb_q {
+                    if let Some(m) = mats.get_mut(&mh.0) {
+                        m.base_color = srgb_hex(if night { "#FFE2A6" } else { "#5A5E66" });
+                        m.emissive = if night {
+                            LinearRgba::new(2.2, 1.65, 0.9, 1.0)
+                        } else {
+                            LinearRgba::BLACK
+                        };
+                        m.unlit = night;
+                    }
+                }
+            }
         }
     }
 }

@@ -5,13 +5,9 @@ use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerD
 use bevy::math::Affine2;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
-use station_canvas2d::street_surfaces::{
-    SignalColor, draw_atm_atlas, draw_ev_cabinet_atlas, draw_photo_studio_atlas,
-    draw_pickleball_atlas, draw_shop_cell, draw_traffic_countdown,
-};
+use chrono::Datelike;
 use station_canvas2d::{BrandRegistry, FontEngine, RgbaSurface};
 use std::collections::HashMap;
-use std::f32::consts::PI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Resource, Default)]
 pub enum BackdropKind {
@@ -417,27 +413,6 @@ fn b_sphere(
         .id()
 }
 
-fn b_quad(
-    commands: &mut Commands,
-    pal: &WorldPalette,
-    mat: Handle<StandardMaterial>,
-    pos: Vec3,
-    size: Vec2,
-    rot: Quat,
-) -> Entity {
-    commands
-        .spawn((
-            WorldEntity,
-            BackdropEntity,
-            Mesh3d(pal.unit_plane.clone()),
-            MeshMaterial3d(mat),
-            Transform::from_translation(pos)
-                .with_rotation(rot)
-                .with_scale(Vec3::new(size.x, size.y, 1.0)),
-        ))
-        .id()
-}
-
 pub fn unload_backdrop(
     commands: &mut Commands,
     q: &Query<Entity, With<BackdropEntity>>,
@@ -465,138 +440,26 @@ pub fn spawn_backdrop(
     spec: &LayoutSpec,
     kind: BackdropKind,
 ) {
-    let _ = meshes;
     const GY: f32 = -0.62;
     backdrop_assets.active = Some(kind);
 
     match kind {
         BackdropKind::City => {
-            // Ground asphalt & pavements around the office terrace
-            let road_m = backdrop_assets.mat(materials, "#343942", 0.9, 0.0);
-            let pave_m = backdrop_assets.mat(materials, "#B6B3AC", 0.85, 0.0);
-            let line_m = backdrop_assets.mat(materials, "#F0EFEA", 0.7, 0.0);
-            let grass_m = backdrop_assets.mat(materials, "#5F9454", 0.92, 0.0);
-
-            b_box(commands, pal, road_m, Vec3::new(4.0, GY - 0.1, 4.0), Vec3::new(110.0, 0.2, 110.0));
-
-            let front_z = spec.reach.z1 + 4.5;
-            let right_x = spec.reach.x1 + 4.8;
-
-            // Road lane dashes along front avenue and right avenue
-            for i in -8..=10 {
-                b_box(commands, pal, line_m.clone(), Vec3::new(i as f32 * 3.8, GY + 0.02, front_z - 1.2), Vec3::new(1.8, 0.02, 0.16));
-                b_box(commands, pal, line_m.clone(), Vec3::new(right_x - 1.2, GY + 0.02, -14.0 + (i + 8) as f32 * 3.8), Vec3::new(0.16, 0.02, 1.8));
-            }
-
-            // Pavements across the front & right streets
-            b_box(commands, pal, pave_m.clone(), Vec3::new(3.0, GY + 0.07, front_z + 3.2), Vec3::new(60.0, 0.14, 4.2));
-            b_box(commands, pal, pave_m, Vec3::new(right_x + 3.2, GY + 0.07, 4.0), Vec3::new(4.2, 0.14, 60.0));
-
-            // Vietnamese shophouses with real brand SVG/canvas2d facades along the right & front avenues
-            let shop_wall_cols = ["#E9DEC9", "#D7E2E8", "#EFE4D6", "#DFD7E8", "#E6D8CC", "#D8E4D8"];
-            let chains_front = ["gs25", "circlek", "highlands", "pho", "mixue"];
-            for (idx, chain) in chains_front.iter().enumerate() {
-                let sx = -9.5 + idx as f32 * 6.8;
-                let sz = front_z + 6.4;
-                let h = 6.2 + (idx % 3) as f32 * 2.1;
-                let wm = backdrop_assets.mat(materials, shop_wall_cols[idx % shop_wall_cols.len()], 0.82, 0.0);
-                b_box(commands, pal, wm, Vec3::new(sx, GY + h * 0.5, sz), Vec3::new(6.2, h, 4.6));
-
-                let shop_mat = backdrop_assets.textured(
-                    images,
-                    materials,
-                    draw_shop_cell(chain, brands, fonts),
-                    false,
-                    0.45,
-                );
-                b_quad(commands, pal, shop_mat, Vec3::new(sx, GY + 1.85, sz - 2.34), Vec2::new(5.8, 2.9), Quat::from_rotation_y(PI));
-            }
-
-            let chains_right = ["bhx", "tgdd", "longchau", "cong"];
-            for (idx, chain) in chains_right.iter().enumerate() {
-                let sx = right_x + 6.4;
-                let sz = -6.0 + idx as f32 * 6.8;
-                let h = 6.6 + ((idx + 1) % 3) as f32 * 2.0;
-                let wm = backdrop_assets.mat(materials, shop_wall_cols[(idx + 2) % shop_wall_cols.len()], 0.82, 0.0);
-                b_box(commands, pal, wm, Vec3::new(sx, GY + h * 0.5, sz), Vec3::new(4.6, h, 6.2));
-
-                let shop_mat = backdrop_assets.textured(
-                    images,
-                    materials,
-                    draw_shop_cell(chain, brands, fonts),
-                    false,
-                    0.45,
-                );
-                b_quad(commands, pal, shop_mat, Vec3::new(sx - 2.34, GY + 1.85, sz), Vec2::new(5.8, 2.9), Quat::from_rotation_y(-PI * 0.5));
-            }
-
-            // Corner Park with Vietcombank ATM, V-Green EV swap cabinet, Korean Photo Studio & Pickleball court!
-            let park_x = right_x + 7.2;
-            let park_z = front_z + 7.2;
-            b_box(commands, pal, grass_m, Vec3::new(park_x, GY + 0.09, park_z), Vec3::new(15.0, 0.16, 14.0));
-
-            // Vietcombank ATM booth
-            let atm_m = backdrop_assets.textured(images, materials, draw_atm_atlas(fonts), true, 0.5);
-            let vcb_g = backdrop_assets.mat(materials, "#009A49", 0.5, 0.0);
-            b_box(commands, pal, vcb_g, Vec3::new(park_x - 5.2, GY + 1.35, park_z - 4.8), Vec3::new(1.5, 2.5, 1.3));
-            b_quad(commands, pal, atm_m, Vec3::new(park_x - 5.2, GY + 1.35, park_z - 5.47), Vec2::new(1.42, 1.42), Quat::from_rotation_y(PI));
-
-            // V-Green EV battery-swap cabinet
-            let ev_m = backdrop_assets.textured(images, materials, draw_ev_cabinet_atlas(fonts), true, 0.5);
-            let ev_body = backdrop_assets.mat(materials, "#F4F6F5", 0.45, 0.1);
-            b_box(commands, pal, ev_body, Vec3::new(park_x - 2.4, GY + 1.15, park_z - 4.8), Vec3::new(1.8, 2.1, 0.7));
-            b_quad(commands, pal, ev_m, Vec3::new(park_x - 2.4, GY + 1.15, park_z - 5.17), Vec2::new(1.72, 1.9), Quat::from_rotation_y(PI));
-
-            // Korean Photo Studio pink container
-            let photo_m = backdrop_assets.textured(images, materials, draw_photo_studio_atlas(fonts), true, 0.5);
-            let pink_m = backdrop_assets.mat(materials, "#F5B8CC", 0.65, 0.0);
-            b_box(commands, pal, pink_m, Vec3::new(park_x + 2.8, GY + 1.45, park_z - 4.4), Vec3::new(4.6, 2.7, 2.3));
-            b_quad(commands, pal, photo_m, Vec3::new(park_x + 2.8, GY + 1.55, park_z - 5.58), Vec2::new(4.2, 2.1), Quat::from_rotation_y(PI));
-
-            // Pickleball court (blue inner court on green surround + white net + gate board)
-            let court_blue = backdrop_assets.mat(materials, "#2D5E9E", 0.85, 0.0);
-            let net_white = backdrop_assets.mat(materials, "#F2F4F7", 0.6, 0.0);
-            b_box(commands, pal, court_blue, Vec3::new(park_x + 0.5, GY + 0.2, park_z + 2.2), Vec3::new(9.5, 0.04, 5.2));
-            b_box(commands, pal, net_white, Vec3::new(park_x + 0.5, GY + 0.65, park_z + 2.2), Vec3::new(0.06, 0.88, 5.4));
-            let pb_m = backdrop_assets.textured(images, materials, draw_pickleball_atlas(fonts), true, 0.5);
-            b_quad(commands, pal, pb_m, Vec3::new(park_x - 4.2, GY + 1.3, park_z + 2.2), Vec2::new(2.2, 1.1), Quat::from_rotation_y(-PI * 0.5));
-
-            // Traffic light pole + 7-segment LED countdown
-            let pole_m = backdrop_assets.mat(materials, "#2B2F36", 0.45, 0.5);
-            let sig_m = backdrop_assets.textured(
-                images,
+            let is_friday = chrono::Local::now().weekday() == chrono::Weekday::Fri;
+            crate::street::spawn_city_backdrop(
+                commands,
+                meshes,
                 materials,
-                draw_traffic_countdown(16, SignalColor::Green),
-                true,
-                0.5,
+                images,
+                backdrop_assets,
+                brands,
+                fonts,
+                spec,
+                "hcm",
+                false,
+                34.0,
+                is_friday,
             );
-            b_cyl(commands, pal, pole_m, Vec3::new(right_x - 3.0, GY + 1.9, front_z - 3.0), 0.14, 3.8);
-            b_quad(commands, pal, sig_m, Vec3::new(right_x - 2.6, GY + 3.1, front_z - 3.0), Vec2::new(0.55, 0.35), Quat::from_rotation_y(PI * 0.25));
-
-            // Animated street traffic (Grab green scooter, Xanh SM cyan car, red/white scooters)
-            let vehicles = [
-                (true, front_z - 2.1, -18.0, 24.0, 5.5, 0.0, "#00B14F", Vec3::new(1.5, 0.9, 0.65)),
-                (true, front_z + 0.1, -18.0, 24.0, -6.2, 14.0, "#00C2D1", Vec3::new(3.2, 1.25, 1.5)),
-                (false, right_x - 2.1, -16.0, 24.0, 4.8, 6.0, "#E63946", Vec3::new(0.65, 0.9, 1.5)),
-                (false, right_x + 0.1, -16.0, 24.0, -5.8, 18.0, "#F4F5F7", Vec3::new(1.5, 1.25, 3.2)),
-            ];
-            for (axis_x, lane, min_p, max_p, spd, off, col, sz) in vehicles {
-                let vm = backdrop_assets.mat(materials, col, 0.35, 0.25);
-                let init_pos = if axis_x {
-                    Vec3::new(min_p + off, GY + sz.y * 0.5, lane)
-                } else {
-                    Vec3::new(lane, GY + sz.y * 0.5, min_p + off)
-                };
-                let ent = b_box(commands, pal, vm, init_pos, sz);
-                commands.entity(ent).insert(StreetVehicle {
-                    axis_x,
-                    lane,
-                    min_pos: min_p,
-                    max_pos: max_p,
-                    speed: spd,
-                    offset: off,
-                });
-            }
         }
         BackdropKind::Countryside => {
             // Emerald & golden terraced Vietnamese rice paddies + limestone karst hills + red-tile village houses
