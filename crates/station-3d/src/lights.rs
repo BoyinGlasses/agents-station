@@ -67,17 +67,17 @@ pub struct RoomLamp {
 }
 
 pub fn cascade_shadow_config_for_layout(layout: OfficeLayout) -> CascadeShadowConfig {
-    // Tight 2-cascade frustum bounds matched to lights.js:19 (±17m Cozy, ±21m Pro, ±28m HQ)
-    // and isometric camera distance (~30–40m), covering both ortho overview and first-person walk.
-    let (first_far, max_dist) = match layout {
-        OfficeLayout::Cozy => (24.0, 56.0),
-        OfficeLayout::Pro => (32.0, 66.0),
-        OfficeLayout::Hq => (42.0, 88.0),
+    // Tight 1-cascade frustum matched to lights.js:19 (±17m Cozy, ±21m Pro, ±28m HQ)
+    // for the isometric ortho camera (saves half the shadow map VRAM/driver RAM vs 2 cascades).
+    let max_dist = match layout {
+        OfficeLayout::Cozy => 56.0,
+        OfficeLayout::Pro => 66.0,
+        OfficeLayout::Hq => 88.0,
     };
     CascadeShadowConfigBuilder {
-        num_cascades: 2,
+        num_cascades: 1,
         minimum_distance: 0.5,
-        first_cascade_far_bound: first_far,
+        first_cascade_far_bound: max_dist,
         maximum_distance: max_dist,
         overlap_proportion: 0.2,
     }

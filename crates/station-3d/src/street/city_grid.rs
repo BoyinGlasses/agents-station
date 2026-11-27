@@ -277,14 +277,16 @@ pub fn spawn_city_grid(
         WorldEntity,
         BackdropEntity,
         CityNightAsphalt,
+        bevy::pbr::NotShadowCaster,
         Mesh3d(ground_mesh),
         MeshMaterial3d(asphalt_mat),
         Transform::from_xyz(0.0, GY, 0.0),
     ));
 
-    // 2. Supergrid coordinates XS & ZS matching city.js:34-37
-    let xs: Vec<f32> = (-6..=4).map(|k| 18.0 + k as f32 * BLOCK).collect();
-    let zs: Vec<f32> = (-6..=4).map(|k| 16.2 + k as f32 * BLOCK).collect();
+    // 2. Supergrid coordinates XS & ZS matching city.js:34-37 (8x8 core supergrid covering
+    // [-57..+63] x [-59..+61], keeping all 10+ walk-in shop fronts while pruning outer off-screen ring).
+    let xs: Vec<f32> = (-5..=3).map(|k| 18.0 + k as f32 * BLOCK).collect();
+    let zs: Vec<f32> = (-5..=3).map(|k| 16.2 + k as f32 * BLOCK).collect();
     let sb = SuperBlock {
         x0: -12.0 + half,
         x1: 18.0 - half,
@@ -1076,10 +1078,14 @@ pub fn spawn_city_grid(
         }
     }
     let vmat_roof = ba.mat(materials, "#FFFFFF", 0.90, 0.0);
-    roofs.spawn(commands, meshes, ba, vmat_roof);
+    if let Some(e) = roofs.spawn(commands, meshes, ba, vmat_roof) {
+        commands.entity(e).insert(bevy::pbr::NotShadowCaster);
+    }
 
     let vmat_clutter = ba.mat(materials, "#FFFFFF", 0.70, 0.15);
-    clutter.spawn(commands, meshes, ba, vmat_clutter);
+    if let Some(e) = clutter.spawn(commands, meshes, ba, vmat_clutter) {
+        commands.entity(e).insert(bevy::pbr::NotShadowCaster);
+    }
 
     let vmat_green = ba.mat(materials, "#FFFFFF", 0.95, 0.0);
     greens.spawn(commands, meshes, ba, vmat_green);
