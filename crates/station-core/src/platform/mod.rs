@@ -1,4 +1,5 @@
 pub mod stubs;
+pub mod unix;
 #[cfg(windows)]
 pub mod win32;
 
@@ -115,7 +116,15 @@ pub fn default_platform() -> Arc<dyn Platform> {
     {
         Arc::new(win32::Win32Platform::new())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(unix::DarwinPlatform)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(unix::LinuxPlatform)
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         Arc::new(stubs::StubPlatform)
     }
