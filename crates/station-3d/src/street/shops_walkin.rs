@@ -7,7 +7,7 @@ use crate::palette::WorldEntity;
 use crate::street::city_grid::{SHOP_CEIL, SHOP_W, ShopDir, ShopFront, shop_depth};
 use crate::street::{GY, StreetMeshBuilder, spawn_backdrop_uv_quad};
 use bevy::prelude::*;
-use station_canvas2d::street_surfaces::draw_shop_cell;
+use station_canvas2d::street_surfaces::{draw_generic_shop_strip, draw_shop_cell};
 use station_canvas2d::{BrandRegistry, FontEngine};
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
@@ -321,6 +321,7 @@ pub fn spawn_walkin_shops(
     let mut solid = StreetMeshBuilder::default();
     let mut glass = StreetMeshBuilder::default();
     let mut shop_mats: HashMap<&'static str, Handle<StandardMaterial>> = HashMap::new();
+    let mut generic_store_mat: Option<Handle<StandardMaterial>> = None;
     let mut doors = Vec::new();
 
     for (idx, front) in fronts.iter().take(roster.len()).enumerate() {
@@ -525,19 +526,38 @@ pub fn spawn_walkin_shops(
                 ));
             }
         } else {
-            // Non-walk-in distant shops (#11–12): UV-cropped painted glass storefront
-            spawn_backdrop_uv_quad(
+            // Non-walk-in distant shops (#11–12): clean painted storefront glass slice (not packed UI poster strip)
+            let store_mat = generic_store_mat
+                .get_or_insert_with(|| {
+                    let img = ba.upload_image(images, draw_generic_shop_strip());
+                    let em = if night { 0.42 } else { 0.08 };
+                    ba.add_material(
+                        materials,
+                        StandardMaterial {
+                            base_color: Color::WHITE,
+                            base_color_texture: Some(img.clone()),
+                            emissive: LinearRgba::new(em, em, em, 1.0),
+                            emissive_texture: Some(img),
+                            perceptual_roughness: 0.42,
+                            ..default()
+                        },
+                    )
+                })
+                .clone();
+            let slot_x = ((idx % 8) * 64) as f32;
+            let store_e = spawn_backdrop_uv_quad(
                 commands,
                 meshes,
                 ba,
-                shop_mat,
-                1024.0,
+                store_mat,
                 512.0,
-                [0.0, 140.0, 1024.0, 372.0],
+                64.0,
+                [slot_x, 22.0, 64.0, 42.0],
                 f.pt(0.0, FL + 1.18, 0.04),
                 Vec2::new(SHOP_W - 0.2, 2.32),
                 f.rot,
             );
+            commands.entity(store_e).insert(ShopLightboxNight);
         }
     }
 

@@ -254,6 +254,8 @@ pub fn spawn_street_scenes_a(
         glass.push_box_rot(f.at(-0.6, z1 - 0.02, fl + 1.02), Vec3::new(3.5, 2.0, 0.02), rot, "#FFEAF2");
 
         // Two interior photo booths behind pink & black pleated curtains + ring lights
+        let flash_mesh = ba.add_mesh(meshes, Mesh::from(Sphere::new(0.14)));
+        let flash_mat = ba.mat_emissive(materials, "#FFF6FB", 3.4);
         for (idx, (bx0, bx1, curt_col)) in [(-2.30_f32, -0.95_f32, "#F28AB2"), (-0.85, 0.35, "#2B2F36")].iter().enumerate() {
             let bcx = (bx0 + bx1) * 0.5;
             let bw = bx1 - bx0;
@@ -263,15 +265,13 @@ pub fn spawn_street_scenes_a(
             solid.push_box_rot(f.at(bcx, 0.16, fl + 1.44), Vec3::new(bw - 0.06, 1.38, 0.04), rot, curt_col);
             // Camera console + ring light inside
             solid.push_box_rot(f.at(bcx, z0 + 0.14, fl + 1.50), Vec3::new(0.46, 0.38, 0.08), rot, "#1E2125");
-            // Animated flash bulb inside booth
-            let flash_mesh = ba.add_mesh(meshes, Mesh::from(Sphere::new(0.14)));
-            let flash_mat = ba.mat_emissive(materials, "#FFF6FB", 3.4);
+            // Animated flash bulb inside booth (shared mesh & emissive material across both booths)
             commands.spawn((
                 WorldEntity,
                 BackdropEntity,
                 StreetPhotoFlash { phase: idx as f32 * 2.7 },
-                Mesh3d(flash_mesh),
-                MeshMaterial3d(flash_mat),
+                Mesh3d(flash_mesh.clone()),
+                MeshMaterial3d(flash_mat.clone()),
                 Transform::from_translation(f.at(bcx, z0 + 0.24, fl + 1.72)),
                 Visibility::Hidden,
             ));

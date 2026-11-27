@@ -6,7 +6,7 @@
 use crate::backdrops::{BackdropAssets, BackdropEntity};
 use crate::palette::WorldEntity;
 use crate::street::city_grid::{CityGridData, STREET_W, ShopDir};
-use crate::street::{GY, LAWN_Y, PAVE_Y, SpotFinder, StreetMeshBuilder, spawn_backdrop_uv_quad};
+use crate::street::{GY, LAWN_Y, PAVE_Y, SpotFinder, SpotFrame, StreetMeshBuilder, spawn_backdrop_uv_quad};
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
 
@@ -366,47 +366,54 @@ pub fn spawn_street_scenes_b(
     }
 
     // ==================== 8. WEEKEND RẠP CƯỚI WEDDING TENT (`street-wedding.js`) ====================
-    let wed_pos = if let Some(f) = finder.find(6.0, 2.2, 2.2, true, 64.0) {
-        f.origin
-    } else {
-        Vec3::new(grid.sb.x0 - STREET_W - 6.0, PAVE_Y, grid.sb.z1 - 4.0)
-    };
+    let wed_frame = finder.find(6.0, 2.2, 2.2, true, 64.0).unwrap_or(SpotFrame {
+        origin: Vec3::new(grid.sb.x0 - STREET_W - 6.0, PAVE_Y, grid.sb.z1 - 4.0),
+        along: Vec2::new(1.0, 0.0),
+        out: Vec2::new(0.0, 1.0),
+        yaw: 0.0,
+    });
+    let wed_rot = wed_frame.face_out_rot();
     let eave = 2.28;
     // Tent poles + pink-and-white pleated roof + flower arch with "LỄ VU QUY" sign + 4 banquet tables
     for sx in [-2.8_f32, -1.4, 1.4, 2.8] {
         for sz in [-0.95_f32, 0.95] {
-            b.push_cyl(wed_pos + Vec3::new(sx, eave * 0.5, sz), 0.035, 0.035, eave, 8, "#F4F1EA");
+            b.push_cyl(wed_frame.at(sx, sz, eave * 0.5), 0.035, 0.035, eave, 8, "#F4F1EA");
         }
     }
     for k in 0..8 {
         let px = -2.62 + k as f32 * 0.75;
         let col = if k % 2 == 0 { "#F7B6C8" } else { "#FFFFFF" };
-        b.push_box(wed_pos + Vec3::new(px, eave + 0.18, 0.0), Vec3::new(0.75, 0.28, 2.05), col);
+        b.push_box_rot(wed_frame.at(px, 0.0, eave + 0.18), Vec3::new(0.75, 0.28, 2.05), wed_rot, col);
     }
-    // Floral arch at entrance
+    // Floral arch at street-facing entrance (+out)
     for sx in [-1.15_f32, 1.15] {
-        b.push_cyl(wed_pos + Vec3::new(sx, 1.15, 1.05), 0.14, 0.16, 2.30, 8, "#F7C6D3");
+        b.push_cyl(wed_frame.at(sx, 1.05, 1.15), 0.14, 0.16, 2.30, 8, "#F7C6D3");
     }
-    b.push_box(wed_pos + Vec3::new(0.0, 2.35, 1.05), Vec3::new(2.55, 0.34, 0.24), "#E8476A");
+    b.push_box_rot(wed_frame.at(0.0, 1.05, 2.35), Vec3::new(2.55, 0.34, 0.24), wed_rot, "#E8476A");
     for k in -4..=4 {
         let fc = if k % 2 == 0 { "#FFFFFF" } else { "#FFE3EA" };
-        b.push_sphere(wed_pos + Vec3::new(k as f32 * 0.28, 2.50, 1.14), Vec3::splat(0.14), fc);
+        b.push_sphere(wed_frame.at(k as f32 * 0.28, 1.14, 2.50), Vec3::splat(0.14), fc);
     }
-    // UV-cropped "LỄ VU QUY" arch banner [256, 128, 256, 128]
+    // UV-cropped "LỄ VU QUY" arch banner [256, 128, 256, 128] facing outward toward street
     spawn_backdrop_uv_quad(
         commands, meshes, ba, signs_mat, 512.0, 512.0, [256.0, 128.0, 256.0, 128.0],
-        wed_pos + Vec3::new(0.0, 2.35, 1.19), Vec2::new(1.75, 0.56), Quat::IDENTITY,
+        wed_frame.at(0.0, 1.19, 2.35), Vec2::new(1.75, 0.56), wed_rot,
     );
     // 4 round banquet tables with red/pink tablecloths + white bridal car with hood flower bouquet
     for tx in [-2.0_f32, -0.7, 0.7, 2.0] {
-        b.push_cyl(wed_pos + Vec3::new(tx, 0.38, 0.0), 0.46, 0.48, 0.76, 12, "#E8476A");
-        b.push_cyl(wed_pos + Vec3::new(tx, 0.77, 0.0), 0.47, 0.47, 0.02, 12, "#FFF4F7");
+        b.push_cyl(wed_frame.at(tx, 0.0, 0.38), 0.46, 0.48, 0.76, 12, "#E8476A");
+        b.push_cyl(wed_frame.at(tx, 0.0, 0.77), 0.47, 0.47, 0.02, 12, "#FFF4F7");
     }
-    // Bridal car parked outside arch
-    b.push_box(wed_pos + Vec3::new(0.0, 0.58, 2.25), Vec3::new(3.2, 0.56, 1.48), "#F7F8FA");
-    b.push_box(wed_pos + Vec3::new(-0.2, 1.08, 2.25), Vec3::new(1.75, 0.46, 1.36), "#23303E");
-    b.push_sphere(wed_pos + Vec3::new(1.15, 0.94, 2.25), Vec3::new(0.28, 0.16, 0.34), "#E8476A");
-    commands.spawn((WorldEntity, BackdropEntity, StreetCultureScene::WeddingTent, Transform::from_translation(wed_pos)));
+    // Bridal car parked outside arch along street kerb
+    b.push_box_rot(wed_frame.at(0.0, 2.25, 0.58), Vec3::new(3.2, 0.56, 1.48), wed_rot, "#F7F8FA");
+    b.push_box_rot(wed_frame.at(-0.2, 2.25, 1.08), Vec3::new(1.75, 0.46, 1.36), wed_rot, "#23303E");
+    b.push_sphere(wed_frame.at(1.15, 2.25, 0.94), Vec3::new(0.28, 0.16, 0.34), "#E8476A");
+    commands.spawn((
+        WorldEntity,
+        BackdropEntity,
+        StreetCultureScene::WeddingTent,
+        Transform::from_translation(wed_frame.origin).with_rotation(wed_rot),
+    ));
 
     let mat = ba.mat(materials, "#FFFFFF", 0.72, 0.08);
     b.spawn(commands, meshes, ba, mat);
