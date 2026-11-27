@@ -22,7 +22,7 @@ use station_ui::labels3d::{
     project_world_to_stage,
 };
 use station_ui::state::{
-    AccountOption, AiAccountEntry, AiProviderTab, BurnDayBucketUi, BurnDetailRow, BurnDrawerState,
+    AccountOption, AiAccountEntry, AiProviderTab, BilliardsHudState, BurnDayBucketUi, BurnDetailRow, BurnDrawerState,
     BurnProjectRowUi, BurnRange, BurnRoleRowUi, BurnSessionRowUi, BurnSnapshot, CacheWarmth,
     ChatImagePreview, ChatMessage, ChatPollOptUi, ChatPollUi, ChatRemindUi, ChatReplyRefUi,
     CleanupRowUi, ClipShape, DevServerUi, FeedEntry, HarnessDockItem, MacDrawerState,
@@ -3729,6 +3729,54 @@ pub(crate) fn fp_prop_i18n_key(prop_id: &str, prop_place: &str) -> &'static str 
     }
 }
 
+pub(crate) fn fp_prompt_to_label(
+    prompt: &station_3d::FirstPersonPrompt,
+    i18n: &I18nStore,
+) -> String {
+    use station_3d::{FirstPersonController, FirstPersonPrompt};
+    match prompt {
+        FirstPersonPrompt::LiftToStreet { stairs } => {
+            i18n.tr(if *stairs { "fp.toStreetStairs" } else { "fp.toStreet" })
+        }
+        FirstPersonPrompt::LiftToOffice => i18n.tr("fp.toOffice"),
+        FirstPersonPrompt::ShopTake {
+            item_id, price_k, ..
+        } => {
+            let item = i18n.tr(&format!("fp.items.{item_id}"));
+            let price = FirstPersonController::format_vnd(*price_k);
+            i18n.tr_vars("fp.take", &[("item", &item), ("price", &price)])
+        }
+        FirstPersonPrompt::ShopPay {
+            default_item_id,
+            default_price_k,
+            basket_count,
+            basket_total_k,
+            ..
+        } => {
+            if *basket_count > 0 {
+                let total = FirstPersonController::format_vnd(*basket_total_k);
+                let n = basket_count.to_string();
+                let key = if *basket_count == 1 { "fp.pay.one" } else { "fp.pay.other" };
+                i18n.tr_vars(key, &[("n", &n), ("total", &total)])
+            } else {
+                let item = i18n.tr(&format!("fp.items.{default_item_id}"));
+                let price = FirstPersonController::format_vnd(*default_price_k);
+                i18n.tr_vars("fp.order", &[("item", &item), ("price", &price)])
+            }
+        }
+        FirstPersonPrompt::ShopSit { is_stool, .. } => {
+            i18n.tr(if *is_stool { "fp.sitStool" } else { "fp.sit" })
+        }
+        FirstPersonPrompt::BilliardsPlay => i18n.tr("props.billiards.name"),
+        FirstPersonPrompt::TvGamesPlay => i18n.tr("props.gametv.name"),
+        FirstPersonPrompt::OfficeProp { id, place } => i18n.tr(fp_prop_i18n_key(id, place)),
+        FirstPersonPrompt::OfficeWorker { name, asleep, .. } => {
+            let key = if *asleep { "fp.wake" } else { "fp.watch" };
+            i18n.tr_vars(key, &[("name", name)])
+        }
+    }
+}
+
 fn place_title_i18n_key(place_id: &str) -> &'static str {
     match place_id {
         "meeting" => "places.meeting.title",
@@ -4024,6 +4072,7 @@ pub fn project_stage_labels_to_ui(
     i18n: Res<I18nStore>,
     mut ui: ResMut<UiState>,
     rig: Option<Res<station_3d::camera::CameraRig>>,
+    mut fp_ctrl: Option<ResMut<station_3d::FirstPersonController>>,
     cams: Query<(&Camera, &GlobalTransform), With<station_3d::camera::MainOfficeCamera>>,
     live_workers: Query<(&station_3d::people::LiveSessionWorker, &GlobalTransform)>,
     props_q: Query<(&station_3d::interact::InteractiveProp, &GlobalTransform)>,
@@ -4033,7 +4082,61 @@ pub fn project_stage_labels_to_ui(
         ui.first_person = rig.first_person;
         ui.camera_preset = rig.active_preset;
 
-        if rig.first_person {
+        if let Some(fp) = fp_ctrl.as_deref_mut() {
+            ui.fp_fade_alpha = fp.fade_alpha;
+            for toast in fp.pending_toasts.drain(..) {
+                let resolved_vars: Vec<(&str, String)> = toast
+                    .vars
+                    .iter()
+                    .map(|(k, v)| {
+                        let val = if v.starts_with("fp.items.") {
+                            i18n.tr(v)
+                        } else {
+                            v.clone()
+                        };
+                        (*k, val)
+                    })
+                    .collect();
+                let borrowed: Vec<(&str, &str)> = resolved_vars
+                    .iter()
+                    .map(|(k, v)| (*k, v.as_str()))
+                    .collect();
+                let body = if borrowed.is_empty() {
+                    i18n.tr(toast.i18n_key)
+                } else {
+                    i18n.tr_vars(toast.i18n_key, &borrowed)
+                };
+                ui.push_toast(i18n.tr("ui.firstPersonHud.title"), body);
+            }
+
+            if rig.first_person {
+                ui.fp_near_label = fp
+                    .near_prompt
+                    .as_ref()
+                    .map(|p| fp_prompt_to_label(p, &i18n));
+                ui.fp_billiards = match fp.activity {
+                    station_3d::FirstPersonActivity::PlayingBilliards {
+                        power, potted, ..
+                    } => {
+                        let n_s = potted.to_string();
+                        let left_s = 15u32.saturating_sub(potted).to_string();
+                        Some(BilliardsHudState {
+                            score_label: i18n.tr_vars(
+                                "fp.bil.soloScore",
+                                &[("n", &n_s), ("left", &left_s)],
+                            ),
+                            turn_label: i18n.tr("fp.bil.yourTurn"),
+                            power,
+                        })
+                    }
+                    _ => None,
+                };
+            } else {
+                ui.fp_near_label = None;
+                ui.fp_billiards = None;
+                ui.fp_fade_alpha = 0.0;
+            }
+        } else if rig.first_person {
             let mut nearest: Option<(f32, String)> = None;
             for (prop, gtf) in &props_q {
                 let d = rig.fp_pos.distance(gtf.translation());
@@ -4050,9 +4153,11 @@ pub fn project_stage_labels_to_ui(
                 }
             }
             ui.fp_near_label = nearest.map(|(_, label)| label);
+            ui.fp_fade_alpha = 0.0;
         } else {
             ui.fp_near_label = None;
             ui.fp_billiards = None;
+            ui.fp_fade_alpha = 0.0;
         }
     }
 
@@ -6520,6 +6625,7 @@ struct AuxActionParams<'w, 's> {
     sfx: Option<ResMut<'w, station_3d::audio::SfxEngine>>,
     life: Option<ResMut<'w, station_3d::life::OfficeLifeState>>,
     camera_rig: Option<ResMut<'w, station_3d::camera::CameraRig>>,
+    fp_ctrl: Option<ResMut<'w, station_3d::FirstPersonController>>,
     cam_q: Query<'w, 's, &'static mut Projection, With<station_3d::camera::MainOfficeCamera>>,
     demo: Option<ResMut<'w, station_3d::DemoSimState>>,
     replay: Option<ResMut<'w, station_3d::replay::ReplayState>>,
@@ -8032,6 +8138,17 @@ fn process_ui_actions(
                 if let Some(rig) = aux.camera_rig.as_deref_mut() {
                     rig.first_person = !rig.first_person;
                     ui.first_person = rig.first_person;
+                    if let Some(fp) = aux.fp_ctrl.as_deref_mut() {
+                        fp.active = rig.first_person;
+                        if !fp.active {
+                            fp.activity = station_3d::FirstPersonActivity::Walking;
+                            fp.near_prompt = None;
+                            fp.fade_alpha = 0.0;
+                            if fp.on_street {
+                                fp.return_to_office_now(&LayoutSpec::for_layout(ui.layout));
+                            }
+                        }
+                    }
                     let next_proj = rig.projection();
                     for mut proj in &mut aux.cam_q {
                         *proj = next_proj.clone();
@@ -8044,7 +8161,9 @@ fn process_ui_actions(
                 }
             }
             UiAction::TriggerFirstPersonInteract => {
-                if let Some(label) = ui.fp_near_label.clone() {
+                if let Some(fp) = aux.fp_ctrl.as_deref_mut() {
+                    fp.interact_requested = true;
+                } else if let Some(label) = ui.fp_near_label.clone() {
                     if let Some(sfx) = aux.sfx.as_deref_mut() {
                         sfx.play_sfx(SfxKind::Pop);
                     }
@@ -12129,6 +12248,43 @@ mod tests {
                 assert!(
                     !title.is_empty() && title != tkey,
                     "lang={lang} place={place} leaked raw title key '{tkey}'"
+                );
+            }
+            // Verify FirstPersonPrompt labels for lift, walk-in shops, billiards, and tv-games never leak raw keys
+            let prompts = [
+                station_3d::FirstPersonPrompt::LiftToStreet { stairs: false },
+                station_3d::FirstPersonPrompt::LiftToStreet { stairs: true },
+                station_3d::FirstPersonPrompt::LiftToOffice,
+                station_3d::FirstPersonPrompt::ShopTake {
+                    chain: "cong",
+                    shop_name: "Cộng Cà Phê",
+                    item_id: "cotDuaCaPhe",
+                    price_k: 55,
+                    carry: station_3d::PropKind::Coffee,
+                },
+                station_3d::FirstPersonPrompt::ShopPay {
+                    chain: "cong",
+                    shop_name: "Cộng Cà Phê",
+                    default_item_id: "suaChuaCaPhe",
+                    default_price_k: 45,
+                    default_carry: station_3d::PropKind::Coffee,
+                    basket_count: 1,
+                    basket_total_k: 55,
+                },
+                station_3d::FirstPersonPrompt::ShopSit {
+                    shop_name: "Cộng Cà Phê",
+                    seat_pos: Vec2::ZERO,
+                    seat_yaw: 0.0,
+                    is_stool: true,
+                },
+                station_3d::FirstPersonPrompt::BilliardsPlay,
+                station_3d::FirstPersonPrompt::TvGamesPlay,
+            ];
+            for p in &prompts {
+                let lbl = fp_prompt_to_label(p, &i18n);
+                assert!(
+                    !lbl.is_empty() && !lbl.starts_with("fp.") && !lbl.starts_with("props."),
+                    "lang={lang} prompt={p:?} leaked raw key -> '{lbl}'"
                 );
             }
         }
