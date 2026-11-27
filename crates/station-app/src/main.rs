@@ -44,6 +44,44 @@ fn spawn_lite_2d_camera(mut commands: Commands) {
     station_3d::camera::spawn_lite_2d_camera(&mut commands);
 }
 
+/// Frames the `--capture-scene street-shops` camera directly onto the nearest walk-in Vietnamese
+/// shop row, sidewalk props, and street traffic from an unobstructed 3/4 street angle.
+fn frame_street_shops_camera(
+    mut rig: Option<ResMut<station_3d::camera::CameraRig>>,
+    shops: Query<&station_3d::street::shops_walkin::WalkInShopRoom>,
+) {
+    let Some(rig) = rig.as_deref_mut() else {
+        return;
+    };
+    let mut rooms: Vec<(Vec3, Vec3)> = shops.iter().map(|s| (s.doorway, s.dir_out)).collect();
+    if rooms.is_empty() {
+        return;
+    }
+    rooms.sort_by(|a, b| {
+        a.0.distance_squared(Vec3::new(3.0, 0.0, 0.7))
+            .partial_cmp(&b.0.distance_squared(Vec3::new(3.0, 0.0, 0.7)))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let anchor = rooms[0].0;
+    let dir_out = rooms[0].1;
+    // Average nearby walk-in shops sharing this street corridor so 2–3 adjacent shops fill the frame
+    let mut sum = anchor;
+    let mut count = 1.0_f32;
+    for &(pos, dout) in rooms.iter().skip(1) {
+        if dout.dot(dir_out) > 0.5 && pos.distance(anchor) < 16.0 {
+            sum += pos;
+            count += 1.0;
+        }
+    }
+    let focus = sum / count;
+    rig.target = Vec3::new(focus.x, 1.35, focus.z);
+    // Look from outward +X/+Z side so shop fascias, interiors, and vehicles face the camera cleanly
+    rig.yaw = if dir_out.x > 0.5 { 1.05 } else { 0.52 };
+    rig.pitch = 0.42;
+    rig.distance = 26.0;
+    rig.viewport_height = 14.5;
+}
+
 fn handle_window_close_requests(
     mut close_events: EventReader<WindowCloseRequested>,
     worker_mode: Res<bridge::GuiWorkerMode>,
@@ -267,6 +305,16 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 assets_dir: assets_dir.clone(),
                 night: true,
             })
+            .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
+        }
+        Some("street-shops") => {
+            app.add_plugins(station_3d::OfficeWorldPlugin {
+                layout: station_3d::OfficeLayout::Pro,
+                backdrop: station_3d::BackdropKind::City,
+                assets_dir: assets_dir.clone(),
+                night: false,
+            })
+            .add_systems(PostStartup, frame_street_shops_camera)
             .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some(_) => {
