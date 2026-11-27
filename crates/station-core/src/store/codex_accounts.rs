@@ -1,12 +1,53 @@
 use crate::atomic::{write_bytes_atomic, write_json_atomic};
 use crate::config::home_dir;
 use crate::state::sessions::{now_ms, one_line};
+use crate::store::claude_accounts::find_cli_on_path;
 use base64::Engine;
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+struct CodexLoginState {
+    state: String,
+    url: String,
+    note: String,
+    name: String,
+    completed_auth: Option<String>,
+    tmp_dir: Option<PathBuf>,
+    child: Option<Child>,
+}
+
+impl CodexLoginState {
+    fn snapshot(&self) -> Value {
+        json!({
+            "state": self.state,
+            "url": self.url,
+            "note": self.note,
+            "name": self.name,
+        })
+    }
+
+    fn teardown(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if let Some(tmp) = self.tmp_dir.take()
+            && tmp.is_dir()
+        {
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+    }
+}
 
 /// Strict account slot ID validation (`^[A-Za-z0-9_-]{1,64}$`) preventing path traversal.
 pub fn is_safe_id(id: &str) -> bool {
@@ -150,6 +191,18 @@ pub struct CodexAccounts {
     seat_id: Option<String>,
     seat_text: Option<String>,
     seat_note: String,
+    active_login: Option<Arc<Mutex<CodexLoginState>>>,
+}
+
+impl Drop for CodexAccounts {
+    fn drop(&mut self) {
+        if let Some(login) = self.active_login.take() {
+            login
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .teardown();
+        }
+    }
 }
 
 impl CodexAccounts {
@@ -180,6 +233,7 @@ impl CodexAccounts {
             seat_id,
             seat_text: None,
             seat_note: String::new(),
+            active_login: None,
         }
     }
 
@@ -219,6 +273,44 @@ impl CodexAccounts {
     /// Reads `$CODEX_HOME/auth.json`, discovers any newly signed-in account,
     /// and saves the newest rotated tokens back to that account's own copy.
     pub fn sync_seat(&mut self) {
+        // Import any newly completed `codex app-server` login snapshot before syncing seat.
+        let completed_auth = self.active_login.as_ref().and_then(|l| {
+            let mut st = l.lock().unwrap_or_else(|e| e.into_inner());
+            st.completed_auth.take()
+        });
+        if let Some(auth_text) = completed_auth
+            && let Ok(auth_val) = serde_json::from_str::<Value>(&auth_text)
+            && let Some(who) = codex_identity(&auth_val)
+        {
+            let slug = if let Some(a) = self.data.accounts.iter_mut().find(|a| a.key == who.key) {
+                a.email = who.email;
+                a.name = who.name;
+                a.plan = who.plan;
+                a.note.clear();
+                a.slug.clone()
+            } else {
+                let mut s = short_id_hash(&who.key);
+                while self.data.accounts.iter().any(|a| a.slug == s) {
+                    s.push('x');
+                }
+                self.data.accounts.push(AiAccountSlot {
+                    slug: s.clone(),
+                    label: String::new(),
+                    email: who.email,
+                    active: false,
+                    later: false,
+                    key: who.key,
+                    name: who.name,
+                    plan: who.plan,
+                    note: String::new(),
+                    at: now_ms(),
+                });
+                s
+            };
+            self.keep_copy(&slug, &auth_text);
+            self.persist();
+        }
+
         let text = std::fs::read_to_string(self.seat_auth_file()).unwrap_or_default();
         if self.seat_text.as_deref() == Some(text.as_str()) {
             return;
@@ -291,11 +383,17 @@ impl CodexAccounts {
     }
 
     pub fn view(&self) -> Value {
+        let login = self
+            .active_login
+            .as_ref()
+            .map(|l| l.lock().unwrap_or_else(|e| e.into_inner()).snapshot())
+            .unwrap_or(Value::Null);
         json!({
             "auto": self.data.auto,
             "seat": self.seat_note,
             "now": self.seat_id,
             "accounts": self.data.accounts,
+            "login": login,
         })
     }
 
@@ -353,6 +451,9 @@ impl CodexAccounts {
                     self.keep_copy(&slug, &text);
                     self.persist();
                     return json!({ "ok": true, "id": slug, "slug": slug });
+                }
+                if body.get("label").is_none() && body.get("email").is_none() {
+                    return self.start_cli_add();
                 }
                 let label: String = one_line(
                     body.get("label")
@@ -482,8 +583,194 @@ impl CodexAccounts {
                 self.sync_seat();
                 json!({ "ok": true, "now": self.seat_id, "accounts": self.data.accounts })
             }
-            "cancel" => json!({ "ok": true, "accounts": self.data.accounts }),
+            "cancel" => self.cancel_cli_add(),
             _ => json!({ "ok": false, "error": "unknown codex action" }),
+        }
+    }
+
+    fn start_cli_add(&mut self) -> Value {
+        if let Some(existing) = &self.active_login {
+            let st = existing.lock().unwrap_or_else(|e| e.into_inner());
+            if st.state == "waiting" {
+                return json!({
+                    "ok": true,
+                    "state": st.state,
+                    "url": st.url,
+                    "note": st.note,
+                });
+            }
+        }
+        if let Some(prev) = self.active_login.take() {
+            prev.lock().unwrap_or_else(|e| e.into_inner()).teardown();
+        }
+        let Some(bin) = find_cli_on_path("OFFICE_CODEX_BIN", &["codex.exe", "codex.cmd", "codex"])
+        else {
+            return json!({
+                "ok": false,
+                "state": "failed",
+                "code": "noCli",
+                "note": "noCli",
+            });
+        };
+        let tmp_dir = self.copies_dir.join(format!("_login-{}", now_ms()));
+        if std::fs::create_dir_all(&tmp_dir).is_err() {
+            return json!({ "ok": false, "state": "failed", "code": "mkdirFailed" });
+        }
+        let mut cmd = Command::new(&bin);
+        cmd.args(["app-server", "-c", r#"cli_auth_credentials_store="file""#])
+            .env("CODEX_HOME", &tmp_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return json!({ "ok": false, "state": "failed", "code": "noCli", "note": "noCli" });
+        };
+
+        let mut stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        if let Some(ref mut s) = stdin {
+            let init = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": { "name": "agents-station", "title": "Agents Station", "version": "1" },
+                    "capabilities": Value::Null
+                }
+            });
+            let _ = writeln!(s, "{init}");
+            let _ = s.flush();
+        }
+
+        let login = Arc::new(Mutex::new(CodexLoginState {
+            state: "waiting".to_owned(),
+            url: String::new(),
+            note: String::new(),
+            name: String::new(),
+            completed_auth: None,
+            tmp_dir: Some(tmp_dir.clone()),
+            child: Some(child),
+        }));
+        self.active_login = Some(Arc::clone(&login));
+
+        if let Some(out) = stdout {
+            let shared = Arc::clone(&login);
+            let _ = std::thread::Builder::new()
+                .name("codex-login-rpc".to_owned())
+                .spawn(move || {
+                    let reader = BufReader::new(out);
+                    for line in reader.lines().map_while(Result::ok) {
+                        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+                            continue;
+                        };
+                        if msg.get("id").and_then(Value::as_u64) == Some(1) {
+                            if let Some(ref mut s) = stdin {
+                                let _ = writeln!(s, r#"{{"jsonrpc":"2.0","method":"initialized"}}"#);
+                                let _ = writeln!(
+                                    s,
+                                    r#"{{"jsonrpc":"2.0","id":2,"method":"account/login/start","params":{{"type":"chatgpt"}}}}"#
+                                );
+                                let _ = s.flush();
+                            }
+                        } else if msg.get("id").and_then(Value::as_u64) == Some(2) {
+                            let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(url) = msg
+                                .get("result")
+                                .and_then(|r| r.get("authUrl"))
+                                .and_then(Value::as_str)
+                            {
+                                st.url = url.to_owned();
+                            } else {
+                                st.state = "failed".to_owned();
+                                st.note = msg
+                                    .get("error")
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("loginFailed")
+                                    .to_owned();
+                                st.teardown();
+                                break;
+                            }
+                        } else if msg.get("method").and_then(Value::as_str)
+                            == Some("account/login/completed")
+                        {
+                            let ok = msg
+                                .get("params")
+                                .and_then(|p| p.get("success"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
+                            if ok
+                                && let Some(tmp) = &st.tmp_dir
+                                && let Ok(auth_text) = std::fs::read_to_string(tmp.join("auth.json"))
+                            {
+                                st.completed_auth = Some(auth_text);
+                            }
+                            st.state = if ok { "done" } else { "failed" }.to_owned();
+                            if !ok {
+                                st.note = msg
+                                    .get("params")
+                                    .and_then(|p| p.get("error"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("loginFailed")
+                                    .to_owned();
+                            }
+                            st.teardown();
+                            break;
+                        }
+                    }
+                    let mut st = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.state == "waiting" {
+                        st.state = "failed".to_owned();
+                        st.note = "exited".to_owned();
+                        st.teardown();
+                    }
+                });
+        }
+
+        let waiter = Arc::clone(&login);
+        let _ = std::thread::Builder::new()
+            .name("codex-login-timeout".to_owned())
+            .spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(15 * 60);
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(100));
+                    let st = waiter.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.state != "waiting" {
+                        return;
+                    }
+                }
+                let mut st = waiter.lock().unwrap_or_else(|e| e.into_inner());
+                if st.state == "waiting" {
+                    st.state = "failed".to_owned();
+                    st.note = "timeout".to_owned();
+                    st.teardown();
+                }
+            });
+
+        let st = login.lock().unwrap_or_else(|e| e.into_inner());
+        json!({
+            "ok": true,
+            "state": st.state,
+            "url": st.url,
+            "note": st.note,
+        })
+    }
+
+    fn cancel_cli_add(&mut self) -> Value {
+        if let Some(login) = self.active_login.take() {
+            let mut st = login.lock().unwrap_or_else(|e| e.into_inner());
+            st.state = "cancelled".to_owned();
+            st.teardown();
+            json!({ "ok": true, "state": "cancelled", "accounts": self.data.accounts })
+        } else {
+            json!({ "ok": true, "state": "idle", "accounts": self.data.accounts })
         }
     }
 }
@@ -610,5 +897,82 @@ mod tests {
             false
         );
         assert!(victim_dir.is_dir(), "outside directory must never be deleted");
+    }
+
+    #[test]
+    fn codex_add_spawns_app_server_parses_auth_url_and_cancel_kills_and_cleans_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let seat_dir = dir.path().join("codex-seat");
+        std::fs::create_dir_all(&seat_dir).unwrap();
+
+        #[cfg(windows)]
+        let fake_codex = {
+            let p = dir.path().join("fake-codex.cmd");
+            std::fs::write(
+                &p,
+                "@echo off\r\n\
+echo {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\r\n\
+set /p RPC_IN=\r\n\
+echo {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"authUrl\":\"https://auth.openai.com/codex-test\",\"loginId\":\"lid-1\"}}\r\n\
+set /p WAIT_FOREVER=\r\n",
+            )
+            .unwrap();
+            p
+        };
+        #[cfg(not(windows))]
+        let fake_codex = {
+            use std::os::unix::fs::PermissionsExt;
+            let p = dir.path().join("fake-codex.sh");
+            std::fs::write(
+                &p,
+                "#!/bin/sh\n\
+read LINE1\n\
+echo '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\n\
+read LINE2\n\
+read LINE3\n\
+echo '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"authUrl\":\"https://auth.openai.com/codex-test\",\"loginId\":\"lid-1\"}}'\n\
+sleep 60\n",
+            )
+            .unwrap();
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&p, perms).unwrap();
+            p
+        };
+
+        // SAFETY: tests run with `--test-threads=1` and restore env before exit.
+        unsafe { std::env::set_var("OFFICE_CODEX_BIN", &fake_codex) };
+        let mut mgr = CodexAccounts::load_with_seat(&data_dir, seat_dir);
+
+        let started = mgr.mutate("add", &json!({}));
+        assert_eq!(started["ok"], true);
+        assert_eq!(started["state"], "waiting");
+
+        let mut saw_url = false;
+        for _ in 0..60 {
+            if mgr.view()["login"]["url"] == "https://auth.openai.com/codex-test" {
+                saw_url = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(saw_url, "Codex app-server authUrl must be parsed from JSON-RPC stdout: {:?}", mgr.view()["login"]);
+
+        let cancelled = mgr.mutate("cancel", &json!({}));
+        assert_eq!(cancelled["ok"], true);
+        assert_eq!(cancelled["state"], "cancelled");
+
+        // Temp login directory under copies_dir must be cleaned up on cancel.
+        let leftover_tmps = std::fs::read_dir(data_dir.join("codex-accounts"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("_login-"))
+            .count();
+        assert_eq!(leftover_tmps, 0, "cancel must remove temporary _login-* CODEX_HOME dir");
+
+        unsafe { std::env::remove_var("OFFICE_CODEX_BIN") };
     }
 }
