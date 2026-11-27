@@ -635,7 +635,7 @@ pub fn spawn_workflow_life(
 
     // 3. Quota Break Countdown Board ("HẾT QUOTA", `quota.js:49-57`)
     let (qx, qy, qz, qry) = if is_pro {
-        (11.15_f32, 3.00_f32, -7.93_f32, 0.0_f32)
+        (11.15_f32, 3.00_f32, -7.91_f32, 0.0_f32)
     } else {
         (spec.clock[0] + 0.30, spec.clock[1] - 0.86, spec.clock[2] + 0.02, spec.clock[3])
     };
@@ -1026,12 +1026,12 @@ pub fn update_workflow_life_system(
             if *vis != postman_vis {
                 *vis = postman_vis;
             }
-            let offset_z = match pb.postman_stage {
+            let offset_x = match pb.postman_stage {
                 PostmanStage::Arriving => (1.0 - (pb.stage_elapsed / 2.0).clamp(0.0, 1.0)) * 1.4,
                 PostmanStage::Departing => (pb.stage_elapsed / 1.8).clamp(0.0, 1.0) * 1.4,
                 _ => 0.0,
             };
-            tf.translation = pm.home_pos + Vec3::new(offset_z, 0.0, 0.0);
+            tf.translation = pm.home_pos + Vec3::new(offset_x, 0.0, 0.0);
         }
     }
 
