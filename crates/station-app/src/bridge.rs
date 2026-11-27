@@ -6272,6 +6272,7 @@ fn rebuild_3d_office_world(
     wp: &mut WorldActionParams<'_, '_>,
     assets_dir: &std::path::Path,
     ui: &UiState,
+    life: Option<&station_3d::life::OfficeLifeState>,
     has_world: bool,
 ) {
     if let (Some(meshes), Some(mats), Some(imgs), Some(shared_fonts)) = (
@@ -6298,7 +6299,9 @@ fn rebuild_3d_office_world(
             );
         }
         let fonts = shared_fonts.get_or_init();
-        station_3d::spawn_full_office_world(
+        let fallback_life = station_3d::life::OfficeLifeState::default();
+        let active_life = life.unwrap_or(&fallback_life);
+        station_3d::spawn_full_office_world_with_life(
             commands,
             meshes,
             mats,
@@ -6309,6 +6312,7 @@ fn rebuild_3d_office_world(
             ui.backdrop,
             ui.chibi_look,
             ui.night,
+            active_life,
         );
     }
 }
@@ -9299,6 +9303,7 @@ fn process_ui_actions(
                     &mut world_params,
                     &bridge.assets_dir,
                     &ui,
+                    aux.life.as_deref(),
                     false,
                 );
             } else {
@@ -9313,6 +9318,7 @@ fn process_ui_actions(
                 &mut world_params,
                 &bridge.assets_dir,
                 &ui,
+                aux.life.as_deref(),
                 has_world,
             );
         }

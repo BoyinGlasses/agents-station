@@ -123,7 +123,7 @@ impl Default for OfficeLifeState {
             drill_active: false,
             incident_active: false,
             lift_in_service: false,
-            season: SeasonTheme::Normal,
+            season: SeasonTheme::from_local_today(),
             earned_trophies: 3,
         }
     }
@@ -238,5 +238,8 @@ mod tests {
         // Ordinary non-holiday dates
         assert_eq!(SeasonTheme::from_date(2026, 5, 15), SeasonTheme::Normal);
         assert_eq!(SeasonTheme::from_date(2026, 8, 12), SeasonTheme::Normal);
+
+        // Default OfficeLifeState resolves today's local season automatically
+        assert_eq!(OfficeLifeState::default().season, SeasonTheme::from_local_today());
     }
 }

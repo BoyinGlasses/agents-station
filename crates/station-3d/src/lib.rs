@@ -205,12 +205,41 @@ pub fn spawn_full_office_world(
     look: ChibiLook,
     night: bool,
 ) {
+    let default_life = life::OfficeLifeState::default();
+    spawn_full_office_world_with_life(
+        commands,
+        meshes,
+        materials,
+        images,
+        fonts,
+        assets_dir,
+        layout,
+        backdrop,
+        look,
+        night,
+        &default_life,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_full_office_world_with_life(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    fonts: &mut FontEngine,
+    assets_dir: &Path,
+    layout: OfficeLayout,
+    backdrop: BackdropKind,
+    look: ChibiLook,
+    night: bool,
+    life_state: &life::OfficeLifeState,
+) {
     let spec = LayoutSpec::for_layout(layout);
     let mut pal = WorldPalette::new(meshes);
     let chibi_cache = ChibiMeshCache::build(meshes, materials, images);
     let mut brands = BrandRegistry::new(assets_dir.to_path_buf());
     let mut backdrop_assets = BackdropAssets::default();
-    let life_state = life::OfficeLifeState::default();
 
     let ibl = ibl::OfficeIbl::generate(images);
     lights::spawn_office_lights(commands, &spec, night);
@@ -238,7 +267,7 @@ pub fn spawn_full_office_world(
         images,
         fonts,
         &spec,
-        &life_state,
+        life_state,
     );
     backdrops::spawn_backdrop(
         commands,
@@ -331,9 +360,12 @@ impl Plugin for OfficeWorldPlugin {
                   mut meshes: ResMut<Assets<Mesh>>,
                   mut materials: ResMut<Assets<StandardMaterial>>,
                   mut images: ResMut<Assets<Image>>,
-                  mut shared_fonts: ResMut<SharedFontEngine>| {
+                  mut shared_fonts: ResMut<SharedFontEngine>,
+                  life: Option<Res<life::OfficeLifeState>>| {
                 let fonts = shared_fonts.get_or_init();
-                spawn_full_office_world(
+                let fallback_life = life::OfficeLifeState::default();
+                let active_life = life.as_deref().unwrap_or(&fallback_life);
+                spawn_full_office_world_with_life(
                     &mut commands,
                     &mut meshes,
                     &mut materials,
@@ -344,6 +376,7 @@ impl Plugin for OfficeWorldPlugin {
                     backdrop,
                     ChibiLook::Pixar,
                     night,
+                    active_life,
                 );
             },
         );
@@ -1211,5 +1244,50 @@ mod tests {
             );
             assert_eq!(world.resource::<Assets<Image>>().len(), 0, "layout {layout:?} leaked Image");
         }
+    }
+
+    #[test]
+    fn office_world_plugin_uses_active_office_life_state_for_season_and_rain() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(Assets::<Mesh>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
+            .add_plugins(OfficeWorldPlugin {
+                layout: OfficeLayout::Pro,
+                backdrop: BackdropKind::City,
+                assets_dir,
+                night: false,
+            });
+        // Override OfficeLifeState before Startup runs (simulating holiday season + live rain)
+        {
+            let mut life = app.world_mut().resource_mut::<life::OfficeLifeState>();
+            life.season = life::SeasonTheme::Christmas;
+            life.apply_open_meteo(95, 22.0);
+        }
+        app.world_mut().run_schedule(Startup);
+        app.world_mut().flush();
+
+        let decor_count = app
+            .world_mut()
+            .query::<&life_systems::seasons_weather::SeasonDecorPart>()
+            .iter(app.world())
+            .count();
+        assert!(
+            decor_count > 0,
+            "Startup spawn must honor active OfficeLifeState.season (Christmas)"
+        );
+        let visible_drops = app
+            .world_mut()
+            .query_filtered::<&Visibility, With<life::RainDrop>>()
+            .iter(app.world())
+            .filter(|v| **v == Visibility::Visible)
+            .count();
+        assert_eq!(
+            visible_drops,
+            life_systems::RAIN_POOL_CAP,
+            "Startup spawn must honor active OfficeLifeState.rain_intensity"
+        );
     }
 }
