@@ -3268,6 +3268,10 @@ pub struct LiveServerBridge {
     seen_perm_ids: HashSet<String>,
     dismissed_ci_ids: HashSet<String>,
     last_window_focused: Option<bool>,
+    last_seen_feed_id: u64,
+    last_remote_feed_sig: Option<(String, String, String)>,
+    last_session_statuses: HashMap<String, String>,
+    weather_fetch_in_flight: Arc<std::sync::atomic::AtomicBool>,
     toast_tx: mpsc::Sender<(String, String)>,
     toast_rx: mpsc::Receiver<(String, String)>,
     async_tx: mpsc::Sender<BridgeAsyncResult>,
@@ -3275,6 +3279,58 @@ pub struct LiveServerBridge {
 }
 
 impl LiveServerBridge {
+    #[allow(clippy::too_many_arguments)]
+    fn build_instance(
+        backend: BridgeBackend,
+        data_dir: PathBuf,
+        assets_dir: PathBuf,
+        port: u16,
+        sync_interval_secs: f32,
+        toast_tx: mpsc::Sender<(String, String)>,
+        toast_rx: mpsc::Receiver<(String, String)>,
+        async_tx: mpsc::Sender<BridgeAsyncResult>,
+        async_rx: mpsc::Receiver<BridgeAsyncResult>,
+    ) -> Self {
+        Self {
+            backend,
+            data_dir,
+            assets_dir,
+            port,
+            sync_timer: Timer::from_seconds(sync_interval_secs, TimerMode::Repeating),
+            sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
+            sys_refresh_due: true,
+            banner_pushed: false,
+            seen_perm_ids: HashSet::new(),
+            dismissed_ci_ids: HashSet::new(),
+            last_window_focused: None,
+            last_seen_feed_id: 0,
+            last_remote_feed_sig: None,
+            last_session_statuses: HashMap::new(),
+            weather_fetch_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            toast_tx,
+            toast_rx,
+            async_tx,
+            async_rx,
+        }
+    }
+
+    fn is_live_net(&self) -> bool {
+        matches!(
+            &self.backend,
+            BridgeBackend::InProcess {
+                runtime_handle: Some(_),
+                ..
+            } | BridgeBackend::AttachedHttp { .. }
+        )
+    }
+
+    fn runtime_handle(&self) -> Option<tokio::runtime::Handle> {
+        match &self.backend {
+            BridgeBackend::InProcess { runtime_handle, .. } => runtime_handle.clone(),
+            _ => None,
+        }
+    }
+
     pub fn connect_or_start(
         data_dir: PathBuf,
         assets_dir: PathBuf,
@@ -3297,8 +3353,8 @@ impl LiveServerBridge {
                 toast_tx.clone(),
                 async_tx.clone(),
             );
-            return Self {
-                backend: BridgeBackend::AttachedHttp {
+            return Self::build_instance(
+                BridgeBackend::AttachedHttp {
                     snapshot,
                     action_tx,
                     query_tx,
@@ -3307,18 +3363,12 @@ impl LiveServerBridge {
                 data_dir,
                 assets_dir,
                 port,
-                sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
-                sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                sys_refresh_due: true,
-                banner_pushed: false,
-                seen_perm_ids: HashSet::new(),
-                dismissed_ci_ids: HashSet::new(),
-                last_window_focused: None,
+                0.5,
                 toast_tx,
                 toast_rx,
                 async_tx,
                 async_rx,
-            };
+            );
         }
 
         let bin_path =
@@ -3334,8 +3384,8 @@ impl LiveServerBridge {
             Ok(st) => Arc::new(st),
             Err(err) => {
                 let harness_poller = HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
-                return Self {
-                    backend: BridgeBackend::BindError {
+                return Self::build_instance(
+                    BridgeBackend::BindError {
                         message: format!("Failed to initialize station store: {err}"),
                         harnesses,
                         harness_poller,
@@ -3343,25 +3393,19 @@ impl LiveServerBridge {
                     data_dir,
                     assets_dir,
                     port,
-                    sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-                    sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                    sys_refresh_due: true,
-                    banner_pushed: false,
-                    seen_perm_ids: HashSet::new(),
-                    dismissed_ci_ids: HashSet::new(),
-                    last_window_focused: None,
+                    1.0,
                     toast_tx,
                     toast_rx,
                     async_tx,
                     async_rx,
-                };
+                );
             }
         };
 
         if !start_http {
             let harness_poller = HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
-            return Self {
-                backend: BridgeBackend::InProcess {
+            return Self::build_instance(
+                BridgeBackend::InProcess {
                     app_state,
                     harnesses,
                     harness_poller,
@@ -3371,18 +3415,12 @@ impl LiveServerBridge {
                 data_dir,
                 assets_dir,
                 port,
-                sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-                sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                sys_refresh_due: true,
-                banner_pushed: false,
-                seen_perm_ids: HashSet::new(),
-                dismissed_ci_ids: HashSet::new(),
-                last_window_focused: None,
+                1.0,
                 toast_tx,
                 toast_rx,
                 async_tx,
                 async_rx,
-            };
+            );
         }
 
         let state_bg = app_state.clone();
@@ -3437,8 +3475,8 @@ impl LiveServerBridge {
             Ok(rt_handle) => {
                 let harness_poller =
                     HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
-                Self {
-                    backend: BridgeBackend::InProcess {
+                Self::build_instance(
+                    BridgeBackend::InProcess {
                         app_state,
                         harnesses,
                         harness_poller,
@@ -3448,18 +3486,12 @@ impl LiveServerBridge {
                     data_dir,
                     assets_dir,
                     port,
-                    sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-                    sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                    sys_refresh_due: true,
-                    banner_pushed: false,
-                    seen_perm_ids: HashSet::new(),
-                    dismissed_ci_ids: HashSet::new(),
-                    last_window_focused: None,
+                    1.0,
                     toast_tx,
                     toast_rx,
                     async_tx,
                     async_rx,
-                }
+                )
             }
             Err(err) => {
                 // Re-check once in case another Agents Station daemon just finished binding :4310.
@@ -3474,8 +3506,8 @@ impl LiveServerBridge {
                         toast_tx.clone(),
                         async_tx.clone(),
                     );
-                    Self {
-                        backend: BridgeBackend::AttachedHttp {
+                    Self::build_instance(
+                        BridgeBackend::AttachedHttp {
                             snapshot,
                             action_tx,
                             query_tx,
@@ -3484,23 +3516,17 @@ impl LiveServerBridge {
                         data_dir,
                         assets_dir,
                         port,
-                        sync_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
-                        sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                        sys_refresh_due: true,
-                        banner_pushed: false,
-                        seen_perm_ids: HashSet::new(),
-                        dismissed_ci_ids: HashSet::new(),
-                        last_window_focused: None,
+                        0.5,
                         toast_tx,
                         toast_rx,
                         async_tx,
                         async_rx,
-                    }
+                    )
                 } else {
                     let harness_poller =
                         HarnessPoller::spawn(harnesses.clone(), HARNESS_POLL_INTERVAL);
-                    Self {
-                        backend: BridgeBackend::BindError {
+                    Self::build_instance(
+                        BridgeBackend::BindError {
                             message: format!(
                                 "Cannot bind http://{host}:{port} ({err}). Stop the conflicting process or change --port."
                             ),
@@ -3510,18 +3536,12 @@ impl LiveServerBridge {
                         data_dir,
                         assets_dir,
                         port,
-                        sync_timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-                        sys_sync_timer: Timer::from_seconds(4.0, TimerMode::Repeating),
-                        sys_refresh_due: true,
-                        banner_pushed: false,
-                        seen_perm_ids: HashSet::new(),
-                        dismissed_ci_ids: HashSet::new(),
-                        last_window_focused: None,
+                        1.0,
                         toast_tx,
                         toast_rx,
                         async_tx,
                         async_rx,
-                    }
+                    )
                 }
             }
         }
@@ -4673,6 +4693,170 @@ fn sync_in_process_telemetry(app_state: &AppState, ui: &mut UiState, refresh_sys
     }
 }
 
+#[derive(SystemParam)]
+struct LiveLifeSyncParams<'w> {
+    life: Option<ResMut<'w, station_3d::life::OfficeLifeState>>,
+    postbox: Option<ResMut<'w, station_3d::PostboxState>>,
+    incidents: Option<ResMut<'w, station_3d::IncidentState>>,
+    tests_board: Option<ResMut<'w, station_3d::TestsBoardState>>,
+    quota: Option<ResMut<'w, station_3d::QuotaBoardState>>,
+    your_turn: Option<ResMut<'w, station_3d::YourTurnState>>,
+    rocket_queue: Option<ResMut<'w, station_3d::RocketLaunchQueue>>,
+}
+
+fn forward_live_event_to_life(
+    kind: &str,
+    label: &str,
+    desk: usize,
+    lp: &mut LiveLifeSyncParams<'_>,
+) {
+    let k = kind.trim().to_ascii_lowercase();
+    let l = label.trim().to_ascii_lowercase();
+    match k.as_str() {
+        "commit" => {
+            if let Some(pb) = lp.postbox.as_deref_mut() {
+                pb.on_commit();
+            }
+        }
+        "push" => {
+            if let Some(pb) = lp.postbox.as_deref_mut() {
+                pb.on_push();
+            }
+            if let Some(rq) = lp.rocket_queue.as_deref_mut() {
+                rq.pending = true;
+            }
+        }
+        "deploy" => {
+            if let Some(rq) = lp.rocket_queue.as_deref_mut() {
+                rq.pending = true;
+            }
+        }
+        "fail" | "error" => {
+            if let Some(inc) = lp.incidents.as_deref_mut() {
+                inc.record_failure();
+            }
+        }
+        "test" => {
+            if let Some(tb) = lp.tests_board.as_deref_mut() {
+                tb.set_row(desk, station_3d::TestRunStatus::Running);
+            }
+        }
+        "testok" | "test_pass" => {
+            if let Some(tb) = lp.tests_board.as_deref_mut() {
+                tb.set_row(desk, station_3d::TestRunStatus::Pass);
+            }
+        }
+        "testfail" | "test_fail" => {
+            if let Some(tb) = lp.tests_board.as_deref_mut() {
+                tb.set_row(desk, station_3d::TestRunStatus::Fail);
+            }
+            if let Some(inc) = lp.incidents.as_deref_mut() {
+                inc.record_failure();
+            }
+        }
+        "quota" => {
+            if let Some(q) = lp.quota.as_deref_mut() {
+                q.set_exhausted(true, 1800.0);
+            }
+        }
+        "cmd" | "bash" => {
+            if l.contains("git commit") {
+                if let Some(pb) = lp.postbox.as_deref_mut() {
+                    pb.on_commit();
+                }
+            } else if l.contains("git push") {
+                if let Some(pb) = lp.postbox.as_deref_mut() {
+                    pb.on_push();
+                }
+                if let Some(rq) = lp.rocket_queue.as_deref_mut() {
+                    rq.pending = true;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sync_live_quota_and_your_turn(
+    ui: &UiState,
+    bridge: &mut LiveServerBridge,
+    unfocused_or_tray: bool,
+    lp: &mut LiveLifeSyncParams<'_>,
+) {
+    // 1. QuotaBoardState from active AI accounts / quota windows
+    if let Some(q) = lp.quota.as_deref_mut() {
+        let now = now_ms();
+        let mut saw_active_quota = false;
+        let mut hit_limit_secs: Option<f32> = None;
+
+        for acct in ui
+            .ai_accounts
+            .claude
+            .iter()
+            .chain(ui.ai_accounts.codex.iter())
+            .chain(ui.ai_accounts.ag.iter())
+        {
+            if !acct.active {
+                continue;
+            }
+            for w in &acct.windows {
+                saw_active_quota = true;
+                if w.pct >= 100.0 {
+                    let rem = if w.resets_at_ms > now {
+                        ((w.resets_at_ms - now) as f32 / 1000.0).max(60.0)
+                    } else {
+                        1800.0
+                    };
+                    hit_limit_secs = Some(hit_limit_secs.map_or(rem, |prev| prev.min(rem)));
+                }
+            }
+        }
+        if hit_limit_secs.is_none() {
+            for a in &ui.accounts {
+                if a.active
+                    && let Some(pct) = a.pct
+                {
+                    saw_active_quota = true;
+                    if pct >= 100 {
+                        hit_limit_secs = Some(1800.0);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(rem) = hit_limit_secs {
+            q.set_exhausted(true, rem);
+        } else if saw_active_quota && q.exhausted {
+            q.set_exhausted(false, 0.0);
+        }
+    }
+
+    // 2. YourTurnState: detect work -> rest (done) transitions while unfocused/in-tray
+    if let Some(yt) = lp.your_turn.as_deref_mut() {
+        if !unfocused_or_tray {
+            yt.clear_all();
+        } else {
+            for s in &ui.sessions {
+                if s.status == "rest"
+                    && bridge
+                        .last_session_statuses
+                        .get(&s.id)
+                        .is_some_and(|prev| prev == "work")
+                {
+                    yt.mark_done(&s.id, false);
+                }
+            }
+        }
+    }
+    bridge.last_session_statuses.clear();
+    for s in &ui.sessions {
+        bridge
+            .last_session_statuses
+            .insert(s.id.clone(), s.status.clone());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sync_live_state_to_ui(
     time: Res<Time>,
     mut bridge: ResMut<LiveServerBridge>,
@@ -4680,7 +4864,7 @@ fn sync_live_state_to_ui(
     i18n: Option<Res<I18nStore>>,
     windows: Query<&Window>,
     mut tray: Option<ResMut<TrayState>>,
-    mut life: Option<ResMut<station_3d::life::OfficeLifeState>>,
+    mut life_params: LiveLifeSyncParams,
 ) {
     ui.clock_label = Local::now().format("%H:%M").to_string();
 
@@ -4890,7 +5074,7 @@ fn sync_live_state_to_ui(
                 }
             }
             BridgeAsyncResult::WeatherFetched { code, temp_c } => {
-                if let Some(l) = life.as_deref_mut() {
+                if let Some(l) = life_params.life.as_deref_mut() {
                     apply_weather_to_state(code, temp_c, l, &mut ui);
                 } else {
                     let mut tmp = station_3d::life::OfficeLifeState::default();
@@ -4960,14 +5144,37 @@ fn sync_live_state_to_ui(
 
     let refresh_sys = bridge.sys_refresh_due;
     let mut synced_live_perms = false;
-    match &bridge.backend {
+    let mut new_live_events: Vec<(String, String, usize)> = Vec::new();
+    let bridge_ref = &mut *bridge;
+    match &bridge_ref.backend {
         BridgeBackend::AttachedHttp { snapshot, .. } => {
             let snap = snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if !ui.demo_running && !ui.replay_active {
                 synced_live_perms = snap.has_snapshot;
                 apply_remote_snapshot_to_ui(&snap, &mut ui);
                 ui.pending_perms
-                    .retain(|p| !(p.kind == "ci" && bridge.dismissed_ci_ids.contains(&p.id)));
+                    .retain(|p| !(p.kind == "ci" && bridge_ref.dismissed_ci_ids.contains(&p.id)));
+                if !snap.feed.is_empty() {
+                    let sig_of = |f: &FeedEntry| {
+                        (f.ts_label.clone(), f.kind.clone(), f.message.clone())
+                    };
+                    let mut fresh = Vec::new();
+                    for f in &snap.feed {
+                        if bridge_ref.last_remote_feed_sig.as_ref() == Some(&sig_of(f)) {
+                            break;
+                        }
+                        let desk = ui
+                            .sessions
+                            .iter()
+                            .find(|s| s.project == f.agent)
+                            .map(|s| s.desk)
+                            .unwrap_or(0);
+                        fresh.push((f.kind.clone(), f.message.clone(), desk));
+                    }
+                    fresh.reverse();
+                    new_live_events.extend(fresh);
+                    bridge_ref.last_remote_feed_sig = Some(sig_of(&snap.feed[0]));
+                }
             } else if let Some(pin) = &snap.pairing_pin {
                 ui.pairing_pin = pin.clone();
             }
@@ -4975,14 +5182,36 @@ fn sync_live_state_to_ui(
         BridgeBackend::InProcess { app_state, .. } => {
             if !ui.demo_running && !ui.replay_active {
                 synced_live_perms = true;
-                sync_office_core_to_ui(app_state, &bridge.dismissed_ci_ids, &mut ui);
+                sync_office_core_to_ui(app_state, &bridge_ref.dismissed_ci_ids, &mut ui);
+                if let Ok(office) = app_state.office.lock() {
+                    let mut max_id = bridge_ref.last_seen_feed_id;
+                    for f in &office.feed {
+                        if f.id > bridge_ref.last_seen_feed_id {
+                            max_id = max_id.max(f.id);
+                            let desk = office
+                                .sessions
+                                .get(&f.sess)
+                                .map(|s| s.desk)
+                                .unwrap_or(0);
+                            new_live_events.push((f.kind.clone(), f.label.clone(), desk));
+                        }
+                    }
+                    bridge_ref.last_seen_feed_id = max_id;
+                }
             }
             sync_in_process_telemetry(app_state, &mut ui, refresh_sys);
             if refresh_sys {
-                bridge.sys_refresh_due = false;
+                bridge_ref.sys_refresh_due = false;
             }
         }
         BridgeBackend::BindError { .. } => {}
+    }
+
+    if !ui.demo_running && !ui.replay_active {
+        for (kind, label, desk) in &new_live_events {
+            forward_live_event_to_life(kind, label, *desk, &mut life_params);
+        }
+        sync_live_quota_and_your_turn(&ui, &mut bridge, unfocused_or_tray, &mut life_params);
     }
 
     if synced_live_perms {
@@ -10409,6 +10638,10 @@ mod tests {
             seen_perm_ids: HashSet::new(),
             dismissed_ci_ids: HashSet::new(),
             last_window_focused: None,
+            last_seen_feed_id: 0,
+            last_remote_feed_sig: None,
+            last_session_statuses: HashMap::new(),
+            weather_fetch_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             toast_tx,
             toast_rx,
             async_tx,
@@ -11124,6 +11357,10 @@ mod tests {
             seen_perm_ids: HashSet::new(),
             dismissed_ci_ids: HashSet::new(),
             last_window_focused: None,
+            last_seen_feed_id: 0,
+            last_remote_feed_sig: None,
+            last_session_statuses: HashMap::new(),
+            weather_fetch_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             toast_tx,
             toast_rx,
             async_tx,
@@ -12211,6 +12448,10 @@ mod tests {
             seen_perm_ids: HashSet::new(),
             dismissed_ci_ids: HashSet::new(),
             last_window_focused: None,
+            last_seen_feed_id: 0,
+            last_remote_feed_sig: None,
+            last_session_statuses: HashMap::new(),
+            weather_fetch_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             toast_tx,
             toast_rx,
             async_tx,
@@ -13210,6 +13451,145 @@ mod tests {
             act_app.world().resource::<station_3d::TestsBoardState>().rows[0].status,
             station_3d::TestRunStatus::Idle,
             "ToggleDemo OFF must reset TestsBoardState"
+        );
+    }
+
+    #[test]
+    fn live_feed_watermark_and_quota_and_your_turn_sync_without_duplication() {
+        let tmp = tempfile::tempdir().unwrap();
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let bridge = LiveServerBridge::connect_or_start(
+            tmp.path().to_path_buf(),
+            assets_dir,
+            "127.0.0.1".into(),
+            0,
+            false,
+            false,
+        );
+        let app_state = match &bridge.backend {
+            BridgeBackend::InProcess { app_state, .. } => app_state.clone(),
+            _ => panic!("expected InProcess backend"),
+        };
+
+        // Seed one working session + real feed events (commit, push, testok, 3x fail)
+        {
+            let mut office = app_state.office.lock().unwrap();
+            office.ingest_raw_event(json!({
+                "hook_event_name": "SessionStart",
+                "session_id": "sess-1",
+                "cwd": "d:/work/my-api"
+            }));
+            let s = office.sessions.get_mut("sess-1").expect("session registered");
+            s.desk = 2;
+            s.status = "work".to_owned();
+            for (id, kind, label) in [
+                (101u64, "commit", "git commit -m feat"),
+                (102, "push", "git push origin main"),
+                (103, "testok", "cargo test passed"),
+                (104, "fail", "build failed 1"),
+                (105, "fail", "build failed 2"),
+                (106, "fail", "build failed 3"),
+            ] {
+                office.feed.push_back(station_core::state::sessions::FeedItem {
+                    id,
+                    ts: now_ms(),
+                    sess: "sess-1".to_owned(),
+                    name: "my-api".to_owned(),
+                    kind: kind.to_owned(),
+                    label: label.to_owned(),
+                    desc: None,
+                    image: None,
+                });
+            }
+        }
+
+        let mut ui = UiState::default();
+        ui.ai_accounts.claude.push(AiAccountEntry {
+            slug: "main".into(),
+            label: "Main".into(),
+            email: "dev@example.com".into(),
+            plan: "max".into(),
+            active: true,
+            has_credentials: true,
+            note: String::new(),
+            windows: vec![QuotaWindowUi {
+                key: "session".into(),
+                label: "5h".into(),
+                pct: 100.0,
+                resets_at_ms: now_ms() + 600_000,
+            }],
+        });
+
+        let mut app = App::new();
+        app.insert_resource(Time::<()>::default())
+            .insert_resource(bridge)
+            .insert_resource(ui)
+            .insert_resource(station_3d::life::OfficeLifeState::default())
+            .insert_resource(station_3d::PostboxState::default())
+            .insert_resource(station_3d::IncidentState::default())
+            .insert_resource(station_3d::TestsBoardState::default())
+            .insert_resource(station_3d::QuotaBoardState::default())
+            .insert_resource(station_3d::YourTurnState::default())
+            .insert_resource(station_3d::RocketLaunchQueue::default())
+            .add_systems(Update, sync_live_state_to_ui);
+
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_millis(1100));
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<station_3d::PostboxState>().today_commits,
+            1,
+            "real live commit feed item must increment PostboxState"
+        );
+        assert!(
+            app.world().resource::<station_3d::PostboxState>().push_due_secs > 0.0,
+            "real live push feed item must trigger postman"
+        );
+        assert_eq!(
+            app.world().resource::<station_3d::TestsBoardState>().rows[2].status,
+            station_3d::TestRunStatus::Pass,
+            "real live testok feed item must light TestsBoardState row"
+        );
+        assert!(
+            app.world().resource::<station_3d::IncidentState>().is_active(),
+            "3 real live fail feed items must activate IncidentState"
+        );
+        assert!(
+            app.world().resource::<station_3d::QuotaBoardState>().exhausted,
+            "100% active account quota must fold out QuotaBoardState"
+        );
+
+        // Second tick with unchanged feed must NOT duplicate commit count
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_millis(1100));
+        app.update();
+        assert_eq!(
+            app.world().resource::<station_3d::PostboxState>().today_commits,
+            1,
+            "watermark must prevent re-processing already-seen feed items"
+        );
+
+        // Transition session from work -> rest while unfocused -> YourTurnState records unseen_done
+        {
+            let mut office = app_state.office.lock().unwrap();
+            if let Some(s) = office.sessions.get_mut("sess-1") {
+                s.status = "rest".to_owned();
+            }
+        }
+        app.world_mut()
+            .resource_mut::<Time<()>>()
+            .advance_by(Duration::from_millis(1100));
+        app.update();
+        assert!(
+            app.world()
+                .resource::<station_3d::YourTurnState>()
+                .unseen_done
+                .iter()
+                .any(|id| id == "sess-1"),
+            "work -> rest transition while unfocused must register in YourTurnState"
         );
     }
 }
