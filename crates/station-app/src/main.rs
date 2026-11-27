@@ -156,15 +156,15 @@ fn is_lite_or_panel(cli: &cli::Cli) -> bool {
 }
 
 fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
-    let default_backend = if is_lite_or_panel(cli) {
+    let lite = is_lite_or_panel(cli);
+    let default_backend = if lite {
         Backends::DX12
     } else {
         Backends::VULKAN
     };
     let effective_gpu = resolve_effective_gpu_pref(cli);
     let (win_w, win_h) = initial_window_size(cli);
-    // Keep PbrPlugin active even in --lite/--panel so switching 2D -> 3D works seamlessly at runtime.
-    DefaultPlugins
+    let builder = DefaultPlugins
         .set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Agents Station".to_owned(),
@@ -183,17 +183,26 @@ fn build_default_plugins(cli: &cli::Cli) -> bevy::app::PluginGroupBuilder {
                 ..default()
             }),
             ..default()
-        })
+        });
+    if lite {
+        // Drop PBR shader pipelines in --lite/--panel to keep Private WS well under 110 MB;
+        // switching 2D Lite -> 3D signals TrayDaemon (`WM_APP_SWITCH_3D`) to spawn the 3D worker.
+        builder.disable::<bevy::pbr::PbrPlugin>()
+    } else {
+        builder
+    }
 }
 
 fn build_gui_app(cli: &cli::Cli) -> App {
     let mut app = App::new();
     let capture_mode = cli.capture_scene.is_some();
     let is_lite_2d = is_lite_or_panel(cli);
-    app.add_plugins(build_default_plugins(cli))
-        .add_plugins(MeshPickingPlugin)
-        .insert_resource(DirectionalLightShadowMap { size: 2048 })
-        .insert_resource(PointLightShadowMap { size: 256 });
+    app.add_plugins(build_default_plugins(cli));
+    if !is_lite_2d {
+        app.add_plugins(MeshPickingPlugin)
+            .insert_resource(DirectionalLightShadowMap { size: 2048 })
+            .insert_resource(PointLightShadowMap { size: 256 });
+    }
     app.add_plugins(EguiPlugin {
         enable_multipass_for_primary_context: true,
     })
@@ -680,12 +689,21 @@ mod tests {
     }
 
     #[test]
-    fn lite_mode_keeps_pbr_plugin_enabled_for_runtime_3d_switch() {
+    fn lite_and_panel_disable_pbr_plugin_for_low_ram_while_3d_enables_it() {
         let lite_cli = cli::Cli::parse_from(["agents-station", "--lite"]);
-        let plugins = build_default_plugins(&lite_cli);
         assert!(
-            plugins.enabled::<bevy::pbr::PbrPlugin>(),
-            "PbrPlugin must remain enabled in --lite so switching 2D Lite -> 3D works seamlessly"
+            !build_default_plugins(&lite_cli).enabled::<bevy::pbr::PbrPlugin>(),
+            "PbrPlugin must be disabled in --lite to stay under the 110 MB Private WS ceiling"
+        );
+        let panel_cli = cli::Cli::parse_from(["agents-station", "--panel"]);
+        assert!(
+            !build_default_plugins(&panel_cli).enabled::<bevy::pbr::PbrPlugin>(),
+            "PbrPlugin must be disabled in --panel to stay under the 110 MB Private WS ceiling"
+        );
+        let full_cli = cli::Cli::parse_from(["agents-station"]);
+        assert!(
+            build_default_plugins(&full_cli).enabled::<bevy::pbr::PbrPlugin>(),
+            "PbrPlugin must be enabled in 3D mode"
         );
     }
 

@@ -16,6 +16,8 @@ const WM_APP_SHOW_GUI: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP
 const WM_APP_QUIT: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 3;
 #[cfg(windows)]
 const WM_APP_NOTIFY_TRAY: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 4;
+#[cfg(windows)]
+const WM_APP_SWITCH_3D: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 5;
 
 pub const NOTIFY_REASON_CLOSED_TO_TRAY: usize = 0;
 pub const NOTIFY_REASON_MINIMIZED_TO_TRAY: usize = 1;
@@ -476,6 +478,12 @@ unsafe extern "system" fn tray_wndproc(
                 }
                 return 0;
             }
+            WM_APP_SWITCH_3D => {
+                if !ctrl_ptr.is_null() {
+                    (*ctrl_ptr).spawn_or_focus_worker(Some(false));
+                }
+                return 0;
+            }
             WM_APP_NOTIFY_TRAY => {
                 if !ctrl_ptr.is_null() {
                     let (port, installed, hidden_cb) = {
@@ -868,6 +876,27 @@ pub fn request_parent_quit() -> bool {
                 return false;
             }
             PostMessageW(hwnd, WM_APP_QUIT, 0, 0) != 0
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Asks the running parent `"AgentsStationTrayHost"` window to replace a low-RAM no-PBR
+/// `--lite`/`--panel` worker with a full 3D `--gui-worker`.
+pub fn request_parent_switch_3d() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+        let class_w = to_wide(TRAY_WINDOW_CLASS);
+        unsafe {
+            let hwnd = FindWindowW(class_w.as_ptr(), std::ptr::null());
+            if hwnd.is_null() {
+                return false;
+            }
+            PostMessageW(hwnd, WM_APP_SWITCH_3D, 0, 0) != 0
         }
     }
     #[cfg(not(windows))]

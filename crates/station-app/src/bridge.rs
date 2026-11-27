@@ -9915,14 +9915,20 @@ fn process_ui_actions(
         }
         PendingWorldOp::EnsureMode3d => {
             if !has_world {
-                rebuild_3d_office_world(
-                    &mut commands,
-                    &mut world_params,
-                    &bridge.assets_dir,
-                    &ui,
-                    aux.life.as_deref(),
-                    false,
-                );
+                if world_params.materials.is_none() {
+                    if crate::tray::request_parent_switch_3d() {
+                        tray_params.app_exit.write(AppExit::Success);
+                    }
+                } else {
+                    rebuild_3d_office_world(
+                        &mut commands,
+                        &mut world_params,
+                        &bridge.assets_dir,
+                        &ui,
+                        aux.life.as_deref(),
+                        false,
+                    );
+                }
             } else {
                 for ent in &world_params.lite_cam_q {
                     commands.entity(ent).try_despawn();
@@ -9930,14 +9936,20 @@ fn process_ui_actions(
             }
         }
         PendingWorldOp::Rebuild3d => {
-            rebuild_3d_office_world(
-                &mut commands,
-                &mut world_params,
-                &bridge.assets_dir,
-                &ui,
-                aux.life.as_deref(),
-                has_world,
-            );
+            if world_params.materials.is_none() {
+                if crate::tray::request_parent_switch_3d() {
+                    tray_params.app_exit.write(AppExit::Success);
+                }
+            } else {
+                rebuild_3d_office_world(
+                    &mut commands,
+                    &mut world_params,
+                    &bridge.assets_dir,
+                    &ui,
+                    aux.life.as_deref(),
+                    has_world,
+                );
+            }
         }
         PendingWorldOp::SwapBackdrop(bk) => {
             if let (Some(p), Some(ba), Some(meshes), Some(mats), Some(imgs), Some(shared_fonts)) = (
