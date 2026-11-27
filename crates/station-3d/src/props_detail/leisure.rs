@@ -1427,6 +1427,7 @@ fn spawn_karaoke_booth(
 pub fn animate_leisure_system(
     time: Res<Time>,
     lighting: Option<Res<LightingState>>,
+    mut fp: Option<ResMut<crate::camera::FirstPersonController>>,
     mut prop_events: EventReader<PropActivated>,
     mut images: Option<ResMut<Assets<Image>>>,
     mut materials: Option<ResMut<Assets<StandardMaterial>>>,
@@ -1442,6 +1443,9 @@ pub fn animate_leisure_system(
     let dt = time.delta_secs().clamp(0.0, 0.1);
     let t = time.elapsed_secs();
     let night = lighting.as_ref().is_some_and(|l| l.night);
+
+    let fp_tv_idx = fp.as_deref_mut().and_then(|c| c.pending_tv_game_index.take());
+    let fp_bil_shot = fp.as_deref_mut().and_then(|c| c.pending_billiards_shot.take());
 
     let mut cycle_tv = false;
     let mut coin_arcade = false;
@@ -1459,7 +1463,17 @@ pub fn animate_leisure_system(
 
     // 1. GameTv: throttled ~15 Hz zero-allocation in-place 256×144 texture mutation + ambilight sync
     for mut gtv in &mut game_tv_q {
-        if cycle_tv {
+        if let Some(idx) = fp_tv_idx {
+            let target = match idx % 3 {
+                0 => TvGameKind::Football,
+                1 => TvGameKind::Racing,
+                _ => TvGameKind::Fighting,
+            };
+            while gtv.sim.kind() != target {
+                gtv.sim.cycle_game();
+            }
+            gtv.accum = 1.0;
+        } else if cycle_tv {
             gtv.sim.cycle_game();
             gtv.accum = 1.0; // flush immediately on game switch
         }
@@ -1533,9 +1547,22 @@ pub fn animate_leisure_system(
         }
     }
 
-    // 3. BilliardsTable: interactive break shot + 16-ball elastic collisions & pocket drops
+    // 3. BilliardsTable: interactive break shot + FP cue strike + 16-ball elastic collisions & pocket drops
     if let Ok(mut tbl) = bil_tbl_q.single_mut() {
-        if break_billiards {
+        if let Some((shot_dir, power)) = fp_bil_shot {
+            tbl.active = true;
+            tbl.rack_cooldown = 0.0;
+            let speed = 0.45 + power.clamp(0.05, 1.0) * 2.85;
+            let unit = shot_dir.normalize_or_zero();
+            for (mut b, mut tf, mut vis) in &mut bil_balls_q {
+                if b.number == 0 {
+                    b.pocketed = false;
+                    b.vel = unit * speed;
+                    tf.translation = Vec3::new(b.pos.x, BIL_CLOTH_Y + BIL_BALL_R, b.pos.y);
+                    *vis = Visibility::Inherited;
+                }
+            }
+        } else if break_billiards {
             tbl.active = true;
             tbl.rack_cooldown = 0.0;
             for (mut b, mut tf, mut vis) in &mut bil_balls_q {
@@ -1631,11 +1658,15 @@ pub fn animate_leisure_system(
                     }
                 }
                 let mut any_moving = false;
+                let mut potted_count = 0u32;
                 for (mut b, mut tf, mut vis) in &mut bil_balls_q {
                     let s = state[b.number as usize];
                     b.pos = s.1;
                     b.vel = s.2;
                     b.pocketed = s.3;
+                    if b.number > 0 && b.pocketed {
+                        potted_count += 1;
+                    }
                     if !b.pocketed && b.vel.length_squared() > 0.0004 {
                         any_moving = true;
                     }
@@ -1645,6 +1676,11 @@ pub fn animate_leisure_system(
                     } else {
                         Visibility::Inherited
                     };
+                }
+                if let Some(ctrl) = fp.as_deref_mut()
+                    && let crate::camera::FirstPersonActivity::PlayingBilliards { ref mut potted, .. } = ctrl.activity
+                {
+                    *potted = potted_count;
                 }
                 if !any_moving {
                     tbl.active = false;

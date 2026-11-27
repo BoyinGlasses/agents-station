@@ -29,7 +29,10 @@ pub mod street;
 use bevy::prelude::*;
 pub use audio::SfxKind;
 pub use backdrops::{BackdropAssets, BackdropEntity, BackdropKind};
-pub use camera::{CameraControlSet, CameraPreset, Lite2dCamera, UiInputCapture};
+pub use camera::{
+    CameraControlSet, CameraPreset, FirstPersonActivity, FirstPersonAvatar, FirstPersonController,
+    FirstPersonPrompt, FpFadeState, FpToastNotice, Lite2dCamera, ObstacleGrid, UiInputCapture,
+};
 pub use cast::{
     ActiveRoutine, BilliardsStage, CastClock, CastEvents, DutyChore, ErrandKind, FarewellStage,
     InternTenure, KARAOKE_SONGS, KaraokeSong, KaraokeStage, MealsBreaksState, OfficeGamesState,
@@ -190,6 +193,9 @@ fn register_office_runtime(
                 street::scenes_a::animate_street_scenes_a_system,
                 street::scenes_b::animate_street_scenes_b_system,
                 street::country_beach::animate_countryside_and_beach_system,
+                camera::first_person_update_system
+                    .before(props_detail::leisure::animate_leisure_system)
+                    .before(entrance::animate_elevator_doors_system),
             ),
         )
         .add_systems(
@@ -268,6 +274,8 @@ pub fn spawn_full_office_world_with_life(
     props::spawn_all_props(commands, &mut pal, materials, images, fonts, &spec);
     people::spawn_office_cast(commands, &chibi_cache, &mut pal, materials, &spec, look);
     cast::spawn_office_staff_cast(commands, &chibi_cache, &mut pal, materials, &spec, look);
+    camera::spawn_fp_avatar(commands, &chibi_cache, &mut pal, materials, &spec, look);
+    commands.insert_resource(camera::FirstPersonController::from_layout(&spec));
     life::spawn_life_elements(
         commands,
         &mut pal,
@@ -344,6 +352,8 @@ pub fn unload_full_office_world(
     commands.remove_resource::<NavGraph>();
     commands.remove_resource::<desks::ScreenMaterials>();
     commands.remove_resource::<camera::CameraRig>();
+    commands.remove_resource::<camera::FirstPersonController>();
+    commands.remove_resource::<street::CityStreetNav>();
     commands.insert_resource(cast::RoutineCoordinator::default());
     commands.insert_resource(cast::OfficeGamesState::default());
     commands.insert_resource(cast::MealsBreaksState::default());

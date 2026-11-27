@@ -175,7 +175,7 @@ fn point_to_segment_dist(p: Vec2, a: Vec2, b: Vec2) -> f32 {
     p.distance(a + ab * k)
 }
 
-fn build_partition_walls(layout: OfficeLayout) -> Vec<WallSegment> {
+pub fn build_partition_walls(layout: OfficeLayout) -> Vec<WallSegment> {
     if !layout.is_pro() {
         return Vec::new();
     }

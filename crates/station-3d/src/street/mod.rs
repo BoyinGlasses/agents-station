@@ -648,6 +648,56 @@ impl SpotFinder {
     }
 }
 
+/// Street-level collision, ground height, lobby exit, and walk-in shop interaction registry
+/// populated by `spawn_city_backdrop` and removed on backdrop unload.
+#[derive(Resource, Debug, Clone)]
+pub struct CityStreetNav {
+    pub lobby_exit: Vec2,
+    pub lobby_normal: Vec2,
+    pub terrace_excl: [f32; 4],
+    pub solids: Vec<[f32; 4]>,
+    pub walkin_rooms: Vec<shops_walkin::WalkInRoomBounds>,
+    pub shop_spots: Vec<shops_walkin::StreetShopSpot>,
+    pub xs: Vec<f32>,
+    pub zs: Vec<f32>,
+}
+
+impl CityStreetNav {
+    /// Returns `true` if `(x, z)` with player radius `r` hits a street building or terrace wall,
+    /// while carving out walk-in shop doorways and interiors so players can walk right inside.
+    pub fn blocked_at(&self, x: f32, z: f32, r: f32) -> bool {
+        if x < -95.0 || x > 95.0 || z < -95.0 || z > 95.0 {
+            return true;
+        }
+        // Inside any walk-in shop doorway or interior room -> passable!
+        if self.walkin_rooms.iter().any(|room| room.contains_walkable(x, z)) {
+            return false;
+        }
+        // Office terrace footprint blocks walking from street without taking the lift
+        if city_grid::rect_contains_padded(self.terrace_excl, x, z, r) {
+            return true;
+        }
+        for &[x0, x1, z0, z1] in &self.solids {
+            if x > x0 - r && x < x1 + r && z > z0 - r && z < z1 + r {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Ground elevation on the city street: `PAVE_Y` on sidewalks/shops, `GY` on asphalt roads.
+    pub fn ground_at(&self, x: f32, z: f32) -> f32 {
+        let half = city_grid::STREET_W * 0.5;
+        let on_road_x = self.xs.iter().any(|&rx| (x - rx).abs() < half);
+        let on_road_z = self.zs.iter().any(|&rz| (z - rz).abs() < half);
+        if on_road_x || on_road_z {
+            GY
+        } else {
+            PAVE_Y
+        }
+    }
+}
+
 /// Spawns the complete 1:1 City exterior backdrop: multi-block supergrid, stepped skyscrapers,
 /// rooftop clutter, streetlamps & night pools, utility wires, countdown traffic signals, all 10
 /// walk-in 3D Vietnamese shops, *Quán cơm bình dân* / Friday *Bún đậu*, all 13+ `cars.json` +
@@ -682,6 +732,24 @@ pub fn spawn_city_backdrop(
         city,
         night,
     );
+    let (walkin_rooms, shop_spots) = shops_walkin::build_shop_nav_zones_and_spots(&grid.shop_fronts, city);
+    let solids: Vec<[f32; 4]> = grid
+        .solids
+        .iter()
+        .map(|s| [s[0], s[1], s[2], s[3]])
+        .collect();
+    // Place the street lobby exit on the pavement right outside the office superblock nearest the lift
+    let lobby_exit = Vec2::new(grid.sb.x0 - 0.25, spec.door_z);
+    commands.insert_resource(CityStreetNav {
+        lobby_exit,
+        lobby_normal: Vec2::new(-1.0, 0.0),
+        terrace_excl: grid.terrace_excl,
+        solids,
+        walkin_rooms,
+        shop_spots,
+        xs: grid.xs.clone(),
+        zs: grid.zs.clone(),
+    });
     traffic::spawn_street_traffic(commands, meshes, materials, ba, &grid, signs_mat.clone(), temp_c);
     let mut finder = SpotFinder::new(
         grid.office_mid,

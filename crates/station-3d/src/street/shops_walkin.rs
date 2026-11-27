@@ -3,6 +3,7 @@
 //! `shop-katinat.js`, `shop-longchau.js`).
 
 use crate::backdrops::{BackdropAssets, BackdropEntity};
+use crate::chibi_props::PropKind;
 use crate::palette::WorldEntity;
 use crate::street::city_grid::{SHOP_CEIL, SHOP_W, ShopDir, ShopFront, shop_depth};
 use crate::street::{GY, StreetMeshBuilder, spawn_backdrop_uv_quad};
@@ -11,6 +12,157 @@ use station_canvas2d::street_surfaces::{draw_generic_shop_strip, draw_shop_cell}
 use station_canvas2d::{BrandRegistry, FontEngine};
 use std::collections::HashMap;
 use std::f32::consts::FRAC_PI_2;
+
+/// Walkable ground-floor room & open doorway cutout for a walk-in shop so first-person players
+/// can walk right off the pavement through the open doorway into the shop interior.
+#[derive(Debug, Clone, Copy)]
+pub struct WalkInRoomBounds {
+    pub chain: &'static str,
+    pub room_min: Vec2,
+    pub room_max: Vec2,
+    pub door_min: Vec2,
+    pub door_max: Vec2,
+}
+
+impl WalkInRoomBounds {
+    pub fn contains_walkable(&self, x: f32, z: f32) -> bool {
+        let in_room = x >= self.room_min.x
+            && x <= self.room_max.x
+            && z >= self.room_min.y
+            && z <= self.room_max.y;
+        let in_door = x >= self.door_min.x
+            && x <= self.door_max.x
+            && z >= self.door_min.y
+            && z <= self.door_max.y;
+        in_room || in_door
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ShopSpotKind {
+    Take {
+        item_id: &'static str,
+        price_k: u32,
+        carry: PropKind,
+    },
+    Pay {
+        default_item_id: &'static str,
+        default_price_k: u32,
+        default_carry: PropKind,
+    },
+    Sit {
+        seat_yaw: f32,
+        is_stool: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StreetShopSpot {
+    pub chain: &'static str,
+    pub shop_name: &'static str,
+    pub pos: Vec2,
+    pub kind: ShopSpotKind,
+}
+
+fn chain_catalog(
+    chain: &str,
+) -> (&'static str, (&'static str, u32, PropKind), (&'static str, u32, PropKind), bool) {
+    match chain {
+        "cong" => ("Cộng Cà Phê", ("cotDuaCaPhe", 55, PropKind::Coffee), ("suaChuaCaPhe", 45, PropKind::Coffee), true),
+        "highlands" => ("Highlands Coffee", ("phinSuaDa", 29, PropKind::Coffee), ("freezeTraXanh", 55, PropKind::Boba), true),
+        "phuclong" => ("Phúc Long", ("traSuaPhucLong", 45, PropKind::Boba), ("traDao", 45, PropKind::Cup), true),
+        "mixue" => ("Mixue", ("cone", 10, PropKind::IceCream), ("bubbleTea", 25, PropKind::Boba), true),
+        "tgdd" => ("Thế Giới Di Động", ("phoneCase", 90, PropKind::CarrierBag), ("charger", 150, PropKind::CarrierBag), false),
+        "dmx" => ("Điện Máy Xanh", ("kettle", 290, PropKind::CarrierBag), ("batteries", 35, PropKind::CarrierBag), false),
+        "katinat" => ("Katinat", ("oolongNuong", 55, PropKind::Boba), ("boGiaDuaNon", 60, PropKind::Boba), true),
+        "longchau" => ("Long Châu", ("panadol", 22, PropKind::CarrierBag), ("hapacol", 18, PropKind::CarrierBag), false),
+        "bhx" => ("Bách Hóa Xanh", ("eggs", 30, PropKind::GroceryBag), ("meat", 65, PropKind::GroceryBag), false),
+        "winmart" => ("WinMart+", ("milk", 32, PropKind::GroceryBag), ("veg", 12, PropKind::GroceryBag), false),
+        "gs25" => ("GS25", ("bananaMilk", 28, PropKind::Cup), ("tok", 35, PropKind::Tokbokki), true),
+        "seven" => ("7-Eleven", ("onigiri", 17, PropKind::Onigiri), ("bun", 19, PropKind::BanhBao), true),
+        _ => ("Circle K", ("peachTea", 20, PropKind::Cup), ("noodle", 12, PropKind::Noodle), true),
+    }
+}
+
+/// Builds exact walkable room cutouts and interactive Take/Pay/Sit spots for all walk-in shops.
+pub fn build_shop_nav_zones_and_spots(
+    shop_fronts: &[ShopFront],
+    city: &str,
+) -> (Vec<WalkInRoomBounds>, Vec<StreetShopSpot>) {
+    let (set, walk_in_count) = city_shop_set(city);
+    let mut rooms = Vec::new();
+    let mut spots = Vec::new();
+
+    for (idx, front) in shop_fronts.iter().enumerate() {
+        if idx >= walk_in_count || idx >= set.len() {
+            break;
+        }
+        let chain = set[idx];
+        let f = ShopFrame::from_front(front);
+        let depth = shop_depth(front.deep);
+        let hw = SHOP_W * 0.5 - 0.35;
+
+        // Compute world AABB of the interior walkable room and open doorway corridor
+        let p_a = f.pt(-hw, 0.0, -depth + 0.55);
+        let p_b = f.pt(hw, 0.0, -0.15);
+        let room_min = Vec2::new(p_a.x.min(p_b.x), p_a.z.min(p_b.z));
+        let room_max = Vec2::new(p_a.x.max(p_b.x), p_a.z.max(p_b.z));
+
+        let d_a = f.pt(-DOOR_HALF, 0.0, -0.65);
+        let d_b = f.pt(DOOR_HALF, 0.0, 0.85);
+        let door_min = Vec2::new(d_a.x.min(d_b.x), d_a.z.min(d_b.z));
+        let door_max = Vec2::new(d_a.x.max(d_b.x), d_a.z.max(d_b.z));
+
+        rooms.push(WalkInRoomBounds {
+            chain,
+            room_min,
+            room_max,
+            door_min,
+            door_max,
+        });
+
+        let (shop_name, item_a, item_b, has_seats) = chain_catalog(chain);
+        // Take item spot (fridge / shelf / display)
+        let take_w = f.pt(0.65, 0.0, -depth * 0.62);
+        spots.push(StreetShopSpot {
+            chain,
+            shop_name,
+            pos: Vec2::new(take_w.x, take_w.z),
+            kind: ShopSpotKind::Take {
+                item_id: item_a.0,
+                price_k: item_a.1,
+                carry: item_a.2,
+            },
+        });
+        // Pay / order counter spot
+        let pay_w = f.pt(-1.15, 0.0, -depth * 0.55);
+        spots.push(StreetShopSpot {
+            chain,
+            shop_name,
+            pos: Vec2::new(pay_w.x, pay_w.z),
+            kind: ShopSpotKind::Pay {
+                default_item_id: item_b.0,
+                default_price_k: item_b.1,
+                default_carry: item_b.2,
+            },
+        });
+        // Window counter / low stool seat spot
+        if has_seats {
+            let sit_w = f.pt(1.65, 0.0, -1.25);
+            spots.push(StreetShopSpot {
+                chain,
+                shop_name,
+                pos: Vec2::new(sit_w.x, sit_w.z),
+                kind: ShopSpotKind::Sit {
+                    seat_yaw: f.yaw,
+                    is_stool: chain == "cong",
+                },
+            });
+        }
+    }
+
+    (rooms, spots)
+}
 
 const FL: f32 = 0.12;
 const SIGN_H: f32 = 0.86;

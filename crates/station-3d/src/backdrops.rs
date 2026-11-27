@@ -369,6 +369,7 @@ pub fn unload_backdrop(
     for ent in q.iter() {
         commands.entity(ent).try_despawn();
     }
+    commands.remove_resource::<crate::street::CityStreetNav>();
     backdrop_assets.purge(meshes, materials, images);
 }
 
