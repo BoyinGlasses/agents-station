@@ -387,6 +387,475 @@ pub fn draw_shop_cell(
     c.into_surface()
 }
 
+/// Simple deterministic LCG matching Oracle procedural texture seeding.
+fn lcg_next(seed: &mut u32) -> f32 {
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+    ((*seed >> 8) as f32) / ((1u32 << 24) as f32)
+}
+
+/// Exact Oracle `city.js:22-28` grainy 256×256 repeating asphalt texture (multiplied by day/night tint).
+pub fn draw_asphalt_tile() -> RgbaSurface {
+    let mut c = Canvas2d::new(256, 256);
+    c.fill(hex("#E4E4E4"));
+    let mut seed = 2026_1026u32;
+    for _ in 0..4_500 {
+        let v = 180 + (lcg_next(&mut seed) * 75.0) as u8;
+        let x = lcg_next(&mut seed) * 255.0;
+        let y = lcg_next(&mut seed) * 255.0;
+        let s = 1.0 + lcg_next(&mut seed) * 1.5;
+        c.fill_rect(x, y, s, s, [v, v, v, 255]);
+    }
+    for _ in 0..5 {
+        let cx = lcg_next(&mut seed) * 256.0;
+        let cy = lcg_next(&mut seed) * 256.0;
+        let rx = 18.0 + lcg_next(&mut seed) * 36.0;
+        let ry = 10.0 + lcg_next(&mut seed) * 22.0;
+        c.fill_ellipse(cx, cy, rx, ry, [0, 0, 0, 18]);
+    }
+    for _ in 0..4 {
+        let mut x = lcg_next(&mut seed) * 256.0;
+        let mut y = lcg_next(&mut seed) * 256.0;
+        for _ in 0..6 {
+            let nx = x + (lcg_next(&mut seed) - 0.5) * 30.0;
+            let ny = y + (lcg_next(&mut seed) - 0.5) * 30.0;
+            c.stroke_line(x, y, nx, ny, 1.0, [0, 0, 0, 46]);
+            x = nx;
+            y = ny;
+        }
+    }
+    c.into_surface()
+}
+
+struct FacadeStyle {
+    win: [f32; 4],
+    glass_top: &'static str,
+    glass_bot: &'static str,
+    wall: &'static str,
+    frame: Option<&'static str>,
+    strips: bool,
+    brick: bool,
+    balcony: bool,
+}
+
+const FACADE_STYLES: [FacadeStyle; 4] = [
+    FacadeStyle {
+        win: [0.05, 0.30, 0.95, 0.95],
+        glass_top: "#B8D3E0",
+        glass_bot: "#2A4458",
+        wall: "#DCE3E8",
+        frame: None,
+        strips: true,
+        brick: false,
+        balcony: false,
+    },
+    FacadeStyle {
+        win: [0.28, 0.33, 0.72, 0.84],
+        glass_top: "#9EB3C4",
+        glass_bot: "#232D38",
+        wall: "#F4F1EB",
+        frame: Some("#FFFFFF"),
+        strips: false,
+        brick: false,
+        balcony: false,
+    },
+    FacadeStyle {
+        win: [0.25, 0.30, 0.75, 0.80],
+        glass_top: "#94A9BA",
+        glass_bot: "#1F252C",
+        wall: "#FFFFFF",
+        frame: Some("#E9E2D6"),
+        strips: false,
+        brick: true,
+        balcony: false,
+    },
+    FacadeStyle {
+        win: [0.12, 0.30, 0.88, 0.88],
+        glass_top: "#AFC6D6",
+        glass_bot: "#263441",
+        wall: "#EFEFEF",
+        frame: None,
+        strips: false,
+        brick: false,
+        balcony: true,
+    },
+];
+
+/// Exact Oracle `city.js:41-60` 64×64 one-floor, one-bay daytime facade module.
+pub fn draw_facade_day_tile(style: usize) -> RgbaSurface {
+    let st = &FACADE_STYLES[style % FACADE_STYLES.len()];
+    let mut c = Canvas2d::new(64, 64);
+    c.fill(hex(st.wall));
+    let [x0, y0, x1, y1] = st.win;
+    let fx = |f: f32| f * 64.0;
+    let fy = |f: f32| (1.0 - f) * 64.0;
+
+    if st.brick {
+        let mut y = 2.0;
+        while y < 64.0 {
+            c.fill_rect(0.0, y, 64.0, 1.0, [0, 0, 0, 20]);
+            y += 5.0;
+        }
+    }
+    if st.strips {
+        c.fill_rect(0.0, fy(0.30), 64.0, fy(0.0) - fy(0.30), [0, 0, 0, 46]);
+    }
+    let wy = fy(y1);
+    let wh = fy(y0) - fy(y1);
+    let wx = fx(x0);
+    let ww = fx(x1) - fx(x0);
+    c.linear_gradient_rect(
+        wx,
+        wy,
+        ww,
+        wh,
+        (0.0, wy),
+        (0.0, wy + wh),
+        &[
+            (0.0, hex(st.glass_top)),
+            (0.45, hex(st.glass_bot)),
+            (1.0, hex(st.glass_bot)),
+        ],
+    );
+    if let Some(frame_hex) = st.frame {
+        let fc = hex(frame_hex);
+        c.stroke_rect(wx, wy, ww, wh, 2.0, fc);
+        c.fill_rect(wx - 2.0, fy(y0), ww + 4.0, 3.0, fc);
+    }
+    if st.strips {
+        c.fill_rect(31.0, wy, 2.0, wh, [255, 255, 255, 90]);
+        c.fill_rect(0.0, wy, 2.0, wh, [255, 255, 255, 90]);
+    }
+    if st.balcony {
+        c.fill_rect(0.0, fy(0.30), 64.0, 4.0, [0, 0, 0, 72]);
+        c.fill_rect(0.0, fy(0.30) - 2.0, 64.0, 2.0, [255, 255, 255, 140]);
+        c.fill_rect(0.0, fy(0.50), 64.0, 2.0, [40, 46, 54, 140]);
+    }
+    c.into_surface()
+}
+
+/// Compact Oracle `city.js:62-80` 256×512 (16×32 bay) night-lit building window emissive atlas.
+pub fn draw_facade_night_atlas(style: usize) -> RgbaSurface {
+    let st = &FACADE_STYLES[style % FACADE_STYLES.len()];
+    let mut c = Canvas2d::new(256, 512);
+    c.fill(hex("#000000"));
+    let [x0, y0, x1, y1] = st.win;
+    let mut seed = 91_731u32.wrapping_add((style as u32).wrapping_mul(17_389));
+    for r in 0..32u32 {
+        let kind = lcg_next(&mut seed);
+        let p = if kind < 0.55 {
+            0.08
+        } else if kind < 0.86 {
+            0.26
+        } else {
+            0.55
+        };
+        let mut run = 0u32;
+        for col in 0..16u32 {
+            let mut on = lcg_next(&mut seed) < p;
+            if st.strips {
+                if run > 0 {
+                    on = true;
+                    run -= 1;
+                } else if on {
+                    run = 1 + (lcg_next(&mut seed) * 4.0) as u32;
+                }
+            }
+            if !on {
+                continue;
+            }
+            let k = lcg_next(&mut seed);
+            let base = if k < 0.68 {
+                hex("#FFD39A")
+            } else if k < 0.84 {
+                hex("#FFF1DA")
+            } else if k < 0.95 {
+                hex("#BCD6FF")
+            } else {
+                hex("#7FA8FF")
+            };
+            let alpha = if k >= 0.95 {
+                0.45
+            } else {
+                0.40 + lcg_next(&mut seed) * 0.50
+            };
+            let lit = [
+                (base[0] as f32 * alpha) as u8,
+                (base[1] as f32 * alpha) as u8,
+                (base[2] as f32 * alpha) as u8,
+                255,
+            ];
+            let cx = (col * 16) as f32;
+            let cy = ((31 - r) * 16) as f32;
+            c.fill_rect(
+                cx + x0 * 16.0,
+                cy + (1.0 - y1) * 16.0,
+                (x1 - x0) * 16.0,
+                (y1 - y0) * 16.0,
+                lit,
+            );
+        }
+    }
+    c.into_surface()
+}
+
+/// Exact Oracle `city.js:88-99` 512×64 strip of 8 glowing ground-floor neighborhood shop fronts.
+pub fn draw_generic_shop_strip() -> RgbaSurface {
+    let mut c = Canvas2d::new(512, 64);
+    let signs = [
+        "#FF5D73", "#3DDC84", "#F2B544", "#4FC3F7", "#B388FF", "#FF8A3D", "#E0E0E0", "#64FFDA",
+    ];
+    for (i, sign_hex) in signs.iter().enumerate() {
+        let x = (i * 64) as f32;
+        c.fill_rect(x, 0.0, 64.0, 64.0, hex("#1C2026"));
+        c.linear_gradient_rect(
+            x + 4.0,
+            23.0,
+            56.0,
+            41.0,
+            (0.0, 22.0),
+            (0.0, 64.0),
+            &[(0.0, hex("#FFE7B8")), (1.0, hex("#C98E4A"))],
+        );
+        for k in 1..4 {
+            c.fill_rect(x + 4.0 + k as f32 * 14.0, 23.0, 1.5, 41.0, [0, 0, 0, 90]);
+        }
+        c.fill_rect(x + 7.0, 5.0, 50.0, 12.0, hex(sign_hex));
+        c.fill_rect(x + 13.0, 9.5, 38.0, 3.0, [255, 255, 255, 215]);
+    }
+    c.into_surface()
+}
+
+/// Soft warm amber 64×64 radial streetlamp ground pool texture (`city.js:305`).
+pub fn draw_lamp_pool_tex() -> RgbaSurface {
+    let mut rgba = vec![0u8; 64 * 64 * 4];
+    for y in 0..64 {
+        for x in 0..64 {
+            let dx = (x as f32 + 0.5 - 32.0) / 31.5;
+            let dy = (y as f32 + 0.5 - 32.0) / 31.5;
+            let r = (dx * dx + dy * dy).sqrt().min(1.0);
+            let falloff = (1.0 - r).powf(2.2);
+            let idx = (y * 64 + x) * 4;
+            rgba[idx] = 255;
+            rgba[idx + 1] = 190;
+            rgba[idx + 2] = 110;
+            rgba[idx + 3] = (falloff * 115.0).round() as u8;
+        }
+    }
+    RgbaSurface {
+        width: 64,
+        height: 64,
+        rgba,
+    }
+}
+
+/// Exact Oracle `eat-com.js:37-107` 1024×512 *Quán cơm bình dân* + Friday *Bún đậu mắm tôm* atlas:
+/// - Sign `[0, 0, 512, 160]`
+/// - Weekday Menu `[512, 0, 256, 256]`
+/// - Friday Bún Đậu Board `[768, 0, 256, 256]`
+/// - 8 Dish Trays `[k*128, 256, 128, 96]` for `k = 0..8`
+pub fn draw_com_binh_dan_atlas(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(1024, 512);
+    c.fill([0, 0, 0, 0]);
+
+    // Sign [0, 0, 512, 160]
+    c.fill_rect(0.0, 0.0, 512.0, 160.0, hex("#F7D23E"));
+    c.stroke_rect(6.0, 6.0, 500.0, 148.0, 10.0, hex("#C8102E"));
+    fonts.draw_text(&mut c, "CƠM BÌNH DÂN", 256.0, 32.0, 54.0, hex("#C8102E"), TextAlign::Center, Some(470.0), true, false);
+    fonts.draw_text(&mut c, "Cơm văn phòng · 35K · Trà đá free", 256.0, 108.0, 24.0, hex("#1E3A8A"), TextAlign::Center, Some(470.0), true, false);
+
+    // Weekday menu [512, 0, 256, 256]
+    c.fill_rect(512.0, 0.0, 256.0, 256.0, hex("#F7F7F2"));
+    c.stroke_rect(516.0, 4.0, 248.0, 248.0, 8.0, hex("#2B2F36"));
+    fonts.draw_text(&mut c, "HÔM NAY CÓ", 640.0, 18.0, 22.0, hex("#C8102E"), TextAlign::Center, Some(228.0), true, false);
+    let dishes = [
+        ("• Thịt kho trứng", "#1E3A8A"),
+        ("• Cá kho tộ", "#1E3A8A"),
+        ("• Gà chiên mắm", "#1E3A8A"),
+        ("• Khổ qua dồn thịt", "#1E3A8A"),
+        ("• Canh chua cá", "#1E8A3A"),
+        ("• Rau muống xào", "#1E8A3A"),
+    ];
+    for (i, (label, col)) in dishes.iter().enumerate() {
+        fonts.draw_text(&mut c, label, 528.0, 54.0 + i as f32 * 27.0, 17.0, hex(col), TextAlign::Left, Some(224.0), true, false);
+    }
+    fonts.draw_text(&mut c, "35K / phần", 640.0, 220.0, 24.0, hex("#C8102E"), TextAlign::Center, Some(228.0), true, false);
+
+    // Friday Bún đậu board [768, 0, 256, 256]
+    c.fill_rect(768.0, 0.0, 256.0, 256.0, hex("#F7F7F2"));
+    c.stroke_rect(772.0, 4.0, 248.0, 248.0, 8.0, hex("#2B2F36"));
+    fonts.draw_text(&mut c, "THỨ 6", 896.0, 18.0, 28.0, hex("#7A3A8A"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "BÚN ĐẬU", 896.0, 64.0, 28.0, hex("#C8102E"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "MẮM TÔM", 896.0, 100.0, 28.0, hex("#C8102E"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "Mẹt thường 45K", 896.0, 152.0, 18.0, hex("#1E3A8A"), TextAlign::Center, Some(228.0), true, false);
+    fonts.draw_text(&mut c, "Mẹt đầy đủ 65K", 896.0, 180.0, 18.0, hex("#1E3A8A"), TextAlign::Center, Some(228.0), true, false);
+    fonts.draw_text(&mut c, "chả cốm · thịt luộc · đậu rán", 896.0, 214.0, 13.0, hex("#1E3A8A"), TextAlign::Center, Some(228.0), false, false);
+
+    // 8 Dish trays [k*128, 256, 128, 96]
+    let tray_bg = [
+        "#783C16", "#642E0E", "#356B24", "#C94A24", "#A46418", "#E0B43A", "#DC7828", "#A89868",
+    ];
+    for k in 0..8usize {
+        let x = (k * 128) as f32;
+        let y = 256.0;
+        c.fill_rect(x, y, 128.0, 96.0, hex(tray_bg[k]));
+        let mut s = (k as u32 + 3) * 9301 + 49297;
+        match k {
+            0 => {
+                // Thịt kho trứng
+                for i in 0..6 {
+                    let px = x + 16.0 + lcg_next(&mut s) * 92.0;
+                    let py = y + 14.0 + lcg_next(&mut s) * 66.0;
+                    c.fill_rect(px - 10.0, py - 7.0, 20.0, 14.0, hex("#6B3416"));
+                    c.fill_rect(px - 10.0, py - 2.0, 20.0, 4.0, hex("#E8C9A0"));
+                    if i < 4 {
+                        c.fill_ellipse(x + 22.0 + i as f32 * 26.0, y + 48.0, 11.0, 8.5, hex("#D9B98A"));
+                    }
+                }
+            }
+            1 => {
+                // Cá kho tộ
+                for i in 0..5 {
+                    let px = x + 22.0 + (i % 3) as f32 * 38.0;
+                    let py = y + 26.0 + (i / 3) as f32 * 40.0;
+                    c.fill_ellipse(px, py, 16.0, 12.0, hex("#4A2A1A"));
+                    c.fill_ellipse(px, py, 12.0, 8.5, hex("#B88A5A"));
+                }
+                for _ in 0..14 {
+                    c.fill_rect(x + lcg_next(&mut s) * 120.0, y + lcg_next(&mut s) * 90.0, 5.0, 3.0, hex("#5FA83A"));
+                }
+            }
+            2 => {
+                // Rau muống xào tỏi
+                for i in 0..24 {
+                    let px = x + lcg_next(&mut s) * 105.0;
+                    let py = y + lcg_next(&mut s) * 80.0;
+                    let col = if i % 3 == 0 { hex("#9BCB5A") } else { hex("#4F9A34") };
+                    c.stroke_line(px, py, px + 22.0, py + 10.0, 3.0, col);
+                }
+                for _ in 0..14 {
+                    c.fill_rect(x + lcg_next(&mut s) * 120.0, y + lcg_next(&mut s) * 90.0, 4.0, 4.0, hex("#F2E2A0"));
+                }
+            }
+            3 => {
+                // Đậu hũ sốt cà chua
+                for i in 0..8 {
+                    let px = x + 18.0 + (i % 4) as f32 * 28.0;
+                    let py = y + 20.0 + (i / 4) as f32 * 34.0;
+                    c.fill_rect(px - 10.0, py - 8.0, 20.0, 16.0, hex("#E9C46A"));
+                    c.fill_rect(px - 10.0, py + 2.0, 20.0, 6.0, [200, 60, 20, 120]);
+                }
+            }
+            4 => {
+                // Gà chiên nước mắm
+                for _ in 0..7 {
+                    let px = x + 18.0 + lcg_next(&mut s) * 92.0;
+                    let py = y + 18.0 + lcg_next(&mut s) * 60.0;
+                    c.fill_ellipse(px, py, 14.0, 10.0, hex("#C98A2A"));
+                    c.fill_ellipse(px - 3.0, py - 2.0, 7.0, 4.5, hex("#E8B04A"));
+                }
+            }
+            5 => {
+                // Trứng chiên
+                for i in 0..4 {
+                    let px = x + 8.0 + (i % 2) as f32 * 56.0;
+                    let py = y + 8.0 + (i / 2) as f32 * 42.0;
+                    c.round_rect(px, py, 50.0, 36.0, 7.0, hex("#F2CF4A"));
+                    c.stroke_round_rect(px, py, 50.0, 36.0, 7.0, 2.5, hex("#B87A1A"));
+                    c.fill_rect(px + 14.0, py + 14.0, 5.0, 3.0, hex("#5FA83A"));
+                }
+            }
+            6 => {
+                // Canh chua
+                c.fill_rect(x, y, 128.0, 96.0, hex("#B9C0C8"));
+                c.fill_circle(x + 64.0, y + 48.0, 44.0, hex("#E07A2A"));
+                for _ in 0..6 {
+                    let px = x + 36.0 + lcg_next(&mut s) * 56.0;
+                    let py = y + 20.0 + lcg_next(&mut s) * 56.0;
+                    c.fill_rect(px, py, 9.0, 7.0, hex("#F2D04A"));
+                    c.fill_circle(px + 6.0, py + 6.0, 5.0, hex("#D8262E"));
+                }
+            }
+            _ => {
+                // Khổ qua dồn thịt
+                for i in 0..6 {
+                    let px = x + 22.0 + (i % 3) as f32 * 40.0;
+                    let py = y + 28.0 + (i / 3) as f32 * 40.0;
+                    c.fill_circle(px, py, 16.0, hex("#6FA03A"));
+                    c.fill_circle(px, py, 11.0, hex("#A8C878"));
+                    c.fill_circle(px, py, 8.0, hex("#C89A7A"));
+                }
+            }
+        }
+        c.fill_rect(x, y, 128.0, 28.0, [255, 255, 255, 18]);
+    }
+
+    c.into_surface()
+}
+
+/// Shared 512×512 packed street-life signs atlas (1 MB GPU vs 8 separate textures):
+/// - `XÔI · BÁNH CUỐN` `[0, 0, 256, 128]`
+/// - `VÁ XE · SỬA XE` `[256, 0, 256, 128]`
+/// - `QUÁN NHẬU · BIA HƠI` `[0, 128, 256, 128]`
+/// - `LỄ VU QUY · 囍` `[256, 128, 256, 128]`
+/// - `CSGT · KIỂM TRA` `[0, 256, 256, 128]`
+/// - `CẤP CỨU 115` `[256, 256, 256, 128]`
+/// - `CỨU HỎA 114` `[0, 384, 256, 128]`
+/// - `TRÀ ĐÁ · CỜ TƯỚNG` `[256, 384, 256, 128]`
+pub fn draw_street_signs_atlas(fonts: &mut FontEngine) -> RgbaSurface {
+    let mut c = Canvas2d::new(512, 512);
+    c.fill([0, 0, 0, 0]);
+
+    // [0, 0, 256, 128] Xôi · Bánh cuốn
+    c.fill_rect(0.0, 0.0, 256.0, 128.0, hex("#E9D7B0"));
+    c.stroke_rect(4.0, 4.0, 248.0, 120.0, 4.0, hex("#B5122B"));
+    fonts.draw_text(&mut c, "XÔI", 128.0, 20.0, 36.0, hex("#B5122B"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "BÁNH CUỐN", 128.0, 68.0, 34.0, hex("#B5122B"), TextAlign::Center, Some(236.0), true, false);
+
+    // [256, 0, 256, 128] Vá xe
+    c.fill_rect(256.0, 0.0, 256.0, 128.0, hex("#F7D23E"));
+    c.stroke_rect(260.0, 4.0, 248.0, 120.0, 6.0, hex("#1E2125"));
+    fonts.draw_text(&mut c, "VÁ XE", 384.0, 22.0, 44.0, hex("#C8102E"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "BƠM HƠI · SỬA XE", 384.0, 78.0, 20.0, hex("#1E2125"), TextAlign::Center, Some(236.0), true, false);
+
+    // [0, 128, 256, 128] Quán nhậu
+    c.fill_rect(0.0, 128.0, 256.0, 128.0, hex("#1F4FA0"));
+    c.stroke_rect(4.0, 132.0, 248.0, 120.0, 5.0, hex("#FFD400"));
+    fonts.draw_text(&mut c, "QUÁN NHẬU", 128.0, 148.0, 34.0, hex("#FFD400"), TextAlign::Center, Some(236.0), true, false);
+    fonts.draw_text(&mut c, "BIA HƠI · ỐC · LẨU", 128.0, 198.0, 20.0, hex("#FFFFFF"), TextAlign::Center, Some(236.0), true, false);
+
+    // [256, 128, 256, 128] Lễ Vu Quy
+    c.fill_rect(256.0, 128.0, 256.0, 128.0, hex("#C8102E"));
+    c.stroke_rect(262.0, 134.0, 244.0, 116.0, 5.0, hex("#F7D23E"));
+    fonts.draw_text(&mut c, "LỄ VU QUY", 384.0, 152.0, 34.0, hex("#FFF2A8"), TextAlign::Center, Some(232.0), true, false);
+    fonts.draw_text(&mut c, "TRĂM NĂM HẠNH PHÚC", 384.0, 202.0, 18.0, hex("#FFFFFF"), TextAlign::Center, Some(232.0), true, false);
+
+    // [0, 256, 256, 128] CSGT
+    c.fill_rect(0.0, 256.0, 256.0, 128.0, hex("#1C4FA6"));
+    c.stroke_rect(6.0, 262.0, 244.0, 116.0, 6.0, hex("#FFFFFF"));
+    fonts.draw_text(&mut c, "C.S.G.T", 128.0, 274.0, 38.0, hex("#FFD400"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "CHỐT KIỂM TRA", 128.0, 326.0, 22.0, hex("#FFFFFF"), TextAlign::Center, Some(230.0), true, false);
+
+    // [256, 256, 256, 128] Cấp cứu 115
+    c.fill_rect(256.0, 256.0, 256.0, 128.0, hex("#FFFFFF"));
+    c.fill_rect(256.0, 256.0, 256.0, 16.0, hex("#C8102E"));
+    c.fill_rect(256.0, 368.0, 256.0, 16.0, hex("#C8102E"));
+    fonts.draw_text(&mut c, "CẤP CỨU", 384.0, 278.0, 26.0, hex("#C8102E"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "115", 384.0, 310.0, 48.0, hex("#C8102E"), TextAlign::Center, None, true, false);
+
+    // [0, 384, 256, 128] Cứu hỏa 114
+    c.fill_rect(0.0, 384.0, 256.0, 128.0, hex("#C8102E"));
+    fonts.draw_text(&mut c, "CỨU HỎA", 128.0, 404.0, 26.0, hex("#FFFFFF"), TextAlign::Center, None, true, false);
+    fonts.draw_text(&mut c, "114", 128.0, 438.0, 48.0, hex("#FFD400"), TextAlign::Center, None, true, false);
+
+    // [256, 384, 256, 128] Trà đá · Cờ tướng
+    c.fill_rect(256.0, 384.0, 256.0, 128.0, hex("#2A7A42"));
+    c.stroke_rect(262.0, 390.0, 244.0, 116.0, 4.0, hex("#FFF2A8"));
+    fonts.draw_text(&mut c, "TRÀ ĐÁ · HƯỚNG DƯƠNG", 384.0, 412.0, 18.0, hex("#FFF2A8"), TextAlign::Center, Some(232.0), true, false);
+    fonts.draw_text(&mut c, "5K · VỈA HÈ", 384.0, 452.0, 26.0, hex("#FFFFFF"), TextAlign::Center, Some(232.0), true, false);
+
+    c.into_surface()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,5 +929,40 @@ mod tests {
         let tr = 4 + code.width() - 7;
         assert!(is_dark(tr + 2, 6), "top-right finder core must be dark");
         assert!(is_dark(6, tr + 2), "bottom-left finder core must be dark");
+    }
+
+    #[test]
+    fn city_facade_asphalt_com_and_street_signs_atlases_render_valid_pixels() {
+        let mut fonts = FontEngine::from_assets_dir(&assets());
+
+        let asphalt = draw_asphalt_tile();
+        assert_eq!((asphalt.width, asphalt.height), (256, 256));
+        assert!(asphalt.non_background_ratio(hex("#E4E4E4")) > 0.05);
+
+        for style in 0..4 {
+            let day = draw_facade_day_tile(style);
+            assert_eq!((day.width, day.height), (64, 64));
+            assert!(day.non_background_ratio(hex("#000000")) > 0.5);
+
+            let night = draw_facade_night_atlas(style);
+            assert_eq!((night.width, night.height), (256, 512));
+            assert!(night.non_background_ratio(hex("#000000")) > 0.01);
+        }
+
+        let strip = draw_generic_shop_strip();
+        assert_eq!((strip.width, strip.height), (512, 64));
+        assert!(strip.non_background_ratio(hex("#1C2026")) > 0.3);
+
+        let pool = draw_lamp_pool_tex();
+        assert_eq!((pool.width, pool.height), (64, 64));
+        assert!(pool.rgba[(32 * 64 + 32) * 4 + 3] > 60);
+
+        let com = draw_com_binh_dan_atlas(&mut fonts);
+        assert_eq!((com.width, com.height), (1024, 512));
+        assert!(com.non_background_ratio([0, 0, 0, 0]) > 0.45);
+
+        let signs = draw_street_signs_atlas(&mut fonts);
+        assert_eq!((signs.width, signs.height), (512, 512));
+        assert!(signs.non_background_ratio([0, 0, 0, 0]) > 0.5);
     }
 }
