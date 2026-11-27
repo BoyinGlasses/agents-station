@@ -44,6 +44,25 @@ fn spawn_lite_2d_camera(mut commands: Commands) {
     station_3d::camera::spawn_lite_2d_camera(&mut commands);
 }
 
+/// Frames `--capture-scene pro-country` and `--capture-scene pro-beach` wide enough to showcase
+/// both the Pro office and the surrounding 1:1 exterior landmarks (river/bridge/gate/buffalo/kites
+/// or curved shoreline/surf waves/palms/basket boats/fishing boats/huts/lighthouse).
+fn frame_scenic_backdrop_camera(
+    mut rig: Option<ResMut<station_3d::camera::CameraRig>>,
+    mut cam_q: Query<(&mut Transform, &mut Projection), With<station_3d::camera::MainOfficeCamera>>,
+) {
+    let Some(rig) = rig.as_deref_mut() else {
+        return;
+    };
+    rig.target = Vec3::new(-7.0, 0.4, -10.0);
+    rig.viewport_height = 54.0;
+    rig.max_height = 72.0;
+    if let Ok((mut tf, mut proj)) = cam_q.single_mut() {
+        *tf = rig.compute_transform();
+        *proj = rig.projection();
+    }
+}
+
 /// Frames the `--capture-scene street-shops` camera directly onto the nearest walk-in Vietnamese
 /// shop row, sidewalk props, and street traffic from an unobstructed 3/4 street angle.
 fn frame_street_shops_camera(
@@ -287,6 +306,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 assets_dir: assets_dir.clone(),
                 night: false,
             })
+            .add_systems(PostStartup, frame_scenic_backdrop_camera)
             .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some("pro-beach") => {
@@ -296,6 +316,7 @@ fn build_gui_app(cli: &cli::Cli) -> App {
                 assets_dir: assets_dir.clone(),
                 night: false,
             })
+            .add_systems(PostStartup, frame_scenic_backdrop_camera)
             .add_plugins(station_ui::SmokeHudPlugin { assets_dir });
         }
         Some("pro-night") => {

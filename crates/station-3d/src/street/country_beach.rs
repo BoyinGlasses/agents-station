@@ -217,21 +217,21 @@ fn draw_water_tex(base_hex: &str, ripple_hex: &str, seed: u32) -> RgbaSurface {
     let (rr, rg, rb) = parse_hex_rgb(ripple_hex);
     c.fill([br, bg, bb, 255]);
     let mut rng = CityRng::new(seed);
-    for _ in 0..48 {
+    for _ in 0..42 {
         let x0 = rng.range(0.0, 256.0);
         let y0 = rng.range(0.0, 256.0);
         let w = rng.range(16.0, 42.0);
-        let alpha = (rng.range(0.24, 0.68) * 255.0) as u8;
+        let alpha = (rng.range(0.14, 0.36) * 255.0) as u8;
         let col = [rr, rg, rb, alpha];
         for s in 0..10 {
             let t0 = s as f32 / 10.0;
             let t1 = (s + 1) as f32 / 10.0;
             let px0 = (x0 + t0 * w).rem_euclid(256.0);
             let px1 = (x0 + t1 * w).rem_euclid(256.0);
-            let py0 = y0 - (t0 * PI).sin() * 2.8;
-            let py1 = y0 - (t1 * PI).sin() * 2.8;
+            let py0 = y0 - (t0 * PI).sin() * 2.5;
+            let py1 = y0 - (t1 * PI).sin() * 2.5;
             if (px1 - px0).abs() < 48.0 {
-                c.stroke_line(px0, py0, px1, py1, 1.8, col);
+                c.stroke_line(px0, py0, px1, py1, 1.5, col);
             }
         }
     }
@@ -866,8 +866,9 @@ pub fn spawn_countryside_backdrop(
     }
 
     // 4. Red-tile *Cổng Làng* village gate with arched terracotta roof & Canvas2d signage
+    let (gate_x, gate_z) = sd_to_xz(-19.0, -52.0);
     {
-        let (gx, gz) = sd_to_xz(-19.0, -52.0);
+        let (gx, gz) = (gate_x, gate_z);
         let yaw = FRAC_PI_4;
         let gate_rot = Quat::from_rotation_y(yaw);
         let roof_rot = Quat::from_rotation_y(yaw + FRAC_PI_2);
@@ -1127,7 +1128,11 @@ pub fn spawn_countryside_backdrop(
             let x = vx + a.cos() * r;
             let z = vz + a.sin() * r;
             let yaw = *rng.pick(&[0.0, FRAC_PI_2, FRAC_PI_4, -FRAC_PI_4]) + rng.range(-0.15, 0.15);
-            if !tall_ok(excl, x, z, 8.0) || ((x + z) - river_d(x - z)).abs() < 6.5 {
+            if !tall_ok(excl, x, z, 8.0)
+                || ((x + z) - river_d(x - z)).abs() < 6.5
+                || (x - gate_x).hypot(z - gate_z) < 7.0
+                || dist_to_polyline(x, z, &path_pts) < 4.5
+            {
                 continue;
             }
             let k = rng.next_f32();
@@ -1147,7 +1152,10 @@ pub fn spawn_countryside_backdrop(
             let a = (i as f32 / 9.0) * TAU + rng.range(-0.2, 0.2);
             let x = vx + a.cos() * (vr + 1.5);
             let z = vz + a.sin() * (vr + 1.5);
-            if tall_ok(excl, x, z, 9.0) {
+            if tall_ok(excl, x, z, 9.0)
+                && (x - gate_x).hypot(z - gate_z) > 6.5
+                && dist_to_polyline(x, z, &path_pts) > 4.2
+            {
                 let n = rng.range_i32(6, 11);
                 push_bamboo(&mut rng, &mut solid, &mut greens, x, z, n);
             }
@@ -1159,7 +1167,10 @@ pub fn spawn_countryside_backdrop(
     while rs <= 150.0 {
         let side = if rng.next_f32() < 0.5 { -6.5 } else { 6.5 };
         let (x, z) = sd_to_xz(rs, river_d(rs) + side);
-        if tall_ok(excl, x, z, 9.0) {
+        if tall_ok(excl, x, z, 9.0)
+            && (x - gate_x).hypot(z - gate_z) > 6.5
+            && dist_to_polyline(x, z, &path_pts) > 4.2
+        {
             if rng.next_f32() < 0.5 {
                 let n = rng.range_i32(5, 9);
                 push_bamboo(&mut rng, &mut solid, &mut greens, x, z, n);
@@ -1572,7 +1583,7 @@ pub fn spawn_beach_backdrop(
         StandardMaterial {
             base_color: srgb_hex(if night { "#7C93B8" } else { "#FFFFFF" }),
             base_color_texture: Some(sea_img),
-            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(24.0)),
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(16.0)),
             perceptual_roughness: 0.14,
             metallic: 0.14,
             ..default()
@@ -1694,28 +1705,38 @@ pub fn spawn_beach_backdrop(
     ));
 
     // 5. Beach umbrellas, loungers & colorful round beach towels (`beach.js:39-46`)
+    let push_umbrella = |solid: &mut StreetMeshBuilder, rng: &mut CityRng, x: f32, z: f32| {
+        let umb_c = *rng.pick(&["#E8473F", "#F2B33D", "#3E8EDE", "#2BB3A3", "#F07FA8"]);
+        let towel_c = *rng.pick(&["#3E8EDE", "#F2B33D", "#E8473F"]);
+        solid.push_cyl(Vec3::new(x, GY + 1.25, z), 0.05, 0.05, 2.5, 6, "#EDEDED");
+        // Striped canopy (alternating color & cream cap)
+        solid.push_cyl(Vec3::new(x, GY + 2.48, z), 0.12, 1.50, 0.68, 10, umb_c);
+        solid.push_cyl(Vec3::new(x, GY + 2.84, z), 0.04, 0.26, 0.12, 8, "#FFFFFF");
+        for &k in &[-1.0_f32, 1.0] {
+            solid.push_box_rot(
+                Vec3::new(x + k * 0.9, GY + 0.35, z + 1.4),
+                Vec3::new(0.7, 0.12, 1.9),
+                Quat::from_rotation_x(-0.12),
+                "#F4F1EA",
+            );
+        }
+        solid.push_cyl(Vec3::new(x + 0.4, GY + 0.02, z + 2.4), 0.60, 0.60, 0.03, 12, towel_c);
+    };
     let mut us = -80.0_f32;
     while us <= 80.0 {
         let ud = shore_d(us) + rng.range(6.0, 12.0);
         let (x, z) = sd_to_xz(us, ud);
         if on_sand(x, z, 4.0) && tall_ok(excl, x, z, 3.0) {
-            let umb_c = *rng.pick(&["#E8473F", "#F2B33D", "#3E8EDE", "#2BB3A3", "#F07FA8"]);
-            let towel_c = *rng.pick(&["#3E8EDE", "#F2B33D", "#E8473F"]);
-            solid.push_cyl(Vec3::new(x, GY + 1.25, z), 0.05, 0.05, 2.5, 6, "#EDEDED");
-            // Striped canopy (alternating color & cream cap)
-            solid.push_cyl(Vec3::new(x, GY + 2.48, z), 0.12, 1.50, 0.68, 10, umb_c);
-            solid.push_cyl(Vec3::new(x, GY + 2.84, z), 0.04, 0.26, 0.12, 8, "#FFFFFF");
-            for &k in &[-1.0_f32, 1.0] {
-                solid.push_box_rot(
-                    Vec3::new(x + k * 0.9, GY + 0.35, z + 1.4),
-                    Vec3::new(0.7, 0.12, 1.9),
-                    Quat::from_rotation_x(-0.12),
-                    "#F4F1EA",
-                );
-            }
-            solid.push_cyl(Vec3::new(x + 0.4, GY + 0.02, z + 2.4), 0.60, 0.60, 0.03, 12, towel_c);
+            push_umbrella(&mut solid, &mut rng, x, z);
         }
         us += rng.range(7.0, 11.0);
+    }
+    // Flanking beach lounge umbrellas on open sand beside the terrace (clear of office/terrace)
+    for &(fs, fd) in &[(-24.0_f32, 8.0_f32), (28.0, 2.0), (26.0, 14.0), (-18.0, 22.0)] {
+        let (x, z) = sd_to_xz(fs, fd);
+        if on_sand(x, z, 4.0) && !near_office(excl, x, z, 3.2) {
+            push_umbrella(&mut solid, &mut rng, x, z);
+        }
     }
 
     // 6. *Thuyền thúng* round woven Vietnamese basket boats on wet sand & shallows (`beach.js:48-54`)
