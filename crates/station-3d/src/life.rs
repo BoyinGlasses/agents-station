@@ -182,18 +182,6 @@ pub fn spawn_life_elements(
     life_systems::spawn_all_life_systems(commands, pal, materials, images, fonts, spec, life);
 }
 
-pub fn update_rain_system(time: Res<Time>, mut q: Query<(&RainDrop, &mut Transform)>) {
-    let dt = time.delta_secs();
-    for (r, mut tf) in &mut q {
-        tf.translation.y -= r.speed * dt;
-        if tf.translation.y < -0.5 {
-            tf.translation.y = 14.0;
-            tf.translation.x = r.x;
-            tf.translation.z = r.z;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
