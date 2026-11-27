@@ -9783,9 +9783,10 @@ fn process_ui_actions(
             );
         }
         PendingWorldOp::SwapBackdrop(bk) => {
-            if let (Some(p), Some(ba), Some(mats), Some(imgs), Some(shared_fonts)) = (
+            if let (Some(p), Some(ba), Some(meshes), Some(mats), Some(imgs), Some(shared_fonts)) = (
                 world_params.pal.as_deref_mut(),
                 world_params.backdrop_assets.as_deref_mut(),
+                world_params.meshes.as_deref_mut(),
                 world_params.materials.as_deref_mut(),
                 world_params.images.as_deref_mut(),
                 world_params.shared_fonts.as_deref_mut(),
@@ -9794,6 +9795,7 @@ fn process_ui_actions(
                     &mut commands,
                     &world_params.backdrop_q,
                     ba,
+                    meshes,
                     mats,
                     imgs,
                 );
@@ -9803,6 +9805,7 @@ fn process_ui_actions(
                 station_3d::backdrops::spawn_backdrop(
                     &mut commands,
                     p,
+                    meshes,
                     mats,
                     imgs,
                     ba,

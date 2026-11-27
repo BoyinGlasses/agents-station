@@ -272,6 +272,7 @@ pub fn spawn_full_office_world_with_life(
     backdrops::spawn_backdrop(
         commands,
         &mut pal,
+        meshes,
         materials,
         images,
         &mut backdrop_assets,
@@ -317,7 +318,7 @@ pub fn unload_full_office_world(
         p.purge_all(meshes, materials, images);
     }
     if let Some(ba) = backdrop_assets {
-        ba.purge(materials, images);
+        ba.purge(meshes, materials, images);
     }
     if let Some(env_ibl) = ibl {
         env_ibl.purge(images);

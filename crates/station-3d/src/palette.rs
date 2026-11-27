@@ -2,6 +2,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::Affine2;
 use bevy::prelude::*;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use station_canvas2d::RgbaSurface;
 use std::collections::HashMap;
@@ -79,6 +80,47 @@ pub fn upload_gpu_image(images: &mut Assets<Image>, surface: RgbaSurface) -> Han
 }
 
 impl WorldPalette {
+    /// Builds a unit quad in the XY plane (`[-0.5..0.5]` X/Y, normal `+Z`) mapped to the exact
+    /// UV sub-rectangle `[u0..u1] × [v0..v1]` (top-left origin matching `Canvas2d` / wgpu UVs).
+    /// Callers creating backdrop quads MUST register the returned `Handle<Mesh>` in `BackdropAssets`
+    /// (or call `BackdropAssets::uv_rect_quad`) so `SwitchBackdrop` purges it cleanly.
+    pub fn uv_rect_quad(
+        meshes: &mut Assets<Mesh>,
+        u0: f32,
+        v0: f32,
+        u1: f32,
+        v1: f32,
+    ) -> Handle<Mesh> {
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_POSITION,
+            vec![
+                [-0.5, 0.5, 0.0],
+                [0.5, 0.5, 0.0],
+                [0.5, -0.5, 0.0],
+                [-0.5, -0.5, 0.0],
+            ],
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            vec![
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0],
+            ],
+        );
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_UV_0,
+            vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+        );
+        mesh.insert_indices(Indices::U16(vec![0, 3, 2, 0, 2, 1]));
+        meshes.add(mesh)
+    }
+
     pub fn new(meshes: &mut Assets<Mesh>) -> Self {
         Self {
             unit_box: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
@@ -822,4 +864,54 @@ pub fn spawn_torus_rot(
                 .with_scale(scale),
         ))
         .id()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::render::mesh::VertexAttributeValues;
+
+    #[test]
+    fn uv_rect_quad_binds_exact_subrect_uvs_and_plus_z_normals() {
+        let mut meshes = Assets::<Mesh>::default();
+        let h = WorldPalette::uv_rect_quad(&mut meshes, 0.0, 0.0, 0.5, 0.5);
+        let mesh = meshes.get(&h).expect("uv_rect_quad must register mesh");
+
+        let positions = match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            Some(VertexAttributeValues::Float32x3(v)) => v,
+            other => panic!("expected Float32x3 positions, got {other:?}"),
+        };
+        assert_eq!(positions.len(), 4);
+        for p in positions {
+            assert!((p[0].abs() - 0.5).abs() < 1e-5, "X must be +-0.5, got {}", p[0]);
+            assert!((p[1].abs() - 0.5).abs() < 1e-5, "Y must be +-0.5, got {}", p[1]);
+            assert!(p[2].abs() < 1e-5, "Z must be 0.0, got {}", p[2]);
+        }
+
+        let normals = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+            Some(VertexAttributeValues::Float32x3(v)) => v,
+            other => panic!("expected Float32x3 normals, got {other:?}"),
+        };
+        for n in normals {
+            assert!((n[2] - 1.0).abs() < 1e-5, "normal must face +Z, got {n:?}");
+        }
+
+        let uvs = match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+            Some(VertexAttributeValues::Float32x2(v)) => v,
+            other => panic!("expected Float32x2 UVs, got {other:?}"),
+        };
+        assert_eq!(uvs.len(), 4);
+        let (mut min_u, mut max_u) = (f32::INFINITY, f32::NEG_INFINITY);
+        let (mut min_v, mut max_v) = (f32::INFINITY, f32::NEG_INFINITY);
+        for uv in uvs {
+            assert!(uv[0] >= 0.0 - 1e-6 && uv[0] <= 0.5 + 1e-6, "u out of [0..0.5]: {}", uv[0]);
+            assert!(uv[1] >= 0.0 - 1e-6 && uv[1] <= 0.5 + 1e-6, "v out of [0..0.5]: {}", uv[1]);
+            min_u = min_u.min(uv[0]);
+            max_u = max_u.max(uv[0]);
+            min_v = min_v.min(uv[1]);
+            max_v = max_v.max(uv[1]);
+        }
+        assert!((min_u - 0.0).abs() < 1e-5 && (max_u - 0.5).abs() < 1e-5);
+        assert!((min_v - 0.0).abs() < 1e-5 && (max_v - 0.5).abs() < 1e-5);
+    }
 }
