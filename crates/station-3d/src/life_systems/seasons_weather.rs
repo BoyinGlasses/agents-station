@@ -240,7 +240,7 @@ pub fn spawn_seasons_and_weather(
         metal_m.clone(),
         stand_pos + Vec3::new(0.0, 0.50, 0.0),
         Vec3::splat(0.26),
-        Quat::from_rotation_x(FRAC_PI_2),
+        Quat::IDENTITY,
     );
     commands.entity(s1).insert(UmbrellaStandPart);
     commands.entity(s2).insert(UmbrellaStandPart);
@@ -555,7 +555,7 @@ pub fn spawn_seasons_and_weather(
                 commands.entity(b).insert(SeasonDecorPart);
             }
 
-            // Wall wreath (Pro/HQ)
+            // Wall wreath (Pro/HQ): Bevy Torus lies in XZ plane, so rotate X by +FRAC_PI_2 to hang vertically on z = -7.90
             if is_pro {
                 let wreath = spawn_torus_rot(
                     commands,
@@ -563,16 +563,29 @@ pub fn spawn_seasons_and_weather(
                     pine_a,
                     Vec3::new(-2.05, 1.95, -7.90),
                     Vec3::splat(0.44),
-                    Quat::IDENTITY,
+                    Quat::from_rotation_x(FRAC_PI_2),
                 );
                 commands.entity(wreath).insert(SeasonDecorPart);
             }
 
-            // Gentle pooled exterior snowflakes
+            // Gentle pooled exterior snowflakes strictly outside office bounds
             let snow_m = pal.mat_unlit(materials, "#F4F8FF");
             for i in 0..SNOW_POOL_CAP {
-                let sx = -18.0 + hash_f32(701 + i as u32 * 19) * 36.0;
-                let sz = -18.0 + hash_f32(809 + i as u32 * 23) * 36.0;
+                let mut sx = 0.0_f32;
+                let mut sz = 0.0_f32;
+                for attempt in 0..16u32 {
+                    let s = (i as u32) * 19 + attempt * 97 + 701;
+                    let cx = -28.0 + hash_f32(s) * 56.0;
+                    let cz = -28.0 + hash_f32(s + 108) * 56.0;
+                    if !(cx > bx0 && cx < bx1 && cz > bz0 && cz < bz1) {
+                        sx = cx;
+                        sz = cz;
+                        break;
+                    }
+                }
+                if sx > bx0 && sx < bx1 && sz > bz0 && sz < bz1 {
+                    sx = bx0 - 2.0 - (i % 12) as f32;
+                }
                 let sy = 1.0 + hash_f32(907 + i as u32 * 29) * 9.0;
                 commands.spawn((
                     WorldEntity,
@@ -602,7 +615,7 @@ pub fn spawn_seasons_and_weather(
 
             for e in [
                 spawn_cyl(commands, pal, pot_blue, centre + Vec3::new(0.0, 0.24, 0.0), 0.62, 0.48),
-                spawn_torus_rot(commands, pal, pot_rim, centre + Vec3::new(0.0, 0.38, 0.0), Vec3::splat(0.64), Quat::from_rotation_x(FRAC_PI_2)),
+                spawn_torus_rot(commands, pal, pot_rim, centre + Vec3::new(0.0, 0.38, 0.0), Vec3::splat(0.64), Quat::IDENTITY),
                 spawn_cyl(commands, pal, bark.clone(), centre + Vec3::new(0.0, 0.85, 0.0), 0.09, 0.78),
             ] {
                 commands.entity(e).insert(SeasonDecorPart);
@@ -961,5 +974,109 @@ mod tests {
                 assert_eq!(world.resource::<Assets<Image>>().len(), 0);
             }
         }
+    }
+
+    #[test]
+    fn torus_orientations_and_exterior_snowflakes_match_bevy_geometry() {
+        let assets_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        let mut fonts = FontEngine::from_assets_dir(&assets_dir);
+
+        // 1. Umbrella stand rim (horizontal) + Christmas wall wreath (vertical) + exterior snowflakes
+        for layout in [OfficeLayout::Cozy, OfficeLayout::Pro, OfficeLayout::Hq] {
+            let spec = LayoutSpec::for_layout(layout);
+            let mut world = World::new();
+            world.insert_resource(Assets::<Mesh>::default());
+            world.insert_resource(Assets::<StandardMaterial>::default());
+            world.insert_resource(Assets::<Image>::default());
+            let mut life = OfficeLifeState::default();
+            life.season = SeasonTheme::Christmas;
+            let torus_handle = world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+                world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                    world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                        let mut pal = WorldPalette::new(&mut meshes);
+                        let th = pal.unit_torus.clone();
+                        let mut cmds = world.commands();
+                        spawn_seasons_and_weather(&mut cmds, &mut pal, &mut mats, &mut imgs, &mut fonts, &spec, &life);
+                        world.insert_resource(pal);
+                        th
+                    })
+                })
+            });
+            world.flush();
+
+            // Umbrella stand torus rim must lie flat horizontally (normal = +Y)
+            let stand_tori: Vec<Quat> = world
+                .query_filtered::<(&Mesh3d, &Transform), With<UmbrellaStandPart>>()
+                .iter(&world)
+                .filter(|(m, _)| m.0 == torus_handle)
+                .map(|(_, tf)| tf.rotation)
+                .collect();
+            assert_eq!(stand_tori.len(), 1);
+            assert!(
+                (stand_tori[0] * Vec3::Y - Vec3::Y).length() < 1e-4,
+                "umbrella stand rim torus must lie flat in XZ plane (rot * Y == Y)"
+            );
+
+            // Christmas wall wreath (Pro/HQ) must hang vertically on back wall (normal = +Z)
+            if spec.layout.is_pro() {
+                let wreath_tori: Vec<Quat> = world
+                    .query_filtered::<(&Mesh3d, &Transform), With<SeasonDecorPart>>()
+                    .iter(&world)
+                    .filter(|(m, _)| m.0 == torus_handle)
+                    .map(|(_, tf)| tf.rotation)
+                    .collect();
+                assert_eq!(wreath_tori.len(), 1);
+                assert!(
+                    (wreath_tori[0] * Vec3::Y - Vec3::Z).length() < 1e-4,
+                    "Christmas wall wreath torus must hang vertically on back wall (rot * Y == Z)"
+                );
+            }
+
+            // All Christmas snowflakes must stay strictly outside office floor bounds
+            let flakes: Vec<SnowFlake> = world.query::<&SnowFlake>().iter(&world).copied().collect();
+            assert_eq!(flakes.len(), SNOW_POOL_CAP);
+            for sf in flakes {
+                assert!(
+                    !spec.inside(sf.base_x, sf.base_z, -0.2),
+                    "snowflake ({}, {}) in {layout:?} must fall strictly outside office floor",
+                    sf.base_x,
+                    sf.base_z
+                );
+            }
+        }
+
+        // 2. Tết peach blossom pot rim torus must lie flat horizontally (normal = +Y)
+        let spec = LayoutSpec::for_layout(OfficeLayout::Pro);
+        let mut world = World::new();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(Assets::<Image>::default());
+        let mut life = OfficeLifeState::default();
+        life.season = SeasonTheme::Tet;
+        let torus_handle = world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut mats: Mut<Assets<StandardMaterial>>| {
+                world.resource_scope(|world, mut imgs: Mut<Assets<Image>>| {
+                    let mut pal = WorldPalette::new(&mut meshes);
+                    let th = pal.unit_torus.clone();
+                    let mut cmds = world.commands();
+                    spawn_seasons_and_weather(&mut cmds, &mut pal, &mut mats, &mut imgs, &mut fonts, &spec, &life);
+                    world.insert_resource(pal);
+                    th
+                })
+            })
+        });
+        world.flush();
+
+        let tet_tori: Vec<Quat> = world
+            .query_filtered::<(&Mesh3d, &Transform), With<SeasonDecorPart>>()
+            .iter(&world)
+            .filter(|(m, _)| m.0 == torus_handle)
+            .map(|(_, tf)| tf.rotation)
+            .collect();
+        assert_eq!(tet_tori.len(), 1);
+        assert!(
+            (tet_tori[0] * Vec3::Y - Vec3::Y).length() < 1e-4,
+            "Tết pot rim torus must lie flat in XZ plane (rot * Y == Y)"
+        );
     }
 }
